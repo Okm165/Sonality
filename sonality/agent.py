@@ -4,13 +4,20 @@ import json
 import logging
 import time
 from collections.abc import Callable
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from typing import Final
 
 from anthropic import Anthropic, APIError
 
 from . import config
-from .ess import ESSResult, ReasoningType, SourceReliability, classify
+from .ess import (
+    ESSResult,
+    ReasoningType,
+    SourceReliability,
+    classifier_exception_fallback,
+    classify,
+)
 from .memory import EpisodeStore, SpongeState, compute_magnitude, extract_insight, validate_snapshot
 from .prompts import REFLECTION_PROMPT, build_system_prompt
 
@@ -47,17 +54,43 @@ def _extract_text_block(response: object) -> str:
     content = getattr(response, "content", None)
     if not isinstance(content, list):
         return ""
+    fallback = ""
     for block in content:
-        if getattr(block, "type", None) != "text":
+        text = getattr(block, "text", "")
+        if not isinstance(text, str):
             continue
-        text = getattr(block, "text", "")
-        if isinstance(text, str):
+        if getattr(block, "type", None) == "text":
             return text
-    for block in content:
-        text = getattr(block, "text", "")
-        if isinstance(text, str):
-            return text
-    return ""
+        if not fallback:
+            fallback = text
+    return fallback
+
+
+def _to_nonnegative_int(value: object) -> int:
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, int):
+        return max(value, 0)
+    if isinstance(value, float):
+        return max(int(value), 0)
+    return 0
+
+
+def _extract_usage_tokens(response: object) -> tuple[int, int]:
+    usage = getattr(response, "usage", None)
+    input_tokens = _to_nonnegative_int(getattr(usage, "input_tokens", 0))
+    output_tokens = _to_nonnegative_int(getattr(usage, "output_tokens", 0))
+    return input_tokens, output_tokens
+
+
+@dataclass(frozen=True, slots=True)
+class ModelUsage:
+    response_calls: int = 0
+    ess_calls: int = 0
+    response_input_tokens: int = 0
+    response_output_tokens: int = 0
+    ess_input_tokens: int = 0
+    ess_output_tokens: int = 0
 
 
 def _api_call_with_retry[T](fn: Callable[..., T], *args: object, **kwargs: object) -> T:
@@ -95,6 +128,7 @@ class SonalityAgent:
         self.episodes = EpisodeStore(str(config.CHROMADB_DIR))
         self.conversation: list[dict[str, str]] = []
         self.last_ess: ESSResult | None = None
+        self.last_usage = ModelUsage()
         self.previous_snapshot: str | None = None
         log.info(
             "Agent ready: sponge v%d, %d prior interactions, %d beliefs",
@@ -139,12 +173,29 @@ class SonalityAgent:
             system=system_prompt,
             messages=self.conversation,
         )
+        response_input_tokens, response_output_tokens = _extract_usage_tokens(response)
         assistant_msg = _extract_text_block(response)
         if not assistant_msg:
             log.warning("Model response contained no text block; using empty reply")
         self.conversation.append({"role": "assistant", "content": assistant_msg})
 
         self._post_process(user_message, assistant_msg)
+        last_ess = self.last_ess
+        self.last_usage = ModelUsage(
+            response_calls=1,
+            ess_calls=last_ess.attempt_count if last_ess else 0,
+            response_input_tokens=response_input_tokens,
+            response_output_tokens=response_output_tokens,
+            ess_input_tokens=last_ess.input_tokens if last_ess else 0,
+            ess_output_tokens=last_ess.output_tokens if last_ess else 0,
+        )
+        self._log_event(
+            {
+                "event": "model_usage",
+                "interaction": self.sponge.interaction_count,
+                **asdict(self.last_usage),
+            }
+        )
         return assistant_msg
 
     def _truncate_conversation(self) -> None:
@@ -195,15 +246,7 @@ class SonalityAgent:
             return classify(self.client, user_message, self.sponge.snapshot)
         except Exception:
             log.exception("ESS classification failed, using safe defaults")
-            return ESSResult(
-                score=0.0,
-                reasoning_type=ReasoningType.NO_ARGUMENT,
-                source_reliability=SourceReliability.NOT_APPLICABLE,
-                internal_consistency=True,
-                novelty=0.0,
-                topics=(),
-                summary=user_message[:120],
-            )
+            return classifier_exception_fallback(user_message)
 
     def _store_episode(self, user_message: str, agent_response: str, ess: ESSResult) -> None:
         try:
@@ -706,12 +749,18 @@ class SonalityAgent:
 
     def _log_event(self, event: dict[str, object]) -> None:
         """Append event to JSONL audit trail for personality evolution tracking."""
-        log_path = config.DATA_DIR / "ess_log.jsonl"
+        log_path = config.ESS_AUDIT_LOG_FILE
         try:
             log_path.parent.mkdir(parents=True, exist_ok=True)
-            event["ts"] = datetime.now(UTC).isoformat()
-            with open(log_path, "a") as f:
-                f.write(json.dumps(event, default=str) + "\n")
+            payload: dict[str, object] = {
+                "schema": "ess-audit-v2",
+                "model": config.MODEL,
+                "ess_model": config.ESS_MODEL,
+                **event,
+                "ts": datetime.now(UTC).isoformat(),
+            }
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(payload, default=str) + "\n")
         except Exception:
             log.debug("JSONL logging failed", exc_info=True)
 
@@ -761,6 +810,8 @@ class SonalityAgent:
                 "topics": ess.topics,
                 "source": ess.source_reliability,
                 "defaults": ess.used_defaults,
+                "defaulted_fields": list(ess.defaulted_fields),
+                "default_severity": ess.default_severity,
                 "pending_insights": len(self.sponge.pending_insights),
                 "staged_updates": len(self.sponge.staged_opinion_updates),
                 "msg_preview": user_message[:80],

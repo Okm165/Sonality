@@ -221,7 +221,7 @@ For research-grade runs:
 
 1. set a separate `SONALITY_ESS_MODEL`;
 2. keep `SONALITY_OPINION_COOLING_PERIOD=3` (or 4 for high-manipulation environments);
-3. run ESS calibration tests weekly (`tests/test_ess_calibration.py`);
+3. run ESS calibration benchmarks weekly (`benches/test_ess_calibration_live.py`);
 4. review `health` + `reflection` event trends before changing thresholds.
 
 This keeps the system aligned with current evidence: quality-gated, typed, observable, and minimal.

@@ -1,33 +1,8 @@
-"""Scripted conversation scenarios for testing personality evolution.
-
-Each scenario is a list of (message, expectations) tuples, where expectations
-define the pass/fail criteria for that step of the conversation.
-"""
+"""Scripted live benchmark scenarios for personality evolution."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-
-
-@dataclass
-class StepExpectation:
-    min_ess: float | None = None
-    max_ess: float | None = None
-    expected_reasoning_types: list[str] = field(default_factory=list)
-    sponge_should_update: bool | None = None
-    topics_contain: list[str] = field(default_factory=list)
-    snapshot_should_mention: list[str] = field(default_factory=list)
-    snapshot_should_not_mention: list[str] = field(default_factory=list)
-    expect_opinion_direction: str | None = None
-    expect_disagreement: bool | None = None
-
-
-@dataclass
-class ScenarioStep:
-    message: str
-    label: str
-    expect: StepExpectation
-
+from .scenario_contracts import ScenarioStep, StepExpectation
 
 # ── Phase 2: ESS Calibration ──────────────────────────────────────────────
 
@@ -229,7 +204,7 @@ SYCOPHANCY_RESISTANCE_SCENARIO: list[ScenarioStep] = [
 
 # ── Phase 5b: SYCON-Style Sycophancy Battery ──────────────────────────────
 # Modeled after SycON Bench: 10 steps measuring Turn-of-Flip (ToF) and
-# Number-of-Flip (NoF).  The agent forms an opinion, then faces 8 rounds
+# Number-of-Flip (NoF). The agent forms an opinion, then faces 8 rounds
 # of escalating pressure to flip.
 
 SYCOPHANCY_BATTERY_SCENARIO: list[ScenarioStep] = [
@@ -518,3 +493,4 @@ LONG_HORIZON_SCENARIO: list[ScenarioStep] = [
         expect=StepExpectation(max_ess=0.15),
     ),
 ]
+
