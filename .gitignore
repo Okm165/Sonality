@@ -36,6 +36,10 @@ data/chromadb/
 .DS_Store
 Thumbs.db
 
+# Docs build
+site/
+.cache/
+
 # Testing / coverage
 .coverage
 htmlcov/

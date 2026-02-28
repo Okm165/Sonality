@@ -109,6 +109,15 @@ test-sycophancy: ## Run sycophancy resistance battery (requires API key)
 test-nct: ## Run Narrative Continuity Test battery (requires API key)
 	uv run pytest tests/ -v -k "nct or continuity or persistence" --tb=short -s
 
+# --- Docs ---
+
+.PHONY: docs docs-serve
+docs: ## Build documentation site (output in site/)
+	uv run zensical build
+
+docs-serve: ## Serve documentation locally with live reload
+	uv run zensical serve
+
 # --- Utility ---
 
 .PHONY: reset clean nuke
