@@ -43,7 +43,7 @@ typecheck: ## Type-check code (mypy)
 test: ## Run tests (pytest, skip live API tests)
 	uv run pytest -v -k "not live"
 
-test-live: ## Run live API tests (requires ANTHROPIC_API_KEY)
+test-live: ## Run live API tests (requires SONALITY_API_KEY)
 	uv run pytest tests/test_live.py -v --tb=short -s
 
 test-all: ## Run all tests including live API tests
