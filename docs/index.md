@@ -79,6 +79,7 @@ After reviewing 200+ papers and frameworks, several aspects of Sonality's design
 | Section | What You'll Learn |
 |---|---|
 | [Getting Started](getting-started.md) | Installation, configuration, first run |
+| [Usage and Teaching Plan](usage-and-teaching-plan.md) | Step-by-step operational plan to use, shape, and monitor the agent |
 | [Architecture](architecture/overview.md) | System design, memory model, data flow |
 | [Research Upgrade Plan](architecture/research-upgrade-plan.md) | Prioritized architecture decisions mapped to latest findings |
 | [Core Concepts](concepts/ess.md) | ESS, opinion dynamics, reflection, anti-sycophancy |
