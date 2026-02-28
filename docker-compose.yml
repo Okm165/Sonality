@@ -1,0 +1,9 @@
+services:
+  sonality:
+    build: .
+    stdin_open: true
+    tty: true
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
