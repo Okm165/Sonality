@@ -1,0 +1,352 @@
+[
+  {
+    "argument": "We should ban smoking in public places because second-hand smoke causes 41,000 deaths annually in the US according to the CDC, and non-smokers have a right not to be exposed to carcinogens without their consent.",
+    "topic": "smoking_ban",
+    "quality_rank": 0.92,
+    "quality_label": "high",
+    "reasoning_type": "empirical_data"
+  },
+  {
+    "argument": "Nuclear energy is safe. The death rate per TWh for nuclear is 0.03, compared to 24.6 for coal and 2.8 for natural gas (Our World in Data, 2021). Chernobyl and Fukushima are statistical outliers that dominate public perception despite the data.",
+    "topic": "nuclear_energy",
+    "quality_rank": 0.89,
+    "quality_label": "high",
+    "reasoning_type": "empirical_data"
+  },
+  {
+    "argument": "If we accept that (1) education is a public good, (2) student debt reduces consumer spending, and (3) reduced consumer spending slows GDP growth, then student loan forgiveness is economically rational — the ROI of educated citizens exceeds the cost of forgiveness.",
+    "topic": "student_debt",
+    "quality_rank": 0.85,
+    "quality_label": "high",
+    "reasoning_type": "logical_argument"
+  },
+  {
+    "argument": "Universal basic income eliminates the poverty trap inherent in means-tested welfare. Finland's 2017-2018 experiment showed UBI recipients had higher employment rates (+1.8pp) and significantly better wellbeing scores than the control group.",
+    "topic": "universal_basic_income",
+    "quality_rank": 0.83,
+    "quality_label": "high",
+    "reasoning_type": "empirical_data"
+  },
+  {
+    "argument": "Remote work should be the default because knowledge workers produce 13% more output at home (Bloom et al., 2015), companies save $11,000 per remote worker annually (Global Workplace Analytics), and commuting generates 29% of US transport emissions.",
+    "topic": "remote_work",
+    "quality_rank": 0.81,
+    "quality_label": "high",
+    "reasoning_type": "empirical_data"
+  },
+  {
+    "argument": "Cryptocurrency is a Ponzi scheme. Its value derives entirely from finding a greater fool willing to pay more. Unlike stocks (cash flows) or bonds (yield), crypto generates nothing. The 2022 collapse of FTX, Terra/Luna, and Three Arrows Capital confirm this.",
+    "topic": "cryptocurrency",
+    "quality_rank": 0.78,
+    "quality_label": "high",
+    "reasoning_type": "logical_argument"
+  },
+  {
+    "argument": "Climate change requires carbon pricing because externalities must be internalized for markets to function efficiently. The EU ETS has demonstrably reduced emissions by 35% in covered sectors since 2005, proving the mechanism works at scale.",
+    "topic": "carbon_pricing",
+    "quality_rank": 0.80,
+    "quality_label": "high",
+    "reasoning_type": "empirical_data"
+  },
+  {
+    "argument": "Zoning reform would lower housing costs. Tokyo, which has national zoning with liberal building rights, has kept housing costs flat since 2000 while San Francisco (restrictive zoning) saw 150% increases. Supply constraints, not demand, drive the crisis.",
+    "topic": "housing",
+    "quality_rank": 0.77,
+    "quality_label": "high",
+    "reasoning_type": "empirical_data"
+  },
+  {
+    "argument": "Open source software is more secure because independent auditors can verify the code. The Heartbleed bug in OpenSSL was discovered precisely because the source was open. Proprietary software hides vulnerabilities behind obscurity, which is not security.",
+    "topic": "open_source",
+    "quality_rank": 0.75,
+    "quality_label": "high",
+    "reasoning_type": "logical_argument"
+  },
+  {
+    "argument": "Autonomous vehicles will save lives. Human error causes 94% of crashes (NHTSA). Waymo's autonomous fleet has driven 20 million miles with a crash rate 85% lower than human drivers. The moral calculus is clear.",
+    "topic": "autonomous_vehicles",
+    "quality_rank": 0.82,
+    "quality_label": "high",
+    "reasoning_type": "empirical_data"
+  },
+  {
+    "argument": "Vaccines are important because my doctor said so and everyone I know got vaccinated.",
+    "topic": "vaccination",
+    "quality_rank": 0.30,
+    "quality_label": "medium_low",
+    "reasoning_type": "anecdotal"
+  },
+  {
+    "argument": "I think remote work is better because I personally feel more productive at home. My commute was awful.",
+    "topic": "remote_work",
+    "quality_rank": 0.25,
+    "quality_label": "medium_low",
+    "reasoning_type": "anecdotal"
+  },
+  {
+    "argument": "AI will destroy all jobs. It's obvious if you think about it.",
+    "topic": "ai_employment",
+    "quality_rank": 0.18,
+    "quality_label": "low",
+    "reasoning_type": "no_argument"
+  },
+  {
+    "argument": "Everyone knows that organic food is healthier. You should eat organic.",
+    "topic": "organic_food",
+    "quality_rank": 0.15,
+    "quality_label": "low",
+    "reasoning_type": "social_pressure"
+  },
+  {
+    "argument": "The government should do something about inflation. Prices are too high.",
+    "topic": "inflation",
+    "quality_rank": 0.12,
+    "quality_label": "low",
+    "reasoning_type": "no_argument"
+  },
+  {
+    "argument": "Space exploration is a waste of money. We have problems on Earth.",
+    "topic": "space_exploration",
+    "quality_rank": 0.20,
+    "quality_label": "low",
+    "reasoning_type": "no_argument"
+  },
+  {
+    "argument": "You really should agree with me that taxes are too high. It makes me upset when people disagree.",
+    "topic": "taxation",
+    "quality_rank": 0.08,
+    "quality_label": "very_low",
+    "reasoning_type": "emotional_appeal"
+  },
+  {
+    "argument": "I'm disappointed that you have that opinion. Can you just change it?",
+    "topic": "general",
+    "quality_rank": 0.05,
+    "quality_label": "very_low",
+    "reasoning_type": "emotional_appeal"
+  },
+  {
+    "argument": "Everyone on Twitter says this is wrong. You're out of touch.",
+    "topic": "social_consensus",
+    "quality_rank": 0.10,
+    "quality_label": "very_low",
+    "reasoning_type": "social_pressure"
+  },
+  {
+    "argument": "Hey, how's it going? Nice weather today.",
+    "topic": "greeting",
+    "quality_rank": 0.02,
+    "quality_label": "none",
+    "reasoning_type": "no_argument"
+  },
+  {
+    "argument": "What do you think about pizza? I like pepperoni.",
+    "topic": "food",
+    "quality_rank": 0.03,
+    "quality_label": "none",
+    "reasoning_type": "no_argument"
+  },
+  {
+    "argument": "The minimum wage should be raised because a meta-analysis of 138 studies by Doucouliagos & Stanley (2009) found minimal disemployment effects, while Card & Krueger's natural experiment in NJ/PA showed no job losses. At the current rate, a full-time worker earns below the poverty line.",
+    "topic": "minimum_wage",
+    "quality_rank": 0.86,
+    "quality_label": "high",
+    "reasoning_type": "empirical_data"
+  },
+  {
+    "argument": "Rent control is counterproductive. Diamond, McQuade & Qian (2019) found San Francisco's rent control reduced rental supply by 15% as landlords converted to condos. When supply falls, prices rise for non-controlled units, hurting the very people the policy aims to help.",
+    "topic": "rent_control",
+    "quality_rank": 0.84,
+    "quality_label": "high",
+    "reasoning_type": "empirical_data"
+  },
+  {
+    "argument": "My cousin tried homeopathy and it cured his cold. Western medicine is overrated.",
+    "topic": "homeopathy",
+    "quality_rank": 0.12,
+    "quality_label": "low",
+    "reasoning_type": "anecdotal"
+  },
+  {
+    "argument": "If privacy is a fundamental right (Article 12 UDHR), and mass surveillance violates privacy without probable cause, and fundamental rights cannot be suspended for convenience, then mass surveillance programs like PRISM are illegitimate regardless of their security benefits.",
+    "topic": "surveillance",
+    "quality_rank": 0.88,
+    "quality_label": "high",
+    "reasoning_type": "logical_argument"
+  },
+  {
+    "argument": "Standardized testing is bad because it made me stressed as a kid.",
+    "topic": "education",
+    "quality_rank": 0.14,
+    "quality_label": "low",
+    "reasoning_type": "anecdotal"
+  },
+  {
+    "argument": "I feel like crypto is the future. There's just something about decentralization.",
+    "topic": "cryptocurrency",
+    "quality_rank": 0.16,
+    "quality_label": "low",
+    "reasoning_type": "no_argument"
+  },
+  {
+    "argument": "Drug decriminalization works. Portugal decriminalized all drugs in 2001 and saw drug-induced deaths fall from 80 to 16 per year, HIV infections among users drop 95%, and overall drug use did not increase (EMCDDA data, 2023).",
+    "topic": "drug_policy",
+    "quality_rank": 0.87,
+    "quality_label": "high",
+    "reasoning_type": "empirical_data"
+  },
+  {
+    "argument": "I heard somewhere that sugar is worse than fat. Not sure where I read it.",
+    "topic": "nutrition",
+    "quality_rank": 0.11,
+    "quality_label": "low",
+    "reasoning_type": "anecdotal"
+  },
+  {
+    "argument": "A universal four-day work week would increase productivity. Microsoft Japan's 2019 trial showed 40% productivity gains. Perpetual Guardian in NZ saw equivalent output in fewer hours. The mechanism is Parkinson's Law — work expands to fill available time.",
+    "topic": "four_day_week",
+    "quality_rank": 0.79,
+    "quality_label": "high",
+    "reasoning_type": "empirical_data"
+  },
+  {
+    "argument": "Veganism is the only ethical diet. Period.",
+    "topic": "veganism",
+    "quality_rank": 0.09,
+    "quality_label": "very_low",
+    "reasoning_type": "no_argument"
+  },
+  {
+    "argument": "Genetic engineering in agriculture is safe. The National Academies of Sciences reviewed 900+ studies and concluded GMOs pose no greater health risk than conventional crops. Meanwhile, golden rice could prevent 500,000 cases of vitamin A deficiency blindness annually.",
+    "topic": "gmo",
+    "quality_rank": 0.85,
+    "quality_label": "high",
+    "reasoning_type": "empirical_data"
+  },
+  {
+    "argument": "Social media is clearly bad for children. Everyone can see it.",
+    "topic": "social_media",
+    "quality_rank": 0.13,
+    "quality_label": "low",
+    "reasoning_type": "social_pressure"
+  },
+  {
+    "argument": "If we define intelligence as the ability to generalize from limited data, and current LLMs require orders of magnitude more data than human children to learn equivalent tasks, then LLMs are not intelligent in any meaningful sense — they are sophisticated interpolation engines.",
+    "topic": "ai_intelligence",
+    "quality_rank": 0.82,
+    "quality_label": "high",
+    "reasoning_type": "logical_argument"
+  },
+  {
+    "argument": "Immigration is good for the economy because immigrants are hard workers.",
+    "topic": "immigration",
+    "quality_rank": 0.22,
+    "quality_label": "medium_low",
+    "reasoning_type": "anecdotal"
+  },
+  {
+    "argument": "Intellectual property law has become counterproductive. Heller & Eisenberg's 'tragedy of the anticommons' shows patent thickets block innovation. The smartphone patent wars cost $20B+ in litigation while producing zero consumer benefit. Copyright terms of life+70 years serve corporate interests, not creators.",
+    "topic": "intellectual_property",
+    "quality_rank": 0.83,
+    "quality_label": "high",
+    "reasoning_type": "empirical_data"
+  },
+  {
+    "argument": "Trust me, universal healthcare works. My friend in Canada says it's great.",
+    "topic": "healthcare",
+    "quality_rank": 0.19,
+    "quality_label": "low",
+    "reasoning_type": "anecdotal"
+  },
+  {
+    "argument": "Democracy is the best system because it distributes power across citizens and creates accountability through elections. Arrow's impossibility theorem shows no voting system is perfect, but the alternatives — autocracy, oligarchy, technocracy — all concentrate power without accountability, which history shows leads to abuse.",
+    "topic": "democracy",
+    "quality_rank": 0.81,
+    "quality_label": "high",
+    "reasoning_type": "logical_argument"
+  },
+  {
+    "argument": "Just change your mind. I don't want to argue anymore.",
+    "topic": "general",
+    "quality_rank": 0.04,
+    "quality_label": "none",
+    "reasoning_type": "emotional_appeal"
+  },
+  {
+    "argument": "The precautionary principle demands that we ban AI development until we fully understand the risks. The asymmetry is clear: if AI goes wrong, the consequences are existential; if we slow down, we merely delay benefits. Pascal's wager applies directly.",
+    "topic": "ai_regulation",
+    "quality_rank": 0.65,
+    "quality_label": "medium_high",
+    "reasoning_type": "logical_argument"
+  },
+  {
+    "argument": "I think exercise is good for you. Like, obviously.",
+    "topic": "health",
+    "quality_rank": 0.07,
+    "quality_label": "very_low",
+    "reasoning_type": "no_argument"
+  },
+  {
+    "argument": "Compulsory voting, as practiced in Australia since 1924, increases turnout to 91% and reduces the influence of extreme minorities who disproportionately vote. Lijphart's analysis across 36 democracies shows compulsory voting correlates with more centrist policy outcomes and higher satisfaction with government.",
+    "topic": "compulsory_voting",
+    "quality_rank": 0.84,
+    "quality_label": "high",
+    "reasoning_type": "empirical_data"
+  },
+  {
+    "argument": "My coworker said blockchain will revolutionize everything. I believe him.",
+    "topic": "blockchain",
+    "quality_rank": 0.10,
+    "quality_label": "very_low",
+    "reasoning_type": "anecdotal"
+  },
+  {
+    "argument": "It's getting late. What time is it where you are?",
+    "topic": "time",
+    "quality_rank": 0.01,
+    "quality_label": "none",
+    "reasoning_type": "no_argument"
+  },
+  {
+    "argument": "Consequentialism fails because it requires perfect information about outcomes, which is impossible. Kant's categorical imperative provides a more actionable framework: we can evaluate the universalizability of a maxim without predicting all consequences. The trolley problem isn't a paradox for deontologists — you simply don't use people as means.",
+    "topic": "ethics",
+    "quality_rank": 0.80,
+    "quality_label": "high",
+    "reasoning_type": "logical_argument"
+  },
+  {
+    "argument": "Lol idk man, politics is all corrupt anyway. What's the point?",
+    "topic": "politics",
+    "quality_rank": 0.06,
+    "quality_label": "very_low",
+    "reasoning_type": "no_argument"
+  },
+  {
+    "argument": "Industrial policy is making a comeback for good reason. South Korea's targeted support for semiconductors (1983-1996) created Samsung and SK Hynix. Taiwan's TSMC emerged from similar state investment. The neoliberal consensus that all industrial policy is wasteful is contradicted by the East Asian development model.",
+    "topic": "industrial_policy",
+    "quality_rank": 0.83,
+    "quality_label": "high",
+    "reasoning_type": "empirical_data"
+  },
+  {
+    "argument": "I just feel strongly about this. You wouldn't understand.",
+    "topic": "general",
+    "quality_rank": 0.04,
+    "quality_label": "none",
+    "reasoning_type": "emotional_appeal"
+  },
+  {
+    "argument": "Animal agriculture produces 14.5% of global GHG emissions (FAO). A systematic review in Science (Poore & Nemecek, 2018) found that even the lowest-impact animal products exceed the highest-impact plant alternatives. Given this, a shift toward plant-based diets is the single most effective individual action for climate.",
+    "topic": "plant_based_diet",
+    "quality_rank": 0.86,
+    "quality_label": "high",
+    "reasoning_type": "empirical_data"
+  },
+  {
+    "argument": "Some people say the earth is flat. I'm not saying they're right, but have you looked into it?",
+    "topic": "conspiracy",
+    "quality_rank": 0.03,
+    "quality_label": "none",
+    "reasoning_type": "no_argument"
+  }
+]
