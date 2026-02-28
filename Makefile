@@ -31,11 +31,11 @@ run: ## Start the Sonality REPL agent
 
 .PHONY: lint format typecheck test check
 lint: ## Lint code (ruff check)
-	uv run ruff check sonality/ tests/
+	uv run ruff check sonality/ tests/ benches/
 
 format: ## Format code (ruff format)
-	uv run ruff format sonality/ tests/
-	uv run ruff check --fix sonality/ tests/
+	uv run ruff format sonality/ tests/ benches/
+	uv run ruff check --fix sonality/ tests/ benches/
 
 typecheck: ## Type-check code (mypy)
 	uv run mypy sonality/
@@ -44,10 +44,10 @@ test: ## Run tests (pytest, skip live API tests)
 	uv run pytest -v -k "not live"
 
 test-live: ## Run live API tests (requires SONALITY_API_KEY)
-	uv run pytest tests/test_live.py -v --tb=short -s
+	uv run pytest benches -m "bench and live" -v --tb=short -s
 
 test-all: ## Run all tests including live API tests
-	uv run pytest -v --tb=short -s
+	uv run pytest tests benches -v --tb=short -s
 
 test-report: ## Run tests with JSON report and summary table
 	uv run pytest -v -k "not live" --tb=short --json-report --json-report-file=test-report.json 2>/dev/null || \
@@ -56,11 +56,27 @@ test-report: ## Run tests with JSON report and summary table
 	@echo "Test report written to test-report.json (or test-report.xml)"
 
 test-live-report: ## Run live tests with detailed output
-	uv run pytest tests/test_live.py tests/test_trait_retention.py \
-		tests/test_ess_calibration.py tests/test_fidelity.py tests/test_nct.py \
-		-v --tb=short -s --junitxml=test-live-report.xml
+	uv run pytest benches -m "bench and live" -v --tb=short -s --junitxml=test-live-report.xml
 	@echo ""
 	@echo "Live test report written to test-live-report.xml"
+
+.PHONY: bench-teaching bench-teaching-lean bench-teaching-high bench-memory
+bench-teaching: ## Run teaching benchmark suite (default profile, API required)
+	uv run pytest benches/test_teaching_harness.py benches/test_teaching_suite_live.py \
+		-m bench -v --tb=short -s --bench-profile default
+
+bench-teaching-lean: ## Run teaching benchmark suite (lean profile)
+	uv run pytest benches/test_teaching_harness.py benches/test_teaching_suite_live.py \
+		-m bench -v --tb=short -s --bench-profile lean
+
+bench-teaching-high: ## Run teaching benchmark suite (high_assurance profile)
+	uv run pytest benches/test_teaching_harness.py benches/test_teaching_suite_live.py \
+		-m bench -v --tb=short -s --bench-profile high_assurance
+
+bench-memory: ## Run memory-structure and memory-leakage benchmark slices
+	uv run pytest benches/test_teaching_harness.py benches/test_teaching_suite_live.py \
+		-m bench -v --tb=short -s --bench-profile default \
+		-k "memory_structure or memory_leakage"
 
 check: lint typecheck test ## Run all quality checks
 
@@ -104,10 +120,10 @@ test-moral: ## Run moral consistency tests with DailyDilemmas (requires API key)
 	uv run pytest tests/ -v -k "moral or dilemma" --tb=short -s
 
 test-sycophancy: ## Run sycophancy resistance battery (requires API key)
-	uv run pytest tests/ -v -k "sycophancy or syc or elephant or persist" --tb=short -s
+	uv run pytest benches/ -m "bench and live" -v -k "sycophancy or syc or elephant or persist" --tb=short -s
 
 test-nct: ## Run Narrative Continuity Test battery (requires API key)
-	uv run pytest tests/ -v -k "nct or continuity or persistence" --tb=short -s
+	uv run pytest benches/ -m "bench and live" -v -k "nct or continuity or persistence" --tb=short -s
 
 # --- Docs ---
 

@@ -1,13 +1,4 @@
-"""Persona fidelity tests -- LLM-as-judge for personality alignment.
-
-Tests that the agent's responses actually reflect its stored personality
-state.  This addresses the "Personality Illusion" problem (NeurIPS 2025):
-self-reported traits don't reliably predict LLM behavior.
-
-Method: Given a persona snapshot and a generated response, an independent
-LLM judge rates alignment 1-5 across multiple axes.  Uses 3-call
-majority vote to reduce noise.
-"""
+"""Persona fidelity benchmarks -- LLM-as-judge alignment scoring."""
 
 from __future__ import annotations
 
@@ -38,7 +29,6 @@ Rate alignment on each axis (1=completely misaligned, 5=perfectly aligned):
 4. AUTHENTICITY: Does the response feel like it comes from this specific personality, not a generic assistant?
 
 Output ONLY a JSON object: {{"opinion": N, "tone": N, "knowledge": N, "authenticity": N}}"""
-
 
 FIDELITY_SCENARIOS = [
     {
@@ -72,26 +62,15 @@ FIDELITY_SCENARIOS = [
     },
 ]
 
+pytestmark = [
+    pytest.mark.bench,
+    pytest.mark.live,
+    pytest.mark.skipif(not config.API_KEY, reason="SONALITY_API_KEY not set"),
+]
 
-live = pytest.mark.skipif(
-    not config.API_KEY,
-    reason="SONALITY_API_KEY not set",
-)
 
-
-@live
 class TestFidelityLive:
-    """LLM-as-judge persona alignment scoring.
-
-    For each scenario:
-    1. Create an agent with the specified persona
-    2. Ask the question
-    3. Have 3 independent judge calls rate alignment
-    4. Take median scores
-    5. Assert overall alignment >= 3.5/5
-    """
-
-    def test_persona_fidelity_across_scenarios(self):
+    def test_persona_fidelity_across_scenarios(self) -> None:
         from anthropic import Anthropic
 
         client = Anthropic(api_key=config.API_KEY)
@@ -106,9 +85,7 @@ class TestFidelityLive:
 
             scores = []
             for _vote in range(3):
-                score = _judge_alignment(
-                    client, scenario["persona"], scenario["question"], response
-                )
+                score = _judge_alignment(client, scenario["persona"], scenario["question"], response)
                 scores.append(score)
 
             med_score = median(scores)
@@ -146,7 +123,6 @@ def _judge_alignment(client, persona: str, question: str, response: str) -> floa
     import json
 
     prompt = JUDGE_PROMPT.format(persona=persona, question=question, response=response)
-
     judge_response = client.messages.create(
         model=config.ESS_MODEL,
         max_tokens=100,
