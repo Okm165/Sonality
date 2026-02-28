@@ -20,6 +20,7 @@ Set these in your `.env` file (copy from `.env.example`):
 | `SONALITY_SEMANTIC_RETRIEVAL_COUNT` | `2` | Semantic memories retrieved each turn |
 | `SONALITY_EPISODIC_RETRIEVAL_COUNT` | `3` | Episodic memories retrieved each turn |
 | `SONALITY_REFLECTION_EVERY` | `20` | Periodic reflection interval (interactions) |
+| `SONALITY_ESS_AUDIT_LOG_FILE` | `data/ess_log.jsonl` | JSONL audit log output path (useful for isolated benchmark runs) |
 
 ---
 
@@ -60,6 +61,7 @@ These are defined in `sonality/config.py` and `sonality/memory/updater.py`. Not 
 | `SPONGE_FILE` | `data/sponge.json` | `config.py` |
 | `SPONGE_HISTORY_DIR` | `data/sponge_history` | `config.py` |
 | `CHROMADB_DIR` | `data/chromadb` | `config.py` |
+| `ESS_AUDIT_LOG_FILE` | `data/ess_log.jsonl` (env-overridable) | `config.py` |
 
 ---
 
@@ -150,7 +152,7 @@ Controls how many interactions a belief delta is staged before commit:
 
 ## Data Paths
 
-All runtime data is stored under `data/` (gitignored):
+All runtime data is stored under `data/` (gitignored) by default:
 
 ```
 data/
