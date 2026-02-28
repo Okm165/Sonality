@@ -239,6 +239,7 @@ class TestFullPipeline:
             patch("sonality.config.SPONGE_FILE", Path(tmp_dir) / "sponge.json"),
             patch("sonality.config.SPONGE_HISTORY_DIR", Path(tmp_dir) / "history"),
             patch("sonality.config.CHROMADB_DIR", Path(tmp_dir) / "chromadb"),
+            patch("sonality.config.ESS_AUDIT_LOG_FILE", Path(tmp_dir) / "ess_log.jsonl"),
         ):
             from sonality.agent import SonalityAgent
 
@@ -248,6 +249,7 @@ class TestFullPipeline:
             agent.conversation = []
             agent.last_ess = None
             agent.previous_snapshot = None
+            agent._log_event = MagicMock()
 
             from sonality.memory.episodes import EpisodeStore
 
@@ -338,3 +340,5 @@ class TestFullPipeline:
             assert agent.sponge.snapshot == original_snapshot
             assert agent.sponge.interaction_count == 1
             assert len(agent.sponge.recent_shifts) == 0
+
+

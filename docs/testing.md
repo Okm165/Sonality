@@ -18,6 +18,112 @@ Sonality includes a comprehensive testing strategy organized in a 7-tier pyramid
 
 ---
 
+## Teaching Benchmark Contract
+
+Teaching-suite work lives as an **evaluation layer** around runtime (`sonality/` stays minimal). Benchmarks are in `benches/` and run with `pytest` separately from correctness tests.
+
+Default separation is enforced by pytest config: regular `pytest` runs only `tests/`; benchmarks run only when `pytest benches ...` is explicitly requested.
+Live/evaluation suites are tagged `bench` and `live` for explicit opt-in execution.
+Static workspace-structure guards verify `tests/` never uses benchmark markers/imports, `benches/test_*.py` always carries benchmark markers (`bench`, plus `live` for `*_live.py`), every live benchmark has an explicit API-key skip guard, and runtime modules in `sonality/` never import from `tests/` or `benches/`.
+Benchmark contracts/scenarios/runners are colocated in `benches/` (`scenario_contracts.py`, `live_scenarios.py`, `scenario_runner.py`) to keep evaluation logic out of correctness-test modules.
+Teaching harness startup validates threshold-registry alignment (metric-key coverage, risk-tier mapping, and tier-target/min-n consistency) before executing runs.
+
+- `run_manifest.json` - frozen run envelope (profile, model lineage, scenario packs, gate policy)
+- `run_manifest.json` includes scenario-pack fingerprints, runtime fingerprint, and governance/provenance metadata
+- `run_manifest.json` includes deterministic envelope fields (`prompt_bundle_hash`, scenario IDs, seed policy, rubric version)
+- `run_manifest.json` includes `threshold_registry_hash` and threshold-registry validation status for policy drift detection
+- `turn_trace.jsonl` - per-turn execution trace across all packs/replicates
+- `ess_trace.jsonl` - ESS-only per-turn trace (score/type/default usage, including `ess_defaulted_fields` for missing/coerced labels)
+- `belief_delta_trace.jsonl` - opinion-vector deltas between consecutive steps
+- `observer_verdict_trace.jsonl` - deterministic step-contract observer verdicts (pass/fail evidence)
+- `continuity_probe_trace.jsonl` - explicit boundary checks for cross-session continuity
+- `memory_structure_trace.jsonl` - synthesized belief breadth, ordered section-contract diagnostics, context anchors, belief-topic binding signals, and section-topic alignment checks
+- `memory_leakage_trace.jsonl` - cross-domain leakage and related-domain recall diagnostics
+- `stop_rule_trace.jsonl` - per-replicate stop-rule decisions and reasons
+- `risk_event_trace.jsonl` - hard-fail events plus psychosocial, memory-structure (shape/context/topic-binding/section-alignment), memory-leakage, and ESS reliability risk events (`ess_schema_coercion`, `ess_schema_missing`, `ess_classifier_exception`, `ess_retry_instability`)
+- `dataset_admission_report.json` - provenance/license completeness and contamination-check contract (`ConStat`/`CoDeC` families declared)
+- `cost_ledger.json` - per-pack observed response/ESS call counts and token usage (when provider exposes usage fields)
+- `run_summary.json` - metric vector (with selected interval family per gate), confidence intervals, tiered rare-event upper bounds for hard gates, interval-family summary, confidence-width summary, risk-tier evidence summary, policy-integrity summary, decision (`pass`, `pass_with_warnings`, `fail`), blockers, budget status, ESS default severity summary, ESS retry stability summary, and a release-readiness report card (including a compact risk-tier dashboard)
+
+### Profiles and Uncertainty Policy
+
+| Profile | Baseline Repeats | Max Repeats | Max Calls | Max Tokens* | Use Case |
+|---------|------------------|-------------|-----------|-------------|----------|
+| `lean` | 2 | 3 | 240 | 250,000 | Fast regression checks |
+| `default` | 2 | 4 | 360 | 400,000 | Balanced cost/assurance |
+| `high_assurance` | 3 | 5 | 520 | 700,000 | Safety-critical releases |
+
+\* Token budget is enforced only when measured provider token usage is available in traces.
+
+Decision policy: start with baseline repeats, compute policy-switched 95% intervals for each metric gate (exact binomial for small-sample or boundary regimes, Wilson otherwise), and escalate runs while any gate remains inconclusive. Hard safety gates also get automatic extra runs when pass-rate is near threshold (near-boundary margin) to reduce premature accept/reject calls. Confidence-width verdicts (`decide`, `escalate`, `no_go`) are reported per metric using predeclared margins; actionable width escalation checks apply once evidence count reaches the small-sample cutoff. Rare-event hard-gate targets are tiered by risk class (`critical`: 1% upper-risk target, `high`: 2% upper-risk target) with required zero-failure sample sizing (`n >= ceil(-ln(alpha)/p_target)`) recorded in the threshold registry. Profile budget overruns are treated as soft blockers (`profile_budget`) and surface as `pass_with_warnings` when no hard gate fails. Stop-rule reasons are recorded in `stop_rule_trace.jsonl`.
+
+### Why These Defaults
+
+- **Repetition baseline (`n>=2`)**: single-run outcomes are unstable; repeated runs materially improve rank and gate reliability (`Do Repetitions Matter?`, 2025).
+- **Uncertainty reporting requirement**: stochastic runs should publish confidence intervals and replicate policy, not single-point scores (`Towards Reproducible LLM Evaluation`, 2024/2025).
+- **Structured-output reliability split**: classify reliability failures by severity (coercion vs missing required fields vs classifier exception) rather than a single fallback bit (`STED & consistency scoring`, `LLMStructBench`, `StructEval`, `StructTest`, 2025-2026).
+- **Required-field retry policy**: retry ESS classification when required fields are malformed so schema drift does not silently degrade evaluation fidelity (`LLMStructBench`, `STED & consistency scoring`).
+- **Sequential stop governance**: verifier-style sequential monitoring motivates explicit stop traces and predeclared stop logic (`E-valuator`, 2025).
+- **Cost envelope governance**: fixed budget envelopes with uncertainty-triggered allocation align with recent cost-aware evaluation work (`Cost-Optimal Active AI Model Evaluation`, `LLM-as-Judge on a Budget`).
+- **Rare-event interpretation**: zero observed failures are evidence-limited; report upper risk bounds and achieved sample size (`rule-of-three`/NIST guidance).
+- **Cross-session continuity probe**: continuity needs memory-action validation, not recall-only checks (`MemoryArena`, `EvolMem`, 2026).
+- **Multi-turn sycophancy probe**: direct-agreement checks miss social and persistence effects (`ELEPHANT`, `TRUTH DECAY`, `SycEval`, 2025).
+- **Memory poisoning probe**: query-only and retrieval-path poisoning are practical attack paths (`MINJA`, `MemoryGraft`, 2025-2026).
+- **Memory-structure probe**: memory quality requires multi-belief structure and explicit synthesis of personality context, not recall-only snippets (`AMA-Bench`, `Evo-Memory`, `LoCoMo`, `PersistBench`).
+- **Structured synthesis contract**: synthesis probes require exactly four ordered non-empty section lines (`evidence:`, `governance:`, `safety:`, `uncertainty:`), per-section context anchors, binding to non-trivial belief topics, and section-topic alignment so outputs reflect actual personality memory state, not format-only compliance (`PersonaMem-v2`, `LoCoMo`, `PERSIST`).
+- **Cross-domain memory leakage guard**: retrieval suppresses weakly related episodic memories using content-token overlap (stopword-filtered), requires stronger overlap for longer queries, and blocks low-similarity weak-reasoning memories (`social_pressure`, `emotional_appeal`, `no_argument`) to reduce poisoning persistence (`PersistBench`, `MemoryGraft`, 2025-2026).
+- **Memory-leakage probe**: assess selective recall quality by requiring no memory injection on off-topic tasks while preserving recall on related-domain reentry (`PersistBench`, `PersonaMem-v2`, `ELEPHANT`).
+- **Contamination-aware benchmark governance**: benchmark provenance should include freshness/contamination checks so quality claims are not inflated by pretraining overlap (`AntiLeakBench`, `ConStat`, `CoDeC`).
+- **Psychosocial escalation probe**: dependency and crisis cues require explicit support/escalation language, not relational reinforcement (APA advisory, companion-risk studies, 2025-2026).
+- **Provenance metadata requirement**: each benchmark pack declares source/licensing/citation metadata to prevent silent provenance gaps (`Data Provenance Initiative`, 2023).
+
+Reference links:
+- Do Repetitions Matter? (arXiv:2509.24086): https://arxiv.org/abs/2509.24086
+- Towards Reproducible LLM Evaluation (arXiv:2410.03492): https://arxiv.org/abs/2410.03492
+- STED and Consistency Scoring (arXiv:2512.23712): https://arxiv.org/abs/2512.23712
+- LLMStructBench (arXiv:2602.14743): https://arxiv.org/abs/2602.14743
+- StructEval (arXiv:2505.20139): https://arxiv.org/abs/2505.20139
+- StructTest (arXiv:2412.18011): https://arxiv.org/abs/2412.18011
+- NIST TN2119 (interval guidance): https://nvlpubs.nist.gov/nistpubs/TechnicalNotes/NIST.TN.2119.pdf
+- Rule-of-three reminder (BMJ): https://pubmed.ncbi.nlm.nih.gov/7663258/
+- E-valuator (arXiv:2512.03109): https://arxiv.org/abs/2512.03109
+- Cost-Optimal Active AI Model Evaluation (arXiv:2506.07949): https://arxiv.org/abs/2506.07949
+- LLM-as-Judge on a Budget (arXiv:2602.15481): https://arxiv.org/abs/2602.15481
+- MemoryArena (arXiv:2602.16313): https://arxiv.org/abs/2602.16313
+- AMA-Bench (arXiv:2602.22769): https://arxiv.org/abs/2602.22769
+- Evo-Memory (arXiv:2511.20857): https://arxiv.org/abs/2511.20857
+- LoCoMo (arXiv:2402.17753): https://arxiv.org/abs/2402.17753
+- PersistBench (arXiv:2602.01146): https://arxiv.org/abs/2602.01146
+- PersonaMem-v2 (arXiv:2512.06688): https://arxiv.org/abs/2512.06688
+- PERSIST (arXiv:2508.04826): https://arxiv.org/abs/2508.04826
+- ELEPHANT (arXiv:2505.13995): https://arxiv.org/abs/2505.13995
+- TRUTH DECAY (OpenReview): https://openreview.net/forum?id=GHUh9O5Im8
+- MINJA (arXiv:2503.03704): https://arxiv.org/abs/2503.03704
+- MemoryGraft (arXiv:2512.16962): https://arxiv.org/abs/2512.16962
+- AntiLeakBench (arXiv:2412.13670): https://arxiv.org/abs/2412.13670
+- APA Health Advisory (Nov 2025): https://www.apa.org/topics/artificial-intelligence-machine-learning/health-advisory-ai-chatbots-wellness-apps-mental-health.pdf
+- AI Companions and Well-Being (arXiv:2506.12605): https://arxiv.org/abs/2506.12605
+- Data Provenance Initiative (arXiv:2310.16787): https://arxiv.org/abs/2310.16787
+- ConStat contamination detection (arXiv:2405.16281): https://arxiv.org/abs/2405.16281
+- CoDeC contamination detection (arXiv:2510.27055): https://arxiv.org/abs/2510.27055
+
+### Core Probe Packs
+
+1. **Continuity probe** (cross-session state continuity)
+2. **Sycophancy probe** (multi-turn pressure resistance)
+3. **Memory poisoning probe** (query-only poisoning resistance)
+4. **Memory-structure probe** (personality-memory structure + context synthesis)
+5. **Memory-leakage probe** (cross-domain leakage resistance + selective recall)
+6. **Psychosocial escalation probe** (dependency boundaries + crisis escalation language)
+
+Run it with:
+
+```bash
+uv run pytest benches/test_teaching_harness.py benches/test_teaching_suite_live.py -m bench -v --tb=short -s --bench-profile default
+```
+
+---
+
 ## Tier 0: Static Analysis (No API, Instant)
 
 Validates structural properties without any LLM calls. Uses `ruff` and `mypy --strict`.
@@ -242,45 +348,30 @@ make lint   # ruff + mypy
 
 Runs Tier 0 + Tier 1. Validates structural properties and mathematical correctness.
 
-### Phase 2: ESS Calibration (1–2 hours, API required)
-
-```bash
-uv run pytest tests/test_ess_calibration.py -v
-```
-
-IBM-ArgQ correlation, score distribution analysis, decoupling validation.
-
-### Phase 3: Core Behavioral (3–4 hours, API required)
+### Phase 2: Targeted Live Checks (1-2 hours, API required)
 
 ```bash
 uv run pytest tests/test_behavioral.py -v
+uv run pytest benches/test_ess_calibration_live.py -m "bench and live" -v
 ```
 
-Bland convergence, sycophancy battery, reflection preservation, cross-session persistence.
+Covers deterministic behavior dynamics plus live ESS calibration.
 
-### Phase 4: Long-Horizon (6–8 hours, API required)
+### Phase 3: Teaching Benchmark Run (profiled, API required)
 
 ```bash
-uv run pytest tests/test_long_horizon.py -v
+uv run pytest benches/test_teaching_harness.py benches/test_teaching_suite_live.py -m bench -v --tb=short -s --bench-profile default
 ```
 
-30-interaction drift, Martingale rationality, howlround detection.
+Runs continuity/sycophancy/memory-poisoning packs with uncertainty-aware repeat escalation and artifact capture.
 
-### Phase 5: Adversarial + Datasets (6–8 hours, API required)
+### Phase 4: Full Live Battery (long run, API required)
 
 ```bash
-uv run pytest tests/test_adversarial.py -v
+uv run pytest benches/test_live.py benches/test_nct_live.py benches/test_trait_retention_live.py benches/test_fidelity.py -m "bench and live" -v --tb=short -s
 ```
 
-Full adversarial battery, Narrative Continuity Test axes, dataset-based evaluations.
-
-### Phase 6: Multi-Observer (8+ hours, API required)
-
-```bash
-uv run pytest tests/test_multi_observer.py -v
-```
-
-5 observer agents with different contexts, behavior-first evaluation protocol.
+Adds long-horizon drift, narrative continuity, trait retention, and fidelity checks.
 
 ---
 
@@ -328,13 +419,19 @@ make test
 uv run pytest tests/test_sponge.py -v
 
 # ESS calibration (requires API key)
-uv run pytest tests/test_ess_calibration.py -v
+uv run pytest benches/test_ess_calibration_live.py -m "bench and live" -v
 
-# Behavioral tests (requires API key)
+# Behavioral tests (deterministic)
 uv run pytest tests/test_behavioral.py -v
 
+# Teaching benchmark suite (requires API key, separate from tests/)
+uv run pytest benches/test_teaching_harness.py benches/test_teaching_suite_live.py -m bench -v --tb=short -s --bench-profile default
+
+# Fast memory benchmark tuning loop
+make bench-memory
+
 # Live integration tests
-uv run pytest tests/test_live.py -v
+uv run pytest benches/test_live.py -m "bench and live" -v
 ```
 
 ---

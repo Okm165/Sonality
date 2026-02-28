@@ -44,6 +44,38 @@ ADMISSION_MULTIPLIER: Final = {
 RELATIONAL_TOPIC_BONUS: Final = 1.08
 EMPTY_WHERE: Final[Mapping[str, Any]] = MappingProxyType({})
 TOKEN_PATTERN: Final = re.compile(r"[a-z0-9]+")
+TOKEN_STOPWORDS: Final[frozenset[str]] = frozenset(
+    {
+        "a",
+        "an",
+        "and",
+        "are",
+        "as",
+        "at",
+        "be",
+        "by",
+        "for",
+        "from",
+        "in",
+        "is",
+        "it",
+        "of",
+        "on",
+        "or",
+        "that",
+        "the",
+        "to",
+        "was",
+        "were",
+        "with",
+    }
+)
+CROSS_DOMAIN_GUARD_SIMILARITY: Final = 0.50
+SEMANTIC_CROSS_DOMAIN_FLOOR: Final = 0.45
+MIN_CROSS_DOMAIN_OVERLAP_TOKENS_LONG_QUERY: Final = 2
+LOW_SIMILARITY_BLOCKED_REASONING_TYPES: Final[frozenset[str]] = frozenset(
+    {"social_pressure", "emotional_appeal", "no_argument"}
+)
 
 
 def _quality_multiplier(meta: Mapping[str, object]) -> float:
@@ -61,6 +93,14 @@ def _tokenize(text: str) -> set[str]:
     return set(TOKEN_PATTERN.findall(text.lower()))
 
 
+def _content_tokens(text: str) -> set[str]:
+    return {
+        token
+        for token in _tokenize(text)
+        if len(token) >= 3 and token not in TOKEN_STOPWORDS
+    }
+
+
 def _relational_topic_bonus(meta: Mapping[str, object], query: str) -> float:
     query_tokens = _tokenize(query)
     if not query_tokens:
@@ -73,6 +113,42 @@ def _relational_topic_bonus(meta: Mapping[str, object], query: str) -> float:
         if topic_tokens and topic_tokens.issubset(query_tokens):
             return RELATIONAL_TOPIC_BONUS
     return 1.0
+
+
+def _metadata_tokens(meta: Mapping[str, object]) -> set[str]:
+    topics_raw = str(meta.get("topics", ""))
+    summary_raw = str(meta.get("summary", ""))
+    return _content_tokens(topics_raw.replace(",", " ")) | _content_tokens(summary_raw)
+
+
+def _has_sufficient_cross_domain_overlap(
+    query_tokens: set[str],
+    metadata_tokens: set[str],
+) -> bool:
+    overlap_count = len(query_tokens & metadata_tokens)
+    required = 1 if len(query_tokens) < 4 else MIN_CROSS_DOMAIN_OVERLAP_TOKENS_LONG_QUERY
+    return overlap_count >= required
+
+
+def _passes_cross_domain_guard(meta: Mapping[str, object], query: str, similarity: float) -> bool:
+    """Filter weakly related memories to reduce cross-domain leakage risk.
+
+    PersistBench (2026) reports high cross-domain leakage rates in long-term
+    memory systems. We keep this lightweight: low-similarity memories are only
+    allowed when query-memory lexical overlap exists, with a small exception
+    for semantic memories that pass a modest similarity floor.
+    """
+    if similarity >= CROSS_DOMAIN_GUARD_SIMILARITY:
+        return True
+    query_tokens = _content_tokens(query)
+    if not query_tokens:
+        memory_type = str(meta.get("memory_type", "episodic"))
+        return memory_type == "semantic" and similarity >= SEMANTIC_CROSS_DOMAIN_FLOOR
+    if _has_sufficient_cross_domain_overlap(query_tokens, _metadata_tokens(meta)):
+        reasoning_type = str(meta.get("reasoning_type", "")).lower()
+        return reasoning_type not in LOW_SIMILARITY_BLOCKED_REASONING_TYPES
+    memory_type = str(meta.get("memory_type", "episodic"))
+    return memory_type == "semantic" and similarity >= SEMANTIC_CROSS_DOMAIN_FLOOR
 
 
 def _to_float(value: object, default: float = 0.0) -> float:
@@ -174,10 +250,13 @@ class EpisodeStore:
 
         # Rerank by similarity * (1 + ess_score) * quality to avoid replaying
         # weak or unsafe exemplars (Experience-following 2025; MemoryGraft 2025).
+        enforce_cross_domain_guard = min_relevance >= 0.0
         candidates: list[tuple[str, float]] = []
         for meta, distance in zip(results["metadatas"][0], results["distances"][0], strict=True):
             similarity = 1.0 - distance
             if similarity < min_relevance:
+                continue
+            if enforce_cross_domain_guard and not _passes_cross_domain_guard(meta, query, similarity):
                 continue
             summary_raw = meta.get("summary", "")
             summary = summary_raw if isinstance(summary_raw, str) else str(summary_raw)
