@@ -90,6 +90,7 @@ Set in `.env` (see `.env.example`):
 | `SONALITY_SEMANTIC_RETRIEVAL_COUNT` | `2` | Semantic memories retrieved per interaction |
 | `SONALITY_EPISODIC_RETRIEVAL_COUNT` | `3` | Episodic memories retrieved per interaction |
 | `SONALITY_LOG_LEVEL` | `INFO` | Logging verbosity |
+| `SONALITY_ESS_AUDIT_LOG_FILE` | `data/ess_log.jsonl` | JSONL audit log output path |
 
 ## Key Mechanisms
 
@@ -111,7 +112,10 @@ make check         # lint + typecheck + test
 make format        # auto-format
 make docs          # build documentation (output in site/)
 make docs-serve    # serve docs locally with live reload
+make bench-teaching  # run teaching benchmark suite (API key required)
 ```
+
+Default `pytest` runs correctness tests only (`testpaths = ["tests"]`). Benchmarks are run explicitly from `benches/`.
 
 ## Project Structure
 
@@ -127,7 +131,12 @@ sonality/
 │       ├── sponge.py           SpongeState model, Bayesian updates, decay
 │       ├── episodes.py         ChromaDB episode storage + ESS-weighted retrieval
 │       └── updater.py          Magnitude computation, snapshot validation, insight extraction
-├── tests/                      Test suite
+├── tests/                      Correctness/unit/integration tests
+├── benches/                    Evaluation/benchmark suites (pytest, opt-in)
+│   ├── scenario_contracts.py   Shared scenario expectation contracts
+│   ├── live_scenarios.py       Live/evaluation scenario definitions
+│   ├── scenario_runner.py      Shared benchmark scenario executor
+│   └── teaching_harness.py     Teaching-suite evaluation harness + artifacts
 ├── docs/                       Documentation source (Zensical/MkDocs)
 ├── pyproject.toml              Dependencies and tool config
 ├── zensical.toml               Documentation site config

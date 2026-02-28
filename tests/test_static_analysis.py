@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import re
 import tempfile
+import tomllib
 from itertools import pairwise
 from pathlib import Path
 
@@ -261,3 +263,54 @@ class TestPromptStructure:
             relevant_episodes=[malicious_episode],
         )
         assert prompt.count("<core_identity>") == 1
+
+
+class TestWorkspaceStructure:
+    def test_pyproject_default_testpaths_targets_tests_only(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        pyproject_path = root / "pyproject.toml"
+        config_data = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
+        ini_options = config_data["tool"]["pytest"]["ini_options"]
+        assert ini_options["testpaths"] == ["tests"]
+
+    def test_tests_and_benches_remain_separate(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        benches_dir = root / "benches"
+        tests_dir = root / "tests"
+        runtime_dir = root / "sonality"
+        tests_import_pattern = re.compile(r"^\s*(from\s+tests\.|import\s+tests(?:\.|\s|$))", re.MULTILINE)
+        benches_import_pattern = re.compile(
+            r"^\s*(from\s+benches\.|import\s+benches(?:\.|\s|$))",
+            re.MULTILINE,
+        )
+        bench_marker_pattern = re.compile(r"^\s*pytest\.mark\.bench\b", re.MULTILINE)
+        live_marker_pattern = re.compile(r"^\s*pytest\.mark\.live\b", re.MULTILINE)
+        bench_marker_anywhere_pattern = re.compile(r"pytest\.mark\.bench\b")
+        live_marker_anywhere_pattern = re.compile(r"pytest\.mark\.live\b")
+        live_skip_guard_pattern = re.compile(
+            r"skipif\s*\(\s*not\s+config\.API_KEY",
+            re.MULTILINE,
+        )
+
+        for bench_file in sorted(benches_dir.glob("*.py")):
+            content = bench_file.read_text(encoding="utf-8")
+            assert tests_import_pattern.search(content) is None
+
+        for test_file in sorted(tests_dir.glob("*.py")):
+            content = test_file.read_text(encoding="utf-8")
+            assert benches_import_pattern.search(content) is None
+            assert bench_marker_pattern.search(content) is None
+            assert live_marker_pattern.search(content) is None
+
+        for bench_test_file in sorted(benches_dir.glob("test_*.py")):
+            content = bench_test_file.read_text(encoding="utf-8")
+            assert bench_marker_anywhere_pattern.search(content) is not None
+            if bench_test_file.stem.endswith("_live"):
+                assert live_marker_anywhere_pattern.search(content) is not None
+            if live_marker_anywhere_pattern.search(content) is not None:
+                assert live_skip_guard_pattern.search(content) is not None
+
+        for runtime_file in sorted(runtime_dir.rglob("*.py")):
+            content = runtime_file.read_text(encoding="utf-8")
+            assert tests_import_pattern.search(content) is None
+            assert benches_import_pattern.search(content) is None
