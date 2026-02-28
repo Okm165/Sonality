@@ -130,7 +130,3 @@ sonality/
 ├── Dockerfile                  Container build
 └── docker-compose.yml          Container orchestration
 ```
-
-## Documentation
-
-Full documentation at [herodotusdev.github.io/sonality](https://herodotusdev.github.io/sonality/) — covers architecture, core concepts, design decisions, the full research background (200+ papers), personality development guide, testing methodology, configuration reference, and API documentation.
