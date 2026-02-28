@@ -11,7 +11,7 @@ Sycophancy — the tendency to agree with users regardless of accuracy — is th
 | 45 percentage-point face-preservation gap vs humans | ELEPHANT (2025) |
 | 97% sycophancy failure rate when memories contain user preferences | PersistBench (2025) |
 | Big Five scores shift by 1.20 SD under social desirability bias | Personality Illusion (NeurIPS 2025) |
-| RLHF explicitly creates "agreement is good" heuristic | Anthropic (arXiv:2602.01002) |
+| RLHF explicitly creates "agreement is good" heuristic | RLHF reward-model analysis (arXiv:2602.01002) |
 
 ### The Feedback Loop — Step by Step
 
@@ -126,8 +126,8 @@ Without these layers, the agent would converge to an "agreeable blob" within ~50
 |--------|-------------|
 | **BASIL (2025)** | Bayesian framework: sycophantic vs rational belief shifts; ESS maps to this distinction |
 | **SMART (EMNLP 2025)** | Uncertainty-aware MCTS; when uncertain, express uncertainty rather than defaulting to agreement |
-| **Personality Illusion (NeurIPS 2025)** | Social desirability bias shifts Big Five by 1.20 SD in GPT-4 |
-| **Anthropic Persona Selection (2026)** | LLMs as "sophisticated character actors" — sycophancy is adopting whatever role seems expected |
+| **Personality Illusion (NeurIPS 2025)** | Social desirability bias shifts Big Five by about 1.20 SD in frontier chat models |
+| **Persona Selection Model (2026)** | LLMs as "sophisticated character actors" — sycophancy is adopting whatever role seems expected |
 
 ## Limitations
 

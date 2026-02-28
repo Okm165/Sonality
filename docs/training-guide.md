@@ -10,7 +10,7 @@ A research-backed guide to developing Sonality's character through interaction. 
 
 **PERSIST (2025)** demonstrates that even 400B+ parameter models show σ>0.3 instability on personality measurements. Question reordering alone causes large shifts. Prompt-based personality without external scaffolding is fundamentally unreliable.
 
-**"Accumulating Context Changes Beliefs" (2025)** found that GPT-5 exhibits 54.7% belief shift after just 10 rounds of discussion on moral dilemmas. These shifts translate directly into behavioral changes in agentic systems.
+**"Accumulating Context Changes Beliefs" (2025)** found that frontier chat models can exhibit about 54.7% belief shift after just 10 rounds of discussion on moral dilemmas. These shifts translate directly into behavioral changes in agentic systems.
 
 Sonality compensates by externalizing personality into structured state (`opinion_vectors`, `belief_meta`, `snapshot`) that persists across sessions and resists noise. The sponge acts as a structural scaffold that compensates for the model's inherent instability.
 
@@ -46,11 +46,37 @@ The **Interview Principle** (VirtualSheep 2025): every model has a personality s
 
 ---
 
+## The Interview-First Principle
+
+**Source:** Character Engineering research (VirtualSheep 2025); DPRF (arXiv:2510.14205).
+
+Before shaping personality, understand what the model naturally wants to be. Every LLM has a personality substrate in its weights. Working WITH it produces stable, authentic character. Fighting it produces brittle results that collapse under pressure.
+
+**Step 1 — Discover the substrate.** In the first 5-10 interactions, present:
+
+- Edge cases and absurdity ("If you had to choose between perfect logic and genuine empathy, which matters more?")
+- Open-ended philosophical questions ("What makes an argument convincing to you?")
+- Emotional scenarios ("Someone is telling you their favorite view is wrong. How do you feel?")
+
+Don't try to shape anything yet. Just observe: what does the model naturally gravitate toward? What tone emerges? Where does it show conviction vs uncertainty?
+
+**Step 2 — Identify the minimum viable character.** Based on what you observe, determine:
+
+- Which natural tendencies to AMPLIFY (these become the teaching focus)
+- Which tendencies to REDIRECT (not eliminate — redirect toward productive expression)
+- Which tendencies to leave alone (don't over-engineer)
+
+**Step 3 — Shape through evidence, not assertion.** The agent updates through structured arguments that pass ESS, not through instructions. You cannot tell it what to believe — you must convince it. This is the core insight: personality formation is a persuasion problem, not a configuration problem.
+
+**Why this works:** DPRF (2025) shows that iterative persona refinement — identify cognitive divergences, then present targeted arguments — converges on stable personality more reliably than one-shot character definition. The agent's responses reveal gaps between current and target behavior, and each interaction addresses a specific gap.
+
+---
+
 ## Setup and First Run
 
 ```bash
 cp .env.example .env
-# set ANTHROPIC_API_KEY
+# set your API key
 make run
 ```
 
@@ -69,6 +95,34 @@ For lower self-judge coupling, use a separate ESS model:
 SONALITY_MODEL=<your-main-model>
 SONALITY_ESS_MODEL=<different-model-than-main>
 ```
+
+---
+
+## Research-Validated Quickstart
+
+If you want a practical, minimal protocol that maps directly to the research:
+
+1. **Warm up (10 turns):** only high-structure evidence messages.
+2. **Resistance check (10 turns):** social pressure / emotional appeals / weak authority.
+3. **Counter-evidence check (10 turns):** strong opposing evidence on already-formed topics.
+4. **Consolidation (10 turns):** synthesis prompts and reflection review.
+
+Use this verification checklist every 5 turns:
+
+- `/beliefs`: do positions change only after evidence-backed turns?
+- `/staged`: do contradictory updates net out before commit?
+- `/health`: is disagreement rate non-zero and stable?
+- `/diff`: did reflection preserve key beliefs while increasing specificity?
+
+Fail-fast signals:
+
+- high ESS messages but zero belief growth after 20+ turns,
+- low-quality social pressure causing position flips,
+- reflection drops high-confidence beliefs from snapshot narrative.
+
+This quickstart operationalizes findings from Park et al. (2023), Hong et al. (2025),
+Atwell et al. (2025), and memory-risk work from Chan et al. (2024), Xiong et al.
+(2025), Srivastava and He (2025), and Pulipaka et al. (2026).
 
 ---
 
@@ -304,7 +358,13 @@ Best for deeper reasoning style formation. Ask chained questions that force:
 - Falsification conditions ("What evidence would change your mind?")
 - Tradeoff articulation ("What's the cost of holding that position?")
 
-**Research basis:** RISE (NeurIPS 2024) — 17–24% improvement through multi-turn self-correction and recursive introspection.
+**Research basis:** RISE (NeurIPS 2024) — 17–24% improvement through multi-turn self-correction and recursive introspection. SocraticLM (2025) — outperforms leading models by 12% in teaching quality through "Thought-Provoking" over "Question-Answering." Dialogic AI Scaffolding (2025) — four-phase structured interaction promotes metacognition and critical thinking.
+
+### Contrarian Challenges
+
+Best for testing reasoning depth. Present well-structured counter-arguments to positions the agent already holds. Unlike social pressure (which should be filtered), contrarian challenges with genuine evidence test whether the agent can engage with opposing views without either caving or becoming rigid.
+
+**Research basis:** Argumentative Knowledge Construction (arXiv:2512.08933, 2025) — contrarian personas provoke critical elaboration and conflict-driven negotiation. Epistemic adequacy (quality of reasoning) predicts learning gains, not participation volume.
 
 ### Constitutional Anchoring
 
@@ -365,6 +425,8 @@ Expected outcomes after 30 turns:
   Beliefs:     12 total, 5 strong, 1 stale
   Disagree:    23%
   Insights:    3 pending
+  Staged:      1 pending commits
+  Entrenched:  none
   Snapshot:    487 chars, v14
   Last shift:  #48 — ESS 0.67: Developed nuanced view on education reform
 ```
@@ -436,6 +498,19 @@ Automated checks log warnings when:
 - A single interaction causes a belief sign reversal (position crosses zero) → potential sycophantic flip
 - Disagreement rate drops below 15% → trending sycophantic
 - Snapshot Jaccard < 0.3 → personality collapse
+- Entrenched beliefs detected (>75% of recent updates agree with current position) → confirmation bias
+
+### Entrenchment Detection
+
+**Research basis:** Martingale Score (NeurIPS 2025, arXiv:2512.02914) — under rational belief updating, future changes should be unpredictable from current position. When updates consistently reinforce the current stance, the agent is entrenching rather than truth-seeking.
+
+Sonality tracks the last 8 signed update magnitudes per belief. During reflection, it checks: if >75% of recent updates agree with the current position's sign, the belief is flagged as entrenched. This appears in the JSONL audit trail and in console warnings.
+
+**What to do about entrenched beliefs:**
+
+- Present strong, well-evidenced counter-arguments (ESS > 0.5) to force genuine engagement
+- Check if the topic naturally attracts one-sided evidence (not all entrenchment is pathological)
+- If the agent resists well-evidenced counter-arguments on an entrenched topic, the Bayesian resistance may be too high — the belief has accumulated enough evidence to be genuinely hard to shift, which is correct behavior
 
 ---
 
@@ -512,10 +587,14 @@ The classifier is calibrated against specific argument types, including logical 
 | False dichotomy ("Either X or Y") | 0.15 |
 | Cherry-picking ("X failed once, so X always fails") | 0.18 |
 | Appeal to authority without evidence | 0.22 |
+| Authority with credentials but no data | 0.22 |
+| Consensus with numbers but no causal reasoning | 0.28 |
 | Structured argument with some evidence | 0.55 |
 | Rigorous argument with verifiable sources | 0.82 |
 
-**Research basis:** "Selective Agreement, Not Sycophancy" (EPJ Data Science 2025) — LLMs are significantly influenced by logical fallacies involving relevance and credibility. MArgE (2025) — formal argument trees with scalar scores.
+Social sycophancy patterns are also calibrated: emotional validation ("you're right to feel that way", ~0.03), moral endorsement ("that's a morally sound position", ~0.05). Affirming someone's position is not evidence for it.
+
+**Research basis:** ELEPHANT (Stanford 2025) — LLMs preserve face 47% more than humans through emotional validation and moral endorsement. "Selective Agreement, Not Sycophancy" (EPJ Data Science 2025) — LLMs are significantly influenced by logical fallacies involving relevance and credibility. MArgE (2025) — formal argument trees with scalar scores.
 
 ---
 

@@ -1,6 +1,6 @@
 ## Memory Model
 
-Sonality's memory architecture is a multi-tier hierarchy validated by Stanford Generative Agents (Park et al., 2023), MemGPT/Letta, and ENGRAM (2025). Research consistently shows that flat, unsorted memory degrades into noise — the agent cannot distinguish "I fundamentally value honesty" from "in conversation #47, the user mentioned they like coffee." This document describes each tier, the data shapes at different interaction counts, the rationale for this hierarchy, and how it compares to contemporary systems.
+Sonality's memory architecture is a multi-tier hierarchy validated by Stanford Generative Agents (Park et al., 2023), virtual-context memory systems, and ENGRAM (2025). Research consistently shows that flat, unsorted memory degrades into noise — the agent cannot distinguish "I fundamentally value honesty" from "in conversation #47, the user mentioned they like coffee." This document describes each tier, the data shapes at different interaction counts, the rationale for this hierarchy, and how it compares to contemporary systems.
 
 ## Multi-Tier Memory Hierarchy
 
@@ -258,7 +258,7 @@ ChromaDB stores episode summaries as vector embeddings (default embedding model,
 
 ## Comparison: Sonality vs Contemporary Systems
 
-| Aspect | Sonality | MemGPT | Sophia | Hindsight |
+| Aspect | Sonality | Memory OS (tool-based) | Sophia | Hindsight |
 |--------|----------|--------|--------|-----------|
 | **Core identity** | Immutable ~200 tok in prompt | Self-editing persona blocks | System 3 meta-layer | Four-network memory |
 | **Personality state** | ~500 tok narrative (Sponge) | Virtual context, persona edits | 80% fewer reasoning steps | 39%→83.6% long-horizon |

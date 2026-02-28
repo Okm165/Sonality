@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any, Final
+from typing import Any, Final, cast
 
 from anthropic import Anthropic
 from anthropic.types import Message
@@ -121,8 +121,11 @@ class ESSResult:
 
 def _extract_tool_data(response: Message) -> dict[str, Any]:
     for block in response.content:
-        if block.type == "tool_use":
-            return block.input  # type: ignore[return-value]
+        if getattr(block, "type", None) != "tool_use":
+            continue
+        raw = getattr(block, "input", None)
+        if isinstance(raw, dict):
+            return cast(dict[str, Any], raw)
     return {}
 
 
@@ -131,10 +134,31 @@ def _clamp(value: float, low: float = 0.0, high: float = 1.0) -> float:
 
 
 def _parse_enum[E: StrEnum](cls: type[E], raw: object, default: E) -> E:
+    if not isinstance(raw, str):
+        return default
     try:
-        return cls(raw) if raw is not None else default
+        return cls(raw)
     except ValueError:
         return default
+
+
+def _to_float(value: object, default: float = 0.0) -> float:
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError:
+            return default
+    return default
+
+
+def _to_topics(value: object) -> tuple[str, ...]:
+    if not isinstance(value, (list, tuple)):
+        return ()
+    return tuple(item for item in value if isinstance(item, str))
 
 
 def classify(
@@ -156,12 +180,15 @@ def classify(
 
     data: dict[str, Any] = {}
     for attempt in range(MAX_ESS_RETRIES):
-        response = client.messages.create(
-            model=config.ESS_MODEL,
-            max_tokens=512,
-            messages=[{"role": "user", "content": prompt}],
-            tools=[ESS_TOOL],
-            tool_choice={"type": "tool", "name": "classify_evidence"},
+        response = cast(
+            Message,
+            cast(Any, client.messages.create)(
+                model=config.ESS_MODEL,
+                max_tokens=512,
+                messages=[{"role": "user", "content": prompt}],
+                tools=[cast(Any, ESS_TOOL)],
+                tool_choice=cast(Any, {"type": "tool", "name": "classify_evidence"}),
+            ),
         )
         data = _extract_tool_data(response)
 
@@ -175,8 +202,8 @@ def classify(
     if used_defaults:
         log.warning("ESS fell back to defaults for: %s", defaults_used)
 
-    score = _clamp(float(data.get("score", 0.0)))
-    novelty = _clamp(float(data.get("novelty", 0.0)))
+    score = _clamp(_to_float(data.get("score", 0.0)))
+    novelty = _clamp(_to_float(data.get("novelty", 0.0)))
 
     direction = _parse_enum(
         OpinionDirection, data.get("opinion_direction"), OpinionDirection.NEUTRAL
@@ -190,10 +217,10 @@ def classify(
         score=score,
         reasoning_type=reasoning,
         source_reliability=reliability,
-        internal_consistency=data.get("internal_consistency", True),
+        internal_consistency=bool(data.get("internal_consistency", True)),
         novelty=novelty,
-        topics=tuple(data.get("topics", ())),
-        summary=data.get("summary", ""),
+        topics=_to_topics(data.get("topics", ())),
+        summary=str(data.get("summary", "")),
         opinion_direction=direction,
         used_defaults=used_defaults,
     )
