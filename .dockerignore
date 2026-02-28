@@ -1,0 +1,15 @@
+.venv/
+.git/
+.cursor/
+.env
+data/
+__pycache__/
+*.pyc
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+*.md
+Makefile
+.gitignore
+.dockerignore
+docker-compose.yml
