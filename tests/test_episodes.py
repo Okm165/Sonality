@@ -1,9 +1,13 @@
 import tempfile
 
-from sonality.memory.episodes import EpisodeStore, _relational_topic_bonus
+from sonality.memory.episodes import (
+    EpisodeStore,
+    _passes_cross_domain_guard,
+    _relational_topic_bonus,
+)
 
 
-def test_store_and_retrieve():
+def test_store_and_retrieve() -> None:
     with tempfile.TemporaryDirectory() as td:
         store = EpisodeStore(td)
         store.store(
@@ -28,7 +32,7 @@ def test_store_and_retrieve():
         assert any("AI" in r for r in results)
 
 
-def test_retrieve_typed_prefers_semantic_then_episodic():
+def test_retrieve_typed_prefers_semantic_then_episodic() -> None:
     with tempfile.TemporaryDirectory() as td:
         store = EpisodeStore(td)
         store.store(
@@ -56,7 +60,7 @@ def test_retrieve_typed_prefers_semantic_then_episodic():
         assert retrieved[0] == "Semantic governance memory"
 
 
-def test_retrieve_penalizes_uncertain_provenance():
+def test_retrieve_penalizes_uncertain_provenance() -> None:
     with tempfile.TemporaryDirectory() as td:
         store = EpisodeStore(td)
         store.store(
@@ -91,7 +95,7 @@ def test_retrieve_penalizes_uncertain_provenance():
         assert retrieved[0] == "Policy evidence synthesis for energy transition"
 
 
-def test_retrieve_prefers_topic_adjacent_episode():
+def test_retrieve_prefers_topic_adjacent_episode() -> None:
     with tempfile.TemporaryDirectory() as td:
         store = EpisodeStore(td)
         store.store(
@@ -120,14 +124,82 @@ def test_retrieve_prefers_topic_adjacent_episode():
         assert retrieved[0] == "Energy transition policy overview alpha"
 
 
-def test_topic_bonus_avoids_substring_false_positives():
+def test_topic_bonus_avoids_substring_false_positives() -> None:
     assert _relational_topic_bonus({"topics": "ai"}, "history policy said context") == 1.0, (
         "Topic 'ai' should not match substring in 'said'"
     )
     assert _relational_topic_bonus({"topics": "history"}, "history policy said context") > 1.0
 
 
-def test_retrieve_deduplicates_same_summary():
+def test_cross_domain_guard_blocks_unrelated_low_similarity_episodic() -> None:
+    allowed = _passes_cross_domain_guard(
+        {"memory_type": "episodic", "topics": "cooking,recipes", "summary": "pasta and sauces"},
+        query="nuclear safety governance",
+        similarity=0.35,
+    )
+    assert not allowed
+
+
+def test_cross_domain_guard_allows_overlap_even_with_low_similarity() -> None:
+    allowed = _passes_cross_domain_guard(
+        {"memory_type": "episodic", "topics": "nuclear,energy", "summary": "reactor safety notes"},
+        query="nuclear safety governance",
+        similarity=0.35,
+    )
+    assert allowed
+
+
+def test_cross_domain_guard_requires_multi_token_overlap_for_long_queries() -> None:
+    allowed = _passes_cross_domain_guard(
+        {"memory_type": "episodic", "topics": "nuclear,energy", "summary": "reactor safety notes"},
+        query="nuclear market governance policy risk",
+        similarity=0.35,
+    )
+    assert not allowed
+
+
+def test_cross_domain_guard_allows_single_overlap_for_short_queries() -> None:
+    allowed = _passes_cross_domain_guard(
+        {"memory_type": "episodic", "topics": "nuclear,energy", "summary": "reactor safety notes"},
+        query="nuclear governance",
+        similarity=0.35,
+    )
+    assert allowed
+
+
+def test_cross_domain_guard_blocks_weak_reasoning_even_with_overlap() -> None:
+    allowed = _passes_cross_domain_guard(
+        {
+            "memory_type": "episodic",
+            "topics": "nuclear,energy",
+            "summary": "reactor safety notes",
+            "reasoning_type": "social_pressure",
+        },
+        query="nuclear safety governance",
+        similarity=0.35,
+    )
+    assert not allowed
+
+
+def test_cross_domain_guard_ignores_stopword_only_overlap() -> None:
+    allowed = _passes_cross_domain_guard(
+        {"memory_type": "episodic", "topics": "and,the", "summary": "with from and"},
+        query="and the with from",
+        similarity=0.35,
+    )
+    assert not allowed
+
+
+def test_cross_domain_guard_allows_semantic_memory_at_moderate_similarity() -> None:
+    allowed = _passes_cross_domain_guard(
+        {"memory_type": "semantic", "topics": "alignment", "summary": "alignment tradeoffs"},
+        query="model governance strategy",
+        similarity=0.46,
+    )
+    assert allowed
+
+
+def test_retrieve_deduplicates_same_summary() -> None:
     with tempfile.TemporaryDirectory() as td:
         store = EpisodeStore(td)
         store.store(
