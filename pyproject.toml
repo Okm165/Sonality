@@ -33,7 +33,7 @@ sonality = "sonality.cli:main"
 [tool.ruff]
 target-version = "py312"
 line-length = 100
-src = ["sonality", "tests"]
+src = ["sonality", "tests", "benches"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "UP", "B", "SIM", "RUF"]
@@ -51,3 +51,7 @@ warn_unused_configs = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+markers = [
+    "live: tests/benches that require external model API access",
+    "bench: evaluation benchmark suites",
+]
