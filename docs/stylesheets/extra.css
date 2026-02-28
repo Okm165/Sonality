@@ -1,0 +1,255 @@
+/* ── Dark theme (default) ─────────────────────────────────── */
+[data-md-color-scheme="slate"] {
+    --md-hue: 265;
+    --md-primary-fg-color: #b39ddb;
+    --md-primary-fg-color--light: #d1c4e9;
+    --md-primary-fg-color--dark: #7e57c2;
+    --md-accent-fg-color: #ffca28;
+    --md-default-bg-color: #121218;
+    --md-default-bg-color--light: #1a1a24;
+    --md-code-bg-color: #1e1e2e;
+    --md-typeset-a-color: #ce93d8;
+}
+
+/* ── Light theme ─────────────────────────────────────────── */
+[data-md-color-scheme="default"] {
+    --md-primary-fg-color: #5e35b1;
+    --md-primary-fg-color--light: #b39ddb;
+    --md-primary-fg-color--dark: #4527a0;
+    --md-accent-fg-color: #ff8f00;
+    --md-typeset-a-color: #6a1b9a;
+}
+
+/* ── Layout ──────────────────────────────────────────────── */
+.md-grid {
+    max-width: 1440px;
+}
+
+/* ── Typography ──────────────────────────────────────────── */
+.md-typeset {
+    line-height: 1.72;
+    font-size: 0.82rem;
+}
+
+.md-typeset h1 {
+    font-weight: 800;
+    letter-spacing: -0.025em;
+    margin-bottom: 0.8em;
+}
+
+.md-typeset h2 {
+    font-weight: 700;
+    letter-spacing: -0.015em;
+    margin-top: 2.2em;
+    padding-bottom: 0.35em;
+    border-bottom: 1px solid var(--md-default-fg-color--lightest);
+}
+
+.md-typeset h3 {
+    font-weight: 600;
+    margin-top: 1.6em;
+}
+
+.md-typeset p {
+    margin-bottom: 1em;
+}
+
+/* ── Tables ──────────────────────────────────────────────── */
+.md-typeset table:not([class]) {
+    font-size: 0.8rem;
+    border-collapse: separate;
+    border-spacing: 0;
+    border-radius: 10px;
+    overflow: hidden;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.1);
+    display: table;
+    width: 100%;
+}
+
+.md-typeset table:not([class]) th {
+    background-color: var(--md-primary-fg-color);
+    color: var(--md-primary-bg-color, #fff);
+    font-weight: 700;
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    padding: 0.75em 1em;
+    white-space: nowrap;
+    position: sticky;
+    top: 0;
+}
+
+[data-md-color-scheme="slate"] .md-typeset table:not([class]) th {
+    background-color: rgba(179, 157, 219, 0.13);
+    color: var(--md-primary-fg-color--light);
+}
+
+.md-typeset table:not([class]) td {
+    padding: 0.65em 1em;
+    border-bottom: 1px solid var(--md-default-fg-color--lightest);
+    vertical-align: top;
+}
+
+.md-typeset table:not([class]) tr:last-child td {
+    border-bottom: none;
+}
+
+.md-typeset table:not([class]) tbody tr:hover {
+    background-color: rgba(179, 157, 219, 0.04);
+}
+
+[data-md-color-scheme="slate"] .md-typeset table:not([class]) tbody tr:hover {
+    background-color: rgba(179, 157, 219, 0.06);
+}
+
+[data-md-color-scheme="slate"] .md-typeset table:not([class]) {
+    box-shadow: 0 1px 6px rgba(0, 0, 0, 0.35);
+}
+
+/* ── Code blocks ─────────────────────────────────────────── */
+.md-typeset pre {
+    border-radius: 10px;
+    overflow: hidden;
+}
+
+.md-typeset pre > code {
+    border-radius: 10px;
+    font-size: 0.8em;
+    line-height: 1.6;
+}
+
+.md-typeset code {
+    border-radius: 4px;
+    padding: 0.15em 0.4em;
+    font-size: 0.84em;
+}
+
+[data-md-color-scheme="slate"] .md-typeset code {
+    background-color: rgba(179, 157, 219, 0.1);
+}
+
+/* ── Admonitions ─────────────────────────────────────────── */
+.md-typeset .admonition,
+.md-typeset details {
+    border-radius: 10px;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+    border-width: 0 0 0 4px;
+    margin: 1.6em 0;
+}
+
+[data-md-color-scheme="slate"] .md-typeset .admonition,
+[data-md-color-scheme="slate"] .md-typeset details {
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+}
+
+.md-typeset .admonition-title,
+.md-typeset summary {
+    font-weight: 600;
+}
+
+/* ── Footnotes ───────────────────────────────────────────── */
+.md-typeset .footnote {
+    font-size: 0.76rem;
+    opacity: 0.75;
+}
+
+/* ── Mermaid ─────────────────────────────────────────────── */
+.md-typeset .mermaid {
+    text-align: center;
+    margin: 2.5rem 0;
+}
+
+[data-md-color-scheme="slate"] .md-typeset .mermaid {
+    filter: brightness(1.1) saturate(0.9);
+}
+
+/* ── Blockquotes (prompt snippets) ───────────────────────── */
+.md-typeset blockquote {
+    border-left: 3px solid var(--md-primary-fg-color);
+    border-radius: 0 10px 10px 0;
+    padding: 0.9em 1.3em;
+    margin: 1.4em 0;
+    font-style: italic;
+    opacity: 0.9;
+}
+
+[data-md-color-scheme="slate"] .md-typeset blockquote {
+    background-color: rgba(179, 157, 219, 0.06);
+}
+
+[data-md-color-scheme="default"] .md-typeset blockquote {
+    background-color: rgba(94, 53, 177, 0.03);
+}
+
+/* ── Navigation tabs ─────────────────────────────────────── */
+.md-tabs {
+    font-size: 0.78rem;
+    font-weight: 500;
+}
+
+/* ── Content links ───────────────────────────────────────── */
+.md-typeset a {
+    text-decoration: none;
+    transition: color 0.15s, border-color 0.15s;
+}
+
+.md-typeset a:hover {
+    color: var(--md-accent-fg-color);
+}
+
+/* ── Definition lists ────────────────────────────────────── */
+.md-typeset dd {
+    margin-left: 1.5em;
+}
+
+/* ── HR dividers ─────────────────────────────────────────── */
+.md-typeset hr {
+    border: none;
+    border-top: 1px solid var(--md-default-fg-color--lightest);
+    margin: 2.8em 0;
+}
+
+/* ── Math (MathJax) ──────────────────────────────────────── */
+.md-typeset .arithmatex {
+    overflow-x: auto;
+}
+
+/* ── Hero header for index ───────────────────────────────── */
+.md-typeset h1:first-child {
+    font-size: 2.4em;
+    background: linear-gradient(135deg, var(--md-primary-fg-color), var(--md-accent-fg-color));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    margin-bottom: 0.3em;
+}
+
+/* ── Compact "Next/Related" links at page bottom ─────────── */
+.md-typeset hr + p:last-child,
+.md-typeset hr + p:last-of-type {
+    font-size: 0.82rem;
+    opacity: 0.85;
+    padding: 0.8em 1em;
+    border-radius: 8px;
+    background: rgba(179, 157, 219, 0.05);
+    border-left: 3px solid var(--md-primary-fg-color);
+}
+
+[data-md-color-scheme="default"] .md-typeset hr + p:last-child,
+[data-md-color-scheme="default"] .md-typeset hr + p:last-of-type {
+    background: rgba(94, 53, 177, 0.03);
+}
+
+/* ── Smooth scroll ───────────────────────────────────────── */
+html {
+    scroll-behavior: smooth;
+}
+
+/* ── Table overflow on small screens ─────────────────────── */
+@media (max-width: 768px) {
+    .md-typeset table:not([class]) {
+        display: block;
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+    }
+}
