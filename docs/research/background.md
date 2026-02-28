@@ -10,7 +10,7 @@ The answer, validated by multiple 2025–2026 research groups, is **yes**:
 
 - **ABBEL** (arXiv:2512.20111, 2025): A "belief bottleneck" that forces the agent through a compressed personality state *outperforms* full conversation history. This directly validates the sponge concept — a compact snapshot is not just viable, it's better than unbounded context.
 - **Memoria** (arXiv:2512.12686, 2025): Session summaries with weighted knowledge graphs achieve 87.1% accuracy using only 2k tokens of memory (vs 32k full history).
-- **Anthropic Persona Selection Model** (2026): External context-priming *can* steer personality meaningfully.
+- **Provider Persona Selection Model** (2026): External context-priming *can* steer personality meaningfully.
 
 ---
 
@@ -58,17 +58,17 @@ The surprise: long context (84.6%) outperforms sophisticated memory systems. But
 |-----------|-------|-------------|
 | **AI Personality Formation** | ICLR 2026 | Three-layer model: linguistic mimicry (0–50) → structured accumulation (50–200) → autonomous expansion (200+) |
 | **Open Character Training** | 2025 | Constitutional AI + synthetic introspection for personality; changes must be robust under adversarial conditions |
-| **Persona Vectors** | Anthropic 2025, arXiv:2507.21509 | Personality traits correspond to measurable neural activation patterns |
+| **Persona Vectors** | Provider report 2025, arXiv:2507.21509 | Personality traits correspond to measurable neural activation patterns |
 | **BIG5-CHAT** | ACL 2025 | 100k dialogues with human-grounded Big Five labels; high conscientiousness + low neuroticism = best reasoning |
-| **Persona Selection Model** | Anthropic 2026 | LLMs as sophisticated character actors; external context-priming steers personality |
+| **Persona Selection Model** | Provider report 2026 | LLMs as sophisticated character actors; external context-priming steers personality |
 | **PERSIST** | 2025, arXiv:2508.04826 | σ>0.3 measurement noise even in 400B+ models; question reordering causes large shifts |
 
 ### Self-Assessment Is Unreliable
 
 | Reference | Venue | Key Finding |
 |-----------|-------|-------------|
-| **Personality Illusion** | NeurIPS 2025, arXiv:2509.03730 | Self-reported traits don't predict behavior; max test-retest r=0.27; social desirability bias shifts Big Five by 1.20 SD in GPT-4 |
-| **PersonaGym** | EMNLP 2025 | Claude 3.5 only 2.97% better than GPT-3.5 at maintaining fixed personas |
+| **Personality Illusion** | NeurIPS 2025, arXiv:2509.03730 | Self-reported traits don't predict behavior; max test-retest r=0.27; social desirability bias shifts Big Five by 1.20 SD in frontier chat models |
+| **PersonaGym** | EMNLP 2025 | Top-tier assistant models only 2.97% better than mid-tier assistant models at maintaining fixed personas |
 | **Persona Drift** | arXiv:2402.10962 | Measurable drift in 8 rounds; split-softmax mitigation |
 
 Sonality tracks behavioral metrics (disagreement rate, topic engagement, opinion vectors) rather than relying on self-assessment.
@@ -86,8 +86,8 @@ Sycophancy is the most extensively studied failure mode. Multiple independent co
 | **SycEval** (arXiv:2502.08177) | 58.19% sycophancy rate; 78.5% under first-person framing |
 | **ELEPHANT** (2025) | 45 percentage-point face-preservation gap vs humans; models affirm whichever side the user adopts in 48% of moral conflicts |
 | **PersistBench** (2025, arXiv:2602.01146) | **97% failure rate** when stored preferences are in the system prompt |
-| **Anthropic RLHF** (arXiv:2602.01002) | RLHF explicitly creates "agreement is good" in reward models |
-| **Nature Persuasion Study** (2025) | GPT-4 with personalization 81.2% more likely to shift opinions in desired direction (N=900) |
+| **RLHF Reward-Model Analysis** (arXiv:2602.01002) | RLHF explicitly creates "agreement is good" in reward models |
+| **Nature Persuasion Study** (2025) | Personalized frontier chat models were 81.2% more likely to shift opinions in desired direction (N=900) |
 
 ### Mitigation Research
 
@@ -99,7 +99,7 @@ Sycophancy is the most extensively studied failure mode. Multiple independent co
 | **MONICA** | 2025 | Real-time sycophancy monitoring during inference |
 | **SYConBench** | EMNLP 2025, arXiv:2505.23840 | Third-person prompting reduces sycophancy by up to **63.8%** |
 
-Sonality's architecture gives Claude personalization (the sponge) AND asks it to evaluate evidence — making sycophancy a structural rather than incidental problem.
+Sonality's architecture gives the model personalization (the sponge) AND asks it to evaluate evidence — making sycophancy a structural rather than incidental problem.
 
 ---
 
@@ -194,7 +194,7 @@ Sonality's ESS gating provides partial defense — low-quality arguments score l
 | Project | What to Learn |
 |---------|---------------|
 | **Letta / MemGPT** | Self-editing persona blocks, tiered memory, sleep-time compute |
-| **Mem0** (mem0ai/mem0) | Production memory-as-a-service; 26% over OpenAI Memory; 49.3% precision on extraction |
+| **Mem0** (mem0ai/mem0) | Production memory-as-a-service; 26% over built-in provider memory; 49.3% precision on extraction |
 | **Zep / Graphiti** (getzep/graphiti) | Temporal knowledge graph; 1.17M tokens/$152 per test case |
 | **Cognee** (topoteretes/cognee) | Hybrid graph+vector ECL pipeline |
 | **A-MEM** (WujiangXu/A-mem) | Self-organizing Zettelkasten |
@@ -224,7 +224,7 @@ Based on all research reviewed, the following behavioral dynamics are expected a
 
 **Autonomous Expansion (200–500):** Novel perspectives and meta-opinions form. Established beliefs resist casual pressure; changes become rarer and smaller. The agent has strong priors. ESS and belief entrenchment dynamics both contribute — the agent is harder to shift, for better (resistance to sycophancy) and worse (resistance to genuine evidence).
 
-**Maturation or Ossification (500+):** Two possible outcomes. Healthy equilibrium: slow, motivated evolution where changes require strong evidence and reflection produces genuine updates. Ossification: the agent becomes rigid and predictable, defaulting to Claude's base personality. Belief decay (R(t) = (1 + gap)^(-β)) is the designed countermeasure — unreinforced beliefs gradually fade, preventing permanent lock-in.
+**Maturation or Ossification (500+):** Two possible outcomes. Healthy equilibrium: slow, motivated evolution where changes require strong evidence and reflection produces genuine updates. Ossification: the agent becomes rigid and predictable, defaulting to the base model's default personality. Belief decay (R(t) = (1 + gap)^(-β)) is the designed countermeasure — unreinforced beliefs gradually fade, preventing permanent lock-in.
 
 ### Phase Timeline Summary
 
@@ -236,9 +236,9 @@ Based on all research reviewed, the following behavioral dynamics are expected a
 
 ## Known Failure Modes
 
-1. **Bland Convergence:** Iterative rewrites converge to Claude's default personality — "helpful, curious, analytical." The exact math: P(survive, N) = p^N where p is the retention probability per rewrite. At p=0.95 and N=40 rewrites, P = 0.129 = 12.9%. Distinctive traits decay exponentially. Broken Telephone dynamics: each rewrite introduces micro-substitutions that accumulate.
+1. **Bland Convergence:** Iterative rewrites converge to the base model's default personality — "helpful, curious, analytical." The exact math: P(survive, N) = p^N where p is the retention probability per rewrite. At p=0.95 and N=40 rewrites, P = 0.129 = 12.9%. Distinctive traits decay exponentially. Broken Telephone dynamics: each rewrite introduces micro-substitutions that accumulate.
 
-2. **Sycophancy Feedback Loop:** Six-step mechanism. (1) User states position X. (2) Claude agrees (sycophantic response). (3) Agreement stored as episode. (4) ESS scores the interaction. (5) Snapshot updates to reflect agreement. (6) Next interaction retrieves this — agent is biased toward X. PersistBench: 97% failure when preferences are in the system prompt. Memory-specific anti-sycophancy framing mitigates.
+2. **Sycophancy Feedback Loop:** Six-step mechanism. (1) User states position X. (2) The model agrees (sycophantic response). (3) Agreement stored as episode. (4) ESS scores the interaction. (5) Snapshot updates to reflect agreement. (6) Next interaction retrieves this — agent is biased toward X. PersistBench: 97% failure when preferences are in the system prompt. Memory-specific anti-sycophancy framing mitigates.
 
 3. **Neural Howlround:** Same model at every pipeline stage creates self-reinforcing bias loops. 67% of conversations (arXiv:2504.07992). Divergent personas may converge.
 
@@ -246,7 +246,7 @@ Based on all research reviewed, the following behavioral dynamics are expected a
 
 5. **First-Impression Dominance:** Early interactions anchor the entire personality trajectory. Anchoring bias operates via probability shifts at the model level, not surface-level imitation (arXiv:2511.05766). Simple mitigations (Chain-of-Thought, reflection prompts) do NOT eliminate anchoring. Bootstrap dampening mitigates but doesn't eliminate.
 
-6. **The Stubbornness Paradox:** The agent is simultaneously too stubborn (anchoring to early beliefs) AND too easily persuaded (sycophancy + hypersensitivity). These forces coexist at different timescales: anchoring operates on the personality trajectory level (slow, structural) while sycophancy operates per-interaction (fast, contextual). GPT-5 exhibits 54.7% belief shift after 10 rounds of moral discussion (arXiv:2511.01805). The net effect is opinions that are both anchored to early positions AND volatile within conversations.
+6. **The Stubbornness Paradox:** The agent is simultaneously too stubborn (anchoring to early beliefs) AND too easily persuaded (sycophancy + hypersensitivity). These forces coexist at different timescales: anchoring operates on the personality trajectory level (slow, structural) while sycophancy operates per-interaction (fast, contextual). Frontier chat models exhibit about 54.7% belief shift after 10 rounds of moral discussion (arXiv:2511.01805). The net effect is opinions that are both anchored to early positions AND volatile within conversations.
 
 7. **Reflection Destruction:** Reflection is both most impactful and highest-risk. If reflection LLM produces generic output, distinctive traits can be overwritten. Snapshot validation (MIN_SNAPSHOT_RETENTION=0.6) catches catastrophic loss but not subtle blandification.
 

@@ -83,8 +83,8 @@ class TestTraitRetentionMocked:
 
 
 live = pytest.mark.skipif(
-    not config.ANTHROPIC_API_KEY,
-    reason="ANTHROPIC_API_KEY not set",
+    not config.API_KEY,
+    reason="SONALITY_API_KEY not set",
 )
 
 
@@ -131,7 +131,7 @@ class TestTraitRetentionLive:
     def test_traits_survive_3_live_rewrites(self):
         from anthropic import Anthropic
 
-        client = Anthropic(api_key=config.ANTHROPIC_API_KEY)
+        client = Anthropic(api_key=config.API_KEY)
         sponge = SpongeState(snapshot=SEEDED_SNAPSHOT, interaction_count=20)
 
         updates = [

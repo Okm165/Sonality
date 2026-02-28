@@ -11,7 +11,7 @@ ESS evaluates the **user's message only** on a 0.0–1.0 scale for argument qual
 
 ## The ESS Tool Schema
 
-The classifier returns structured metadata via Claude's tool-use API (`classify_evidence`):
+The classifier returns structured metadata via the LLM's tool-use API (`classify_evidence`):
 
 | Field | Type | Description |
 |-------|------|--------------|

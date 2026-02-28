@@ -10,12 +10,15 @@ Set these in your `.env` file (copy from `.env.example`):
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ANTHROPIC_API_KEY` | *(required)* | Anthropic API key for Claude API access |
-| `SONALITY_MODEL` | `claude-sonnet-4-20250514` | Main reasoning model for response generation |
+| `SONALITY_API_KEY` | *(required)* | API key for the LLM provider |
+| `SONALITY_MODEL` | *(see .env.example)* | Main reasoning model for response generation |
 | `SONALITY_ESS_MODEL` | Same as `SONALITY_MODEL` | Model for ESS classification, insight extraction, and reflection |
 | `SONALITY_ESS_THRESHOLD` | `0.3` | Minimum ESS score to trigger personality updates |
 | `SONALITY_LOG_LEVEL` | `INFO` | Python logging level (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |
 | `SONALITY_BOOTSTRAP_DAMPENING_UNTIL` | `10` | First N interactions with 0.5× opinion update dampening |
+| `SONALITY_OPINION_COOLING_PERIOD` | `3` | Interactions before staged opinion deltas are committed |
+| `SONALITY_SEMANTIC_RETRIEVAL_COUNT` | `2` | Semantic memories retrieved each turn |
+| `SONALITY_EPISODIC_RETRIEVAL_COUNT` | `3` | Episodic memories retrieved each turn |
 | `SONALITY_REFLECTION_EVERY` | `20` | Periodic reflection interval (interactions) |
 
 ---
@@ -38,6 +41,8 @@ These are defined in `sonality/config.py` and `sonality/memory/updater.py`. Not 
 | Constant | Value | Location | Rationale |
 |----------|-------|----------|-----------|
 | `EPISODE_RETRIEVAL_COUNT` | 5 | `config.py` | Episodes retrieved per interaction. Balances context richness with prompt length. |
+| `SEMANTIC_RETRIEVAL_COUNT` | 2 | `config.py` | ENGRAM-style semantic memory routing without graph complexity. |
+| `EPISODIC_RETRIEVAL_COUNT` | 3 | `config.py` | Keeps concrete interaction recall while preserving prompt budget. |
 | `MAX_CONVERSATION_CHARS` | 100,000 | `config.py` | Conversation history truncation. Oldest messages removed first when exceeded. |
 
 ### Validation Parameters
@@ -111,10 +116,10 @@ Using a different model for ESS classification and reflection can reduce costs:
 
 ```bash
 # Use a cheaper model for ESS (classification task, less reasoning needed)
-SONALITY_ESS_MODEL=claude-haiku-3-20250929
+SONALITY_ESS_MODEL=<model-id>  # see .env.example for examples
 
 # Use the main model for response generation only
-SONALITY_MODEL=claude-sonnet-4-20250514
+SONALITY_MODEL=<model-id>      # see .env.example for defaults
 ```
 
 **Trade-off:** Cheaper ESS models may produce less calibrated scores. Run IBM-ArgQ correlation test (T2.1) after changing the ESS model.
@@ -128,6 +133,18 @@ Only change if you have evidence. Default 0.15 matches FadeMem (2026) and Ebbing
 | 0.1 | Slower decay; opinions persist longer |
 | **0.15** (default) | Standard power-law decay |
 | 0.2 | Faster decay; more aggressive forgetting |
+
+### Opinion Cooling (`SONALITY_OPINION_COOLING_PERIOD`)
+
+Controls how many interactions a belief delta is staged before commit:
+
+| Setting | Effect |
+|---------|--------|
+| 1 | Near-immediate commits (most reactive) |
+| **3** (default) | Balanced responsiveness and anti-sycophancy buffering |
+| 4-5 | Stronger resistance to short social pressure bursts |
+
+**Recommendation:** keep `3` unless your runs show either over-reactivity (increase) or under-adaptation (decrease).
 
 ---
 

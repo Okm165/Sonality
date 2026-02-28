@@ -19,12 +19,44 @@ def _print_status(agent: SonalityAgent) -> None:
         f"ESS {score_str}",
         f"v{agent.sponge.version}",
         f"#{agent.sponge.interaction_count}",
+        f"staged={len(agent.sponge.staged_opinion_updates)}",
     ]
     if topics:
         parts.append(topics)
     if updated:
         parts.append("\033[33mSPONGE UPDATED\033[0m")
     print(f"  [{' | '.join(parts)}]")
+
+
+def _show_health(agent: SonalityAgent) -> None:
+    s = agent.sponge
+    metas = list(s.belief_meta.values())
+    ic = s.interaction_count or 1
+    strong = sum(1 for m in metas if m.confidence > 0.5)
+    stale = sum(1 for m in metas if ic - m.last_reinforced > 30)
+
+    if ic < 20:
+        maturity = "Layer 1 (linguistic mimicry)"
+    elif ic < 50 or len(s.opinion_vectors) < 10:
+        maturity = "Layer 2 (structured accumulation)"
+    else:
+        maturity = "Layer 3 (autonomous expansion)"
+
+    entrenched = s.detect_entrenched_beliefs()
+    contradictions = agent._collect_unresolved_contradictions()
+    contradiction_line = ", ".join(contradictions[:3]) if contradictions else "none"
+    recent = s.recent_shifts[-1] if s.recent_shifts else None
+    last_line = f"#{recent.interaction} — {recent.description[:50]}" if recent else "none"
+
+    print(f"  Maturity:    {maturity} ({ic} interactions, {len(s.opinion_vectors)} beliefs)")
+    print(f"  Beliefs:     {len(s.opinion_vectors)} total, {strong} strong, {stale} stale")
+    print(f"  Disagree:    {s.behavioral_signature.disagreement_rate:.0%}")
+    print(f"  Insights:    {len(s.pending_insights)} pending")
+    print(f"  Staged:      {len(s.staged_opinion_updates)} pending commits")
+    print(f"  Entrenched:  {', '.join(entrenched) if entrenched else 'none'}")
+    print(f"  Contradict:  {contradiction_line}")
+    print(f"  Snapshot:    {len(s.snapshot)} chars, v{s.version}")
+    print(f"  Last shift:  {last_line}")
 
 
 def _show_diff(agent: SonalityAgent) -> None:
@@ -60,8 +92,10 @@ BANNER = """\
     /snapshot  narrative snapshot text
     /beliefs   opinion vectors with confidence
     /insights  pending personality insights
+    /staged    staged opinion updates (cooling period)
     /topics    topic engagement counts
     /shifts    recent personality shifts
+    /health    personality health metrics
     /diff      diff of last snapshot change
     /reset     reset to seed personality
     /quit      exit
@@ -74,8 +108,8 @@ def main() -> None:
         format="%(levelname)s %(name)s: %(message)s",
     )
 
-    if not config.ANTHROPIC_API_KEY:
-        print("Error: set ANTHROPIC_API_KEY in .env or environment.")
+    if not config.API_KEY:
+        print("Error: set SONALITY_API_KEY in .env or environment.")
         print("  cp .env.example .env && $EDITOR .env")
         sys.exit(1)
 
@@ -135,6 +169,18 @@ def main() -> None:
                     print(f"  {i}. {insight}")
             continue
 
+        if cmd == "/staged":
+            if not agent.sponge.staged_opinion_updates:
+                print("  No staged opinion updates.")
+            else:
+                for update in agent.sponge.staged_opinion_updates:
+                    print(
+                        "  "
+                        f"{update.topic:30s} {update.signed_magnitude:+.4f} "
+                        f"(due #{update.due_interaction}, staged #{update.staged_at})"
+                    )
+            continue
+
         if cmd == "/topics":
             eng = agent.sponge.behavioral_signature.topic_engagement
             if not eng:
@@ -150,6 +196,10 @@ def main() -> None:
             else:
                 for s in agent.sponge.recent_shifts:
                     print(f"  #{s.interaction} ({s.magnitude:.3f}): {s.description}")
+            continue
+
+        if cmd == "/health":
+            _show_health(agent)
             continue
 
         if cmd == "/diff":

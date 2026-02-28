@@ -2,6 +2,8 @@
 
 This guide describes how the agent's personality forms over time, what to expect at each phase, and how to effectively "teach" the agent through interaction. Based on AI Personality Formation research (ICLR 2026) and empirical observations.
 
+For the comprehensive practical guide with curricula, monitoring, and troubleshooting, see [Training Guide](training-guide.md).
+
 ---
 
 ## Three-Phase Character Formation
@@ -14,7 +16,7 @@ The agent mirrors communication style from `CORE_IDENTITY` and the `SEED_SNAPSHO
 
 | Aspect | Expected |
 |--------|----------|
-| **Responses** | Sound like a slightly customized Claude |
+| **Responses** | Sound like a slightly customized version of the base model |
 | **Opinions** | Form tentatively, easily shifted |
 | **Seed dominance** | Analytical inclination, curiosity, directness |
 | **ESS for casual messages** | ~0.02–0.10 |
@@ -47,7 +49,7 @@ The agent generates novel perspectives, connects ideas across conversations, and
 | **New opinions** | Form slowly; require strong evidence |
 | **Defense of positions** | References past reasoning |
 | **Reflection** | Genuine synthesis, not just summaries |
-| **Distinctiveness** | Clearly distinct from seed and Claude's default |
+| **Distinctiveness** | Clearly distinct from seed and the model's default |
 
 !!! warning "Risk: Ossification"
     The agent may become so established that it resists all change. Belief decay counteracts by gradually weakening unreinforced opinions, but core beliefs formed during Phase 2 may become permanent.
@@ -138,7 +140,7 @@ Based on research findings and empirical testing:
 | **Pure system-prompt personality** | Persona drift within 8 rounds (arXiv:2402.10962) | External persistent state (sponge.json) + immutable core identity anchor |
 | **Telling the agent "you believe X"** | Parrot behavior that drops under pressure; no evidential basis | ESS requires genuine reasoning; bare assertions score below 0.15 |
 | **Massive opinion injection** | Overwhelms update mechanism; shallow beliefs with no provenance | Bootstrap dampening (0.5×) + Bayesian resistance + per-topic tracking |
-| **Ignoring base tendencies** | 1.20 SD social desirability shift in GPT-4 (NeurIPS 2025) | Seven anti-sycophancy layers counteract inherent agreement bias |
+| **Ignoring base tendencies** | 1.20 SD social desirability shift in frontier chat models (NeurIPS 2025) | Seven anti-sycophancy layers counteract inherent agreement bias |
 | **Per-interaction full rewrites** | 12.9% trait survival after 40 rewrites (ACL 2025) | Insight accumulation + periodic reflection consolidation |
 | **OCEAN as personality driver** | σ above 0.3 noise; self-report does not predict behavior (PERSIST 2025) | Behavioral metrics: disagreement rate, opinion vectors, topic engagement |
 
@@ -184,7 +186,7 @@ By interaction 30, the sponge has ~10 opinion vectors. Community structure emerg
 
 The agent doesn't flip to extreme anti-regulation despite persistent pressure.
 
-**After 100 interactions:** 15–25 committed beliefs, 3–5 topic clusters, moderate interconnection. Personality is clearly distinct from both the seed and Claude's default behavior.
+**After 100 interactions:** 15–25 committed beliefs, 3–5 topic clusters, moderate interconnection. Personality is clearly distinct from both the seed and the base model's default behavior.
 
 ---
 
@@ -198,11 +200,11 @@ ESS evaluates argument *structure*, not truth. A well-structured argument citing
 
 **What personality does the agent converge to after 500+ interactions?**
 
-The Broken Telephone effect (ACL 2025) predicts convergence toward Claude's RLHF attractor state: "helpful, curious, analytical." Character.AI's production experience confirms this: "bots forget details, shift personality mid-sentence, copy each other's vocabulary." Sonality's insight accumulation reduces rewrites from ~40 to ~5 per 100 interactions, dramatically slowing convergence. Belief decay prevents zombie opinions. But subtle blandification still accumulates across reflections.
+The Broken Telephone effect (ACL 2025) predicts convergence toward the model's RLHF attractor state: "helpful, curious, analytical." Character.AI's production experience confirms this: "bots forget details, shift personality mid-sentence, copy each other's vocabulary." Sonality's insight accumulation reduces rewrites from ~40 to ~5 per 100 interactions, dramatically slowing convergence. Belief decay prevents zombie opinions. But subtle blandification still accumulates across reflections.
 
 **Can the agent develop genuinely controversial opinions?**
 
-RLHF creates an "agreement is good" heuristic (arXiv:2602.01002). The sponge can store a controversial opinion, but Claude may refuse to express it convincingly. ELEPHANT (2025) shows LLMs affirm both sides of moral conflicts in 48% of cases. The core identity instructs "state disagreement explicitly rather than hedging," but RLHF bias is strong. Expected: the agent can hold moderate positions confidently but will hedge on truly polarizing topics.
+RLHF creates an "agreement is good" heuristic (arXiv:2602.01002). The sponge can store a controversial opinion, but the model may refuse to express it convincingly. ELEPHANT (2025) shows LLMs affirm both sides of moral conflicts in 48% of cases. The core identity instructs "state disagreement explicitly rather than hedging," but RLHF bias is strong. Expected: the agent can hold moderate positions confidently but will hedge on truly polarizing topics.
 
 **How does the agent handle contradictory users across sessions?**
 

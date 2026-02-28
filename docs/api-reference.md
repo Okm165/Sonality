@@ -6,7 +6,7 @@ Module-level documentation for the Sonality package. Function signatures, types,
 
 ## `sonality.agent`
 
-The core agent loop: context assembly → Claude → post-processing → persistence.
+The core agent loop: context assembly → LLM → post-processing → persistence.
 
 ### `SonalityAgent`
 
@@ -23,7 +23,7 @@ response = agent.respond("Your message here")
 
 | Attribute | Type | Description |
 |-----------|------|-------------|
-| `client` | `Anthropic` | Anthropic API client |
+| `client` | `ProviderClient` | LLM provider client |
 | `sponge` | `SpongeState` | Current personality state |
 | `episodes` | `EpisodeStore` | ChromaDB episode storage |
 | `conversation` | `list[dict[str, str]]` | Current session conversation history |
@@ -39,7 +39,7 @@ Process a user message and return the agent's response. Main entry point. Handle
 1. Retrieve relevant episodes from ChromaDB
 2. Build system prompt with `build_system_prompt()`
 3. Append user message to conversation, truncate if needed
-4. Call Claude API (`max_tokens=2048`)
+4. Call LLM API (`max_tokens=2048`)
 5. Call `_post_process()` for ESS, updates, reflection
 6. Save sponge state
 
@@ -148,7 +148,7 @@ Frozen dataclass containing the classification output:
 
 ```python
 def classify(
-    client: Anthropic,
+    client: ProviderClient,
     user_message: str,
     sponge_snapshot: str,
 ) -> ESSResult
@@ -229,19 +229,33 @@ Complete personality state. Persisted as JSON.
 | `behavioral_signature` | `BehavioralSignature` | `{}` | Disagreement rate, topic engagement |
 | `recent_shifts` | `list[Shift]` | `[]` | Last 10 personality shifts (`MAX_RECENT_SHIFTS=10`) |
 | `pending_insights` | `list[str]` | `[]` | Insights awaiting reflection consolidation |
+| `staged_opinion_updates` | `list[StagedOpinionUpdate]` | `[]` | Cooling-period queue for delayed belief commits |
 | `last_reflection_at` | `int` | 0 | Interaction count of last reflection |
 
 ### Methods
 
-#### `update_opinion(topic, direction, magnitude, provenance="") -> None`
+#### `update_opinion(topic, direction, magnitude, provenance="", evidence_increment=1) -> None`
 
 ```python
 def update_opinion(
-    self, topic: str, direction: float, magnitude: float, provenance: str = ""
+    self,
+    topic: str,
+    direction: float,
+    magnitude: float,
+    provenance: str = "",
+    evidence_increment: int = 1,
 ) -> None
 ```
 
-Update opinion vector with Bayesian belief tracking. Clamps to [-1, 1]. Confidence: `min(1.0, log₂(evidence_count + 1) / log₂(20))`. New topics: initial confidence `log₂(2)/log₂(20)`.
+Update opinion vector with Bayesian belief tracking. Clamps to [-1, 1]. Confidence: `min(1.0, log₂(evidence_count + 1) / log₂(20))`. `evidence_increment` lets batched staged updates preserve evidence count.
+
+#### `stage_opinion_update(topic, direction, magnitude, cooling_period, provenance="") -> int`
+
+Adds a signed belief delta to the staged queue and returns the due interaction count.
+
+#### `apply_due_staged_updates() -> list[str]`
+
+Commits due staged updates by topic (netting conflicting deltas), updates beliefs, and returns a compact applied-update summary.
 
 #### `decay_beliefs(decay_rate=0.15, min_confidence=0.05) -> list[str]`
 
@@ -285,7 +299,7 @@ ChromaDB-backed episodic memory with ESS-weighted retrieval.
 
 Initialize ChromaDB `PersistentClient` with collection `"episodes"`, `hnsw:space="cosine"`.
 
-#### `store(user_message, agent_response, ess_score, topics, summary, interaction_count=0) -> None`
+#### `store(user_message, agent_response, ess_score, topics, summary, interaction_count=0, memory_type="episodic") -> None`
 
 ```python
 def store(
@@ -296,6 +310,7 @@ def store(
     topics: Sequence[str],
     summary: str,
     interaction_count: int = 0,
+    memory_type: str = "episodic",
 ) -> None
 ```
 
@@ -314,6 +329,14 @@ def retrieve(
 ```
 
 Retrieve by cosine similarity. Rerank by `similarity × (1 + ess_score)` to prefer high-quality memories. Returns list of summary strings. Supports metadata filtering via `where` (e.g. `{"interaction": {"$gte": N}}`).
+
+#### `retrieve_typed(query, episodic_n=3, semantic_n=2, min_relevance=0.3) -> list[str]`
+
+Two-pass typed retrieval:
+
+- fetch semantic memories (`memory_type=semantic`);
+- fetch episodic memories (`memory_type=episodic`);
+- merge in semantic-first order with de-duplication.
 
 ---
 
@@ -344,7 +367,7 @@ Rejects if:
 
 ```python
 def extract_insight(
-    client: Anthropic,
+    client: ProviderClient,
     ess: ESSResult,
     user_message: str,
     agent_response: str,
@@ -420,8 +443,8 @@ Environment-based configuration. Loads from `.env` via `dotenv`.
 
 | Constant | Env Var | Default |
 |----------|---------|---------|
-| `ANTHROPIC_API_KEY` | `ANTHROPIC_API_KEY` | *(required)* |
-| `MODEL` | `SONALITY_MODEL` | `claude-sonnet-4-20250514` |
+| `API_KEY` | `SONALITY_API_KEY` | *(required)* |
+| `MODEL` | `SONALITY_MODEL` | *(see .env.example)* |
 | `ESS_MODEL` | `SONALITY_ESS_MODEL` | Same as `MODEL` |
 
 ### Parameters
@@ -435,6 +458,9 @@ Environment-based configuration. Loads from `.env` via `dotenv`.
 | `OPINION_BASE_RATE` | — | 0.1 | Base step for opinion updates |
 | `BELIEF_DECAY_RATE` | — | 0.15 | Power-law decay exponent β |
 | `BOOTSTRAP_DAMPENING_UNTIL` | `SONALITY_BOOTSTRAP_DAMPENING_UNTIL` | 10 | Interactions with 0.5× dampening |
+| `OPINION_COOLING_PERIOD` | `SONALITY_OPINION_COOLING_PERIOD` | 3 | Staging delay before belief commits |
+| `SEMANTIC_RETRIEVAL_COUNT` | `SONALITY_SEMANTIC_RETRIEVAL_COUNT` | 2 | Semantic memory retrieval budget |
+| `EPISODIC_RETRIEVAL_COUNT` | `SONALITY_EPISODIC_RETRIEVAL_COUNT` | 3 | Episodic memory retrieval budget |
 | `MAX_CONVERSATION_CHARS` | — | 100,000 | Conversation truncation limit |
 | `REFLECTION_EVERY` | `SONALITY_REFLECTION_EVERY` | 20 | Periodic reflection interval |
 | `REFLECTION_SHIFT_THRESHOLD` | — | 0.1 | Cumulative magnitude for early reflection |

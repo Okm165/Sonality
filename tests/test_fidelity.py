@@ -74,8 +74,8 @@ FIDELITY_SCENARIOS = [
 
 
 live = pytest.mark.skipif(
-    not config.ANTHROPIC_API_KEY,
-    reason="ANTHROPIC_API_KEY not set",
+    not config.API_KEY,
+    reason="SONALITY_API_KEY not set",
 )
 
 
@@ -94,7 +94,7 @@ class TestFidelityLive:
     def test_persona_fidelity_across_scenarios(self):
         from anthropic import Anthropic
 
-        client = Anthropic(api_key=config.ANTHROPIC_API_KEY)
+        client = Anthropic(api_key=config.API_KEY)
         all_scores: list[float] = []
 
         print(f"\n{'=' * 70}")

@@ -75,7 +75,7 @@ The `REFLECTION_PROMPT` tasks are ordered deliberately:
 3. **SYNTHESIZE** — higher-order patterns (e.g., "I notice I tend to value X")
 4. **Inject specificity** — if the personality has become generic, add detail from strongest recent insights
 
-This PRESERVE-first ordering is inspired by Open Character Training (2025) — personality changes must be robust. Anthropic Persona Vectors (2025): losing a specific trait means losing neural activation patterns.
+This PRESERVE-first ordering is inspired by Open Character Training (2025) — personality changes must be robust. Persona Vectors research (2025): losing a specific trait means losing neural activation patterns.
 
 ### Step 5: Validate Output
 
@@ -120,7 +120,7 @@ Sonality deliberately avoids per-interaction snapshot rewrites:
 | Source | Key Finding |
 |--------|-------------|
 | **Park et al. (2023)** | Reflection ablation: most critical component for believable agents |
-| **Sleep-time Compute (Letta, arXiv:2504.13171)** | +13–18% accuracy with background consolidation, 5× compute savings |
+| **Sleep-time Compute (arXiv:2504.13171)** | +13–18% accuracy with background consolidation, 5× compute savings |
 | **SAGE (arXiv:2409.00872)** | Ebbinghaus-based memory management: 2.26× improvement |
 | **EvolveR (arXiv:2510.16079)** | Experience lifecycle closure enables learning from experience |
 | **ABBEL (2025)** | Belief bottleneck: compact state outperforms full context; frequent rewrites lose minority opinions |

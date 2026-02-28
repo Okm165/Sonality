@@ -1,6 +1,6 @@
 ## Memory Model
 
-Sonality's memory architecture is a multi-tier hierarchy validated by Stanford Generative Agents (Park et al., 2023), MemGPT/Letta, and ENGRAM (2025). Research consistently shows that flat, unsorted memory degrades into noise — the agent cannot distinguish "I fundamentally value honesty" from "in conversation #47, the user mentioned they like coffee." This document describes each tier, the data shapes at different interaction counts, the rationale for this hierarchy, and how it compares to contemporary systems.
+Sonality's memory architecture is a multi-tier hierarchy validated by Stanford Generative Agents (Park et al., 2023), virtual-context memory systems, and ENGRAM (2025). Research consistently shows that flat, unsorted memory degrades into noise — the agent cannot distinguish "I fundamentally value honesty" from "in conversation #47, the user mentioned they like coffee." This document describes each tier, the data shapes at different interaction counts, the rationale for this hierarchy, and how it compares to contemporary systems.
 
 ## Multi-Tier Memory Hierarchy
 
@@ -19,18 +19,24 @@ flowchart TB
         BM["belief_meta: dict[str, BeliefMeta]\nconfidence, evidence_count, last_reinforced, provenance"]
     end
 
-    subgraph Tier4["Tier 4: Pending Insights"]
+    subgraph Tier4["Tier 4: Staged Belief Updates"]
+        SU["staged_opinion_updates: list[StagedOpinionUpdate]\ncooling-period delayed commits"]
+    end
+
+    subgraph Tier5["Tier 5: Pending Insights"]
         PI["pending_insights: list[str]\naccumulated between reflections"]
     end
 
-    subgraph Tier5["Tier 5: Episodic Memory"]
+    subgraph Tier6["Tier 6: Episodic/Semantic Memory"]
         EP["ChromaDB: cosine similarity\nESS-weighted reranking\ntop-5 retrieved per interaction"]
     end
 
     CI --> PS
     PS --> OV
     OV --> BM
+    OV --> SU
     PS --> PI
+    SU --> EP
     PI --> EP
 ```
 
@@ -39,8 +45,9 @@ flowchart TB
 | 1. Core Identity | Immutable string in `prompts.py` | Yes (~200 tokens) | Gravitational anchor against personality drift |
 | 2. Personality Snapshot | `sponge.snapshot` in `sponge.json` | Yes (~500 tokens) | Current personality in the agent's own voice |
 | 3. Opinion Vectors + BeliefMeta | `sponge.opinion_vectors`, `sponge.belief_meta` | Summarized in traits | Numerical stance and confidence per topic |
-| 4. Pending Insights | `sponge.pending_insights` | No (reflection-only) | Accumulated per-interaction insights awaiting consolidation |
-| 5. Episodic Memory | ChromaDB | Retrieved selectively (top-5) | Semantic retrieval of relevant past interactions |
+| 4. Staged Belief Updates | `sponge.staged_opinion_updates` | Summarized in traits | Cooling-period delayed belief commits to reduce reactive flips |
+| 5. Pending Insights | `sponge.pending_insights` | No (reflection-only) | Accumulated per-interaction insights awaiting consolidation |
+| 6. Episodic/Semantic Memory | ChromaDB | Retrieved selectively | Typed vector retrieval of relevant past interactions |
 
 ## Tier 1: Core Identity
 
@@ -69,7 +76,7 @@ but firmly. You tend toward agreeing too readily — actively resist this.
 ```
 
 !!! info "Research Backing"
-    Persona drift occurs within 8 conversation rounds without an anchor (arXiv:2402.10962). The core identity provides that anchor — regardless of how opinions evolve, the fundamental character remains stable. Inspired by Anthropic's "Soul Document" concept.
+    Persona drift occurs within 8 conversation rounds without an anchor (arXiv:2402.10962). The core identity provides that anchor — regardless of how opinions evolve, the fundamental character remains stable. Inspired by the "Soul Document" concept from personality AI research.
 
 ## Tier 2: Personality Snapshot
 
@@ -121,7 +128,27 @@ belief_meta: dict[str, BeliefMeta] = {
 !!! info "Opinions vs Facts: A Critical Distinction"
     The opinion dynamics system applies only to **subjective beliefs** (opinions, preferences, values). Objective facts should be *corrected* with evidence, not "evolved" through persuasion. LLMs are "stochastic pattern-completion systems" that conflate linguistic plausibility with truth (arXiv:2512.19466). If facts and opinions are treated identically, the agent might "evolve" factual knowledge using opinion dynamics — leading to confidently wrong beliefs. The Hindsight architecture (arXiv:2512.12818) solves this by separating memory into four networks: world facts, agent experiences, entity summaries, and evolving beliefs. Sonality's current design does not explicitly separate fact from opinion — the ESS classifier evaluates argument quality regardless of content type. This is an accepted limitation. A future `belief_type` field (`opinion`, `factual`, `preference`, `principle`) with different update rules per type would address it.
 
-## Tier 4: Pending Insights
+## Tier 4: Staged Belief Updates
+
+High-ESS deltas are staged first, then committed after a short cooling period (default 3 interactions). This reduces immediate social-pressure flips while preserving evidence accumulation.
+
+**Data shape:**
+
+```python
+staged_opinion_updates: list[StagedOpinionUpdate] = [
+    StagedOpinionUpdate(
+        topic="governance",
+        signed_magnitude=+0.018,
+        staged_at=42,
+        due_interaction=45,
+        provenance="ESS 0.72: User provided comparative governance evidence"
+    )
+]
+```
+
+At commit time, due updates are netted by topic before applying to `opinion_vectors`.
+
+## Tier 5: Pending Insights
 
 Between reflections, one-sentence personality insights are extracted from high-ESS interactions and accumulated in `sponge.pending_insights`. They are **not** immediately integrated into the snapshot.
 
@@ -135,14 +162,14 @@ Between reflections, one-sentence personality insights are extracted from high-E
 
 These are consolidated into the snapshot only during reflection cycles. This accumulate-then-consolidate approach avoids the "Broken Telephone" effect (ACL 2025) where iterative LLM rewrites converge to generic text.
 
-## Tier 5: Episodic Memory
+## Tier 6: Episodic/Semantic Memory
 
 ChromaDB stores episode summaries as vector embeddings (default embedding model, cosine similarity). Each episode includes:
 
 - **Document**: ESS-generated `summary` (embedded for retrieval)
-- **Metadata**: `ess_score`, `topics`, `user_message` (truncated), `agent_response` (truncated), `timestamp`, `interaction`
+- **Metadata**: `ess_score`, `topics`, `memory_type`, `user_message` (truncated), `agent_response` (truncated), `timestamp`, `interaction`
 
-**Retrieval**: `EpisodeStore.retrieve(query, n_results=5, min_relevance=0.3)` returns episodes reranked by `similarity × (1 + ess_score)` — higher-quality memories are preferred. This addresses the 47.9% retrieval poisoning risk documented in MemoryGraft (2025).
+**Retrieval**: `EpisodeStore.retrieve_typed(query, semantic_n=2, episodic_n=3)` runs typed retrieval and merges results in semantic-first order. Each branch uses `similarity × (1 + ess_score)` reranking.
 
 ## Data Shape Over Time
 
@@ -231,7 +258,7 @@ ChromaDB stores episode summaries as vector embeddings (default embedding model,
 
 ## Comparison: Sonality vs Contemporary Systems
 
-| Aspect | Sonality | MemGPT | Sophia | Hindsight |
+| Aspect | Sonality | Memory OS (tool-based) | Sophia | Hindsight |
 |--------|----------|--------|--------|-----------|
 | **Core identity** | Immutable ~200 tok in prompt | Self-editing persona blocks | System 3 meta-layer | Four-network memory |
 | **Personality state** | ~500 tok narrative (Sponge) | Virtual context, persona edits | 80% fewer reasoning steps | 39%→83.6% long-horizon |

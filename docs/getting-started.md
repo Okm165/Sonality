@@ -4,7 +4,7 @@
 
 - **Python 3.12+** (the project targets 3.12–3.13)
 - **[uv](https://docs.astral.sh/uv/)** — fast Python package manager
-- **Anthropic API key** — get one at [console.anthropic.com](https://console.anthropic.com/)
+- **LLM API key** — an API key for the configured model provider (see [Model Considerations](model-considerations.md))
 
 ## Installation
 
@@ -13,7 +13,7 @@
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
 # Clone the repository
-git clone https://github.com/herodotusdev/sonality.git
+git clone <repository-url>
 cd sonality
 
 # Install dependencies (creates .venv automatically)
@@ -21,7 +21,7 @@ make install
 
 # Configure
 cp .env.example .env
-# Edit .env — add your ANTHROPIC_API_KEY
+# Edit .env — add your SONALITY_API_KEY
 ```
 
 ## Running
@@ -38,7 +38,7 @@ This starts an interactive REPL where you can chat with the agent and observe it
 
 ```bash
 cp .env.example .env
-# Edit .env — add your ANTHROPIC_API_KEY
+# Edit .env — add your API key
 docker compose run --rm sonality
 ```
 
@@ -52,8 +52,10 @@ Once running, the REPL supports introspection commands:
 | `/snapshot` | Current narrative snapshot text |
 | `/beliefs` | Opinion vectors with confidence and evidence counts |
 | `/insights` | Pending insights awaiting next reflection |
+| `/staged` | Staged opinion updates awaiting cooling-period commit |
 | `/topics` | Topic engagement counts |
 | `/shifts` | Recent personality shifts with magnitudes |
+| `/health` | Personality health and maturation metrics |
 | `/diff` | Text diff of last sponge snapshot change |
 | `/reset` | Reset to seed personality |
 | `/quit` | Exit |
@@ -129,7 +131,7 @@ sonality/
 │   ├── __init__.py             Package version
 │   ├── __main__.py             python -m sonality
 │   ├── cli.py                  Terminal REPL
-│   ├── agent.py                Core loop: context → Claude → post-process
+│   ├── agent.py                Core loop: context → LLM → post-process
 │   ├── config.py               Environment + defaults
 │   ├── prompts.py              Prompt templates
 │   ├── ess.py                  Evidence Strength Score classifier

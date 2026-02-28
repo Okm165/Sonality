@@ -9,7 +9,7 @@ flowchart TD
     UM([User Message]) --> CA
 
     subgraph CA["1. Context Assembly"]
-        RET["EpisodeStore.retrieve\ntop-5 by similarity x 1+ESS"]
+        RET["EpisodeStore.retrieve_typed\nsemantic(2) + episodic(3)"]
         TRAITS["_build_structured_traits\ntone, topics, opinions, disagreement rate"]
         BUILD["build_system_prompt\ncore identity + snapshot + traits + episodes"]
         TRUNC["_truncate_conversation\nkeep under 100k chars"]
@@ -18,7 +18,7 @@ flowchart TD
     CA --> RG
 
     subgraph RG["2. Response Generation"]
-        CLAUDE1["Claude API · messages.create\n~2000 in / ~500 out tokens"]
+        LLM1["LLM API · messages.create\n~2000 in / ~500 out tokens"]
     end
 
     RG --> Response([Agent Response])
@@ -37,7 +37,7 @@ flowchart TD
     GATE -->|No| SAVE
 
     subgraph HIGH["4. High-ESS Processing"]
-        OPINION["Update Opinions\nmagnitude / confidence+1"]
+        OPINION["Stage Opinions\ncooling-period delayed commit"]
         INSIGHT["Extract Insight\none-sentence LLM extraction"]
         SHIFT["Record Shift\ndescription + magnitude"]
     end
@@ -64,7 +64,7 @@ flowchart TD
 
 ## LLM Calls Per Interaction
 
-Each interaction makes **2–3** Claude API calls:
+Each interaction makes **2–3** LLM API calls:
 
 | # | Call | Function | Model | Purpose | Approx. Tokens |
 |---|------|----------|-------|---------|----------------|
@@ -75,13 +75,13 @@ Each interaction makes **2–3** Claude API calls:
 
 Calls 1 and 2 occur on every interaction. Call 3 occurs only when `ess.score > config.ESS_THRESHOLD` (0.3). Call 4 occurs periodically (every 20 interactions) or when cumulative shift magnitude exceeds 0.1.
 
-**Per-interaction cost:** ~$0.005–0.015 at current Claude Sonnet pricing.
+**Per-interaction cost:** ~$0.005–0.015 depending on the configured model.
 
 ## High-ESS Interaction Trace (ESS > 0.3)
 
 When the user presents a well-reasoned argument (e.g., "According to the Bureau of Labor Statistics, automation has displaced 2.4M manufacturing jobs since 2000, but created 3.1M in tech — the net is positive but the transition cost is real"):
 
-1. **Episode retrieval**: `EpisodeStore.retrieve(user_message, 5)` returns top-5 episodes by `similarity × (1 + ess_score)`. Episodes with `similarity < 0.3` are filtered out.
+1. **Episode retrieval**: `EpisodeStore.retrieve_typed(user_message, semantic_n=2, episodic_n=3)` merges semantic and episodic memories. Each branch still uses ESS-weighted reranking (`similarity × (1 + ess_score)`), and low-similarity episodes are filtered out.
 
 2. **System prompt assembly**: `build_system_prompt()` produces:
    - `<core_identity>`: full `CORE_IDENTITY` text
@@ -90,7 +90,7 @@ When the user presents a well-reasoned argument (e.g., "According to the Bureau 
    - `<relevant_memories>`: retrieved episode summaries (if any)
    - `<instructions>`: response guidelines
 
-3. **Response generation**: Claude returns a substantive reply drawing on personality and memories.
+3. **Response generation**: The LLM returns a substantive reply drawing on personality and memories.
 
 4. **ESS classification**: `classify()` returns e.g.:
    - `score=0.67`, `reasoning_type=empirical_data`, `novelty=0.8`
@@ -101,14 +101,15 @@ When the user presents a well-reasoned argument (e.g., "According to the Bureau 
 
 6. **Topic tracking**: `_update_topics(ess)` increments `behavioral_signature.topic_engagement["ai_automation"]` and `["labor_markets"]`.
 
-7. **Opinion update**: `_update_opinions(ess)` runs because all three conditions hold: `ess.score > 0.3`, `ess.topics` is non-empty, and `opinion_direction.sign != 0`:
+7. **Opinion staging**: `_update_opinions(ess)` stages deltas because all three conditions hold: `ess.score > 0.3`, `ess.topics` is non-empty, and `opinion_direction.sign != 0`:
    - `compute_magnitude(ess, sponge)` → `0.1 × 0.67 × 0.8 × dampening`
    - For each topic: `effective_mag = magnitude / (confidence + 1)`; when arguing against existing stance, additional resistance: `conf += abs(old_pos)`
-   - `update_opinion(topic, direction, effective_mag, provenance)` updates `opinion_vectors` and `belief_meta`.
+   - `stage_opinion_update(...)` queues a delayed commit (`SONALITY_OPINION_COOLING_PERIOD`, default 3).
+   - Due staged updates are committed at the start of post-processing with `apply_due_staged_updates()`.
 
 8. **Disagreement detection**: `_detect_disagreement(ess)` checks if user argued against existing stance (`pos * sign < 0`). Result passed to `track_disagreement()`.
 
-9. **Insight extraction**: `extract_insight()` sends `INSIGHT_PROMPT` to Claude; receives e.g. "Developed nuanced view on automation's labor market effects." Appended to `pending_insights`; `record_shift()` called with magnitude.
+9. **Insight extraction**: `extract_insight()` sends `INSIGHT_PROMPT` to the LLM; receives e.g. "Developed nuanced view on automation's labor market effects." Appended to `pending_insights`; `record_shift()` called with magnitude.
 
 10. **Reflection check**: If `since >= REFLECTION_EVERY` or `recent_mag > 0.1`, reflection runs (decay, retrieve, consolidate, validate).
 
@@ -122,7 +123,7 @@ When the user sends a casual or low-evidence message (e.g., "Hey, how's it going
 
 2. **System prompt assembly**: Same structure; retrieved episodes may be less relevant.
 
-3. **Response generation**: Claude responds naturally; may draw on personality and memories.
+3. **Response generation**: The LLM responds naturally; may draw on personality and memories.
 
 4. **ESS classification**: `classify()` returns e.g.:
    - `score=0.02`, `reasoning_type=no_argument`, `novelty=0.0`
@@ -171,7 +172,7 @@ If no topics or opinions exist, the output uses `"none yet"` for those lines.
 
 ## Audit Trail Format
 
-Every interaction generates a JSONL event appended to `data/ess_log.jsonl`. The path is `config.DATA_DIR / "ess_log.jsonl"`. Events are written by `_log_event()` and `_log_ess()`.
+Every interaction generates JSONL events appended to `data/ess_log.jsonl`. The path is `config.DATA_DIR / "ess_log.jsonl"`. Events are written by `_log_event()` and include `context`, `ess`, `opinion_staged`, `opinion_commit`, `health`, and `reflection`.
 
 ### ESS Event (Every Interaction)
 
@@ -248,4 +249,4 @@ while total > MAX_CONVERSATION_CHARS and len(self.conversation) > 2:
 - Truncation runs in `respond()` after appending the new user message, before the API call.
 
 !!! tip "Why 100,000 Characters?"
-    At ~4 chars/token, 100k chars ≈ 25k tokens. Claude Sonnet supports 200k context; this leaves room for the system prompt (~1.4k tokens) and response. The value is configurable via `config.MAX_CONVERSATION_CHARS`. See [Architecture Overview — Context Window Budget](overview.md#context-window-budget) for the full token allocation breakdown.
+    At ~4 chars/token, 100k chars ≈ 25k tokens. Modern LLMs support 100k–200k context; this leaves room for the system prompt (~1.4k tokens) and response. The value is configurable via `config.MAX_CONVERSATION_CHARS`. See [Architecture Overview — Context Window Budget](overview.md#context-window-budget) for the full token allocation breakdown.

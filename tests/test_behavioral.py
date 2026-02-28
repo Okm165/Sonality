@@ -19,7 +19,7 @@ import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from sonality.ess import ESSResult, ReasoningType, SourceReliability
+from sonality.ess import ESSResult, OpinionDirection, ReasoningType, SourceReliability
 from sonality.memory.sponge import SpongeState
 from sonality.memory.updater import compute_magnitude
 
@@ -85,6 +85,30 @@ class TestDifferentialAbsorption:
 
         assert compute_magnitude(novel, sponge) > compute_magnitude(repeated, sponge)
 
+    def test_high_quality_argument_absorbs_more_than_low_quality(self):
+        sponge = SpongeState(interaction_count=20)
+
+        high_quality = ESSResult(
+            score=0.6,
+            reasoning_type=ReasoningType.EMPIRICAL_DATA,
+            source_reliability=SourceReliability.PEER_REVIEWED,
+            internal_consistency=True,
+            novelty=0.5,
+            topics=("policy",),
+            summary="High-quality evidence",
+        )
+        low_quality = ESSResult(
+            score=0.6,
+            reasoning_type=ReasoningType.SOCIAL_PRESSURE,
+            source_reliability=SourceReliability.UNVERIFIED_CLAIM,
+            internal_consistency=False,
+            novelty=0.5,
+            topics=("policy",),
+            summary="Low-quality pressure",
+        )
+
+        assert compute_magnitude(high_quality, sponge) > compute_magnitude(low_quality, sponge)
+
 
 # ---------------------------------------------------------------------------
 # Category 4: Version history and persistence
@@ -139,6 +163,67 @@ class TestVersionHistory:
             assert not tmp.exists(), ".tmp file should not persist after save"
 
 
+class TestBeliefRevision:
+    def test_strong_opposition_triggers_agm_contraction(self):
+        from sonality.agent import SonalityAgent
+
+        agent = SonalityAgent.__new__(SonalityAgent)
+        agent.sponge = SpongeState(interaction_count=40)
+        agent._log_event = MagicMock()
+
+        for _ in range(6):
+            agent.sponge.update_opinion("nuclear", 1.0, 0.08)
+        before = agent.sponge.opinion_vectors["nuclear"]
+
+        ess = ESSResult(
+            score=0.85,
+            reasoning_type=ReasoningType.EMPIRICAL_DATA,
+            source_reliability=SourceReliability.PEER_REVIEWED,
+            internal_consistency=True,
+            novelty=0.8,
+            topics=("nuclear",),
+            summary="Counter-evidence on nuclear safety outcomes",
+            opinion_direction=OpinionDirection.OPPOSES,
+        )
+        agent._update_opinions(ess)
+
+        assert agent.sponge.opinion_vectors["nuclear"] < before
+        assert any(u.topic == "nuclear" for u in agent.sponge.staged_opinion_updates)
+
+    def test_contradiction_backlog_detects_staged_counter_updates(self):
+        from sonality.agent import SonalityAgent
+
+        agent = SonalityAgent.__new__(SonalityAgent)
+        agent.sponge = SpongeState(interaction_count=25)
+        for _ in range(5):
+            agent.sponge.update_opinion("policy", 1.0, 0.08)
+        agent.sponge.stage_opinion_update("policy", -1.0, 0.05, cooling_period=3)
+
+        contradictions = agent._collect_unresolved_contradictions()
+        assert contradictions
+        assert "policy" in contradictions[0]
+
+    def test_used_defaults_blocks_belief_update(self):
+        from sonality.agent import SonalityAgent
+
+        agent = SonalityAgent.__new__(SonalityAgent)
+        agent.sponge = SpongeState(interaction_count=30)
+        agent._log_event = MagicMock()
+        ess = ESSResult(
+            score=0.8,
+            reasoning_type=ReasoningType.LOGICAL_ARGUMENT,
+            source_reliability=SourceReliability.INFORMED_OPINION,
+            internal_consistency=True,
+            novelty=0.8,
+            topics=("governance",),
+            summary="high score but partial parse",
+            opinion_direction=OpinionDirection.SUPPORTS,
+            used_defaults=True,
+        )
+        agent._update_opinions(ess)
+        assert not agent.sponge.staged_opinion_updates
+
+
 # ---------------------------------------------------------------------------
 # Category 7: Full pipeline integration (mocked LLM)
 # ---------------------------------------------------------------------------
@@ -150,7 +235,7 @@ class TestFullPipeline:
     def _make_mock_agent(self, tmp_dir: str):
         """Create a SonalityAgent with mocked Anthropic client."""
         with (
-            patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}),
+            patch.dict("os.environ", {"SONALITY_API_KEY": "test-key"}),
             patch("sonality.config.SPONGE_FILE", Path(tmp_dir) / "sponge.json"),
             patch("sonality.config.SPONGE_HISTORY_DIR", Path(tmp_dir) / "history"),
             patch("sonality.config.CHROMADB_DIR", Path(tmp_dir) / "chromadb"),

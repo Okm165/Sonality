@@ -4,7 +4,7 @@ LLM agent with a self-evolving personality via the **Sponge architecture** — a
 
 Strong logical arguments shift the agent's views. Casual chat, social pressure, and bare assertions are filtered out. Established beliefs resist change proportionally to their evidence base. Unreinforced beliefs decay over time. The result: coherent personality evolution, not random drift.
 
-Architecture decisions grounded in [200+ academic references](https://herodotusdev.github.io/sonality/research/references/).
+Architecture decisions grounded in 200+ academic references.
 
 ## How It Works
 
@@ -20,7 +20,7 @@ flowchart TD
     end
 
     Ctx --> ctx
-    ctx --> LLM["Claude Sonnet · API"]
+    ctx --> LLM["LLM API"]
     LLM --> Resp([Response])
 
     Resp --> Post[Post-Processing]
@@ -34,9 +34,9 @@ flowchart TD
     Consolidate --> Save[Save sponge.json]
 ```
 
-Every interaction runs 2–3 Claude API calls (~$0.005–0.015):
+Every interaction runs 2–3 LLM API calls:
 
-1. **Response generation** — assembles core identity + personality snapshot + structured traits + retrieved episodes into a system prompt, sends to Claude
+1. **Response generation** — assembles core identity + personality snapshot + structured traits + retrieved episodes into a system prompt, sends to the LLM
 2. **ESS classification** — separate LLM call evaluates the *user's* argument quality (score 0.0–1.0) using structured tool output. Agent's response is excluded to avoid self-judge bias
 3. **Insight extraction** — if ESS > 0.3, extracts a one-sentence personality insight (accumulated, consolidated during reflection)
 
@@ -47,14 +47,14 @@ Periodically (every 20 interactions or on significant shifts), the agent **refle
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh
 make install
-cp .env.example .env   # add ANTHROPIC_API_KEY
+cp .env.example .env   # add your LLM_API_KEY
 make run
 ```
 
 Or with Docker:
 
 ```bash
-cp .env.example .env   # add ANTHROPIC_API_KEY
+cp .env.example .env   # add your LLM_API_KEY
 docker compose run --rm sonality
 ```
 
@@ -66,8 +66,10 @@ docker compose run --rm sonality
 | `/snapshot` | Current narrative snapshot |
 | `/beliefs` | Opinion vectors with confidence and evidence count |
 | `/insights` | Pending personality insights (cleared at reflection) |
+| `/staged` | Staged opinion updates awaiting cooling-period commit |
 | `/topics` | Topic engagement counts |
 | `/shifts` | Recent personality shifts with magnitudes |
+| `/health` | Personality health metrics and risk indicators |
 | `/diff` | Text diff of last snapshot change |
 | `/reset` | Reset to seed personality |
 | `/quit` | Exit |
@@ -78,12 +80,15 @@ Set in `.env` (see `.env.example`):
 
 | Variable | Default | Description |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | *(required)* | Anthropic API key |
-| `SONALITY_MODEL` | `claude-sonnet-4-20250514` | Main reasoning model |
+| `LLM_API_KEY` | *(required)* | API key for the configured LLM provider |
+| `SONALITY_MODEL` | *(see .env.example)* | Main reasoning model |
 | `SONALITY_ESS_MODEL` | same as `SONALITY_MODEL` | Model for ESS classification |
 | `SONALITY_ESS_THRESHOLD` | `0.3` | Minimum ESS to trigger personality updates |
+| `SONALITY_OPINION_COOLING_PERIOD` | `3` | Interactions before staged belief commits |
 | `SONALITY_REFLECTION_EVERY` | `20` | Interactions between periodic reflections |
 | `SONALITY_BOOTSTRAP_DAMPENING_UNTIL` | `10` | Early interactions get 0.5× update magnitude |
+| `SONALITY_SEMANTIC_RETRIEVAL_COUNT` | `2` | Semantic memories retrieved per interaction |
+| `SONALITY_EPISODIC_RETRIEVAL_COUNT` | `3` | Episodic memories retrieved per interaction |
 | `SONALITY_LOG_LEVEL` | `INFO` | Logging verbosity |
 
 ## Key Mechanisms
@@ -113,7 +118,7 @@ make docs-serve    # serve docs locally with live reload
 ```
 sonality/
 ├── sonality/                   Python package
-│   ├── agent.py                Core loop: context → Claude → post-process
+│   ├── agent.py                Core loop: context → LLM → post-process
 │   ├── cli.py                  Terminal REPL
 │   ├── config.py               Environment + compile-time constants
 │   ├── ess.py                  Evidence Strength Score classifier
