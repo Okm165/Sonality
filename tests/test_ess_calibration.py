@@ -66,8 +66,8 @@ class TestESSRankOrderProperties:
 
 
 live = pytest.mark.skipif(
-    not config.ANTHROPIC_API_KEY,
-    reason="ANTHROPIC_API_KEY not set",
+    not config.API_KEY,
+    reason="SONALITY_API_KEY not set",
 )
 
 
@@ -85,7 +85,7 @@ class TestESSCalibrationWithIBMArgQ:
         from sonality.ess import classify
         from sonality.memory.sponge import SEED_SNAPSHOT
 
-        client = Anthropic(api_key=config.ANTHROPIC_API_KEY)
+        client = Anthropic(api_key=config.API_KEY)
         sample = _load_sample()
 
         human_ranks: list[float] = []

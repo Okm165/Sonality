@@ -159,9 +159,9 @@ When triggered:
 [^3]: arXiv:2409.09510 — RAG vs fine-tuning comparison.
 [^4]: arXiv:2601.07978 — Mem0 vs Graphiti benchmark.
 
-### Why No LangChain / LangGraph / Letta?
+### Why No Heavy Agent Framework?
 
-Sonality's pipeline requires branching logic (conditional processing based on ESS), stateful persistence (personality survives sessions), and cyclic operations (reflection feeds back into the personality). LangChain's core abstraction is a linear chain (input → retrieval → LLM → output). LangGraph adds state machines; Letta adds background consolidation. Building this with plain Python functions is simpler, has zero framework overhead, and the entire flow fits in a single `respond()` method. Custom Python is faster to iterate on and easier to debug.
+Sonality's pipeline requires branching logic (conditional processing based on ESS), stateful persistence (personality survives sessions), and cyclic operations (reflection feeds back into the personality). General-purpose orchestration frameworks can provide these features, but they also add abstraction overhead that is unnecessary at this scale. Building this with plain Python functions keeps the flow compact in a single `respond()` method, reduces moving parts, and makes debugging faster.
 
 ### Why ChromaDB Over a Knowledge Graph?
 
@@ -219,7 +219,7 @@ Sonality uses **always-retrieve with typing**: every interaction triggers `Episo
 | Strategy | Pros | Cons |
 |----------|------|------|
 | **Always-retrieve** (Sonality) | Deterministic, no tool-call latency, memories always in context | Fixed token budget; may retrieve irrelevant episodes for novel topics |
-| **Tool-based** (MemGPT/Letta) | Agent decides when to search; flexible | MemTool (arXiv:2507.21428): 0–60% efficiency on medium models; under-retrieval risk |
+| **Tool-based** (memory-OS style) | Agent decides when to search; flexible | MemTool (arXiv:2507.21428): 0–60% efficiency on medium models; under-retrieval risk |
 | **Selective** (FluxMem) | Saves tokens on low-quality interactions | Agent lacks episodic context for casual chat; inconsistent behavior |
 
 Always-retrieve was chosen because: (1) ChromaDB retrieval is in-process and fast (milliseconds, not LLM calls); (2) the agent benefits from relevant past context even when the current message is low-ESS; (3) `min_relevance=0.3` filters out weak matches so irrelevant episodes are excluded; (4) ESS-weighted reranking ensures high-quality episodes surface first. Research on mixed memory structures (arXiv:2412.15266) confirms "remarkable resilience in noisy environments" — even if some irrelevant memories are retrieved, the LLM handles them well.

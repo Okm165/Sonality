@@ -21,7 +21,7 @@ make install
 
 # Configure
 cp .env.example .env
-# Edit .env — add your LLM_API_KEY
+# Edit .env — add your SONALITY_API_KEY
 ```
 
 ## Running
@@ -38,7 +38,7 @@ This starts an interactive REPL where you can chat with the agent and observe it
 
 ```bash
 cp .env.example .env
-# Edit .env — add your ANTHROPIC_API_KEY
+# Edit .env — add your API key
 docker compose run --rm sonality
 ```
 

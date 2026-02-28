@@ -42,16 +42,19 @@ def _show_health(agent: SonalityAgent) -> None:
     else:
         maturity = "Layer 3 (autonomous expansion)"
 
+    entrenched = s.detect_entrenched_beliefs()
+    contradictions = agent._collect_unresolved_contradictions()
+    contradiction_line = ", ".join(contradictions[:3]) if contradictions else "none"
     recent = s.recent_shifts[-1] if s.recent_shifts else None
-    last_line = (
-        f"#{recent.interaction} — {recent.description[:50]}" if recent else "none"
-    )
+    last_line = f"#{recent.interaction} — {recent.description[:50]}" if recent else "none"
 
     print(f"  Maturity:    {maturity} ({ic} interactions, {len(s.opinion_vectors)} beliefs)")
     print(f"  Beliefs:     {len(s.opinion_vectors)} total, {strong} strong, {stale} stale")
     print(f"  Disagree:    {s.behavioral_signature.disagreement_rate:.0%}")
     print(f"  Insights:    {len(s.pending_insights)} pending")
     print(f"  Staged:      {len(s.staged_opinion_updates)} pending commits")
+    print(f"  Entrenched:  {', '.join(entrenched) if entrenched else 'none'}")
+    print(f"  Contradict:  {contradiction_line}")
     print(f"  Snapshot:    {len(s.snapshot)} chars, v{s.version}")
     print(f"  Last shift:  {last_line}")
 
@@ -105,8 +108,8 @@ def main() -> None:
         format="%(levelname)s %(name)s: %(message)s",
     )
 
-    if not config.ANTHROPIC_API_KEY:
-        print("Error: set ANTHROPIC_API_KEY in .env or environment.")
+    if not config.API_KEY:
+        print("Error: set SONALITY_API_KEY in .env or environment.")
         print("  cp .env.example .env && $EDITOR .env")
         sys.exit(1)
 

@@ -10,7 +10,7 @@ Set these in your `.env` file (copy from `.env.example`):
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ANTHROPIC_API_KEY` | *(required)* | API key for the configured LLM provider |
+| `SONALITY_API_KEY` | *(required)* | API key for the LLM provider |
 | `SONALITY_MODEL` | *(see .env.example)* | Main reasoning model for response generation |
 | `SONALITY_ESS_MODEL` | Same as `SONALITY_MODEL` | Model for ESS classification, insight extraction, and reflection |
 | `SONALITY_ESS_THRESHOLD` | `0.3` | Minimum ESS score to trigger personality updates |

@@ -14,7 +14,9 @@ SPONGE_FILE: Final = DATA_DIR / "sponge.json"
 SPONGE_HISTORY_DIR: Final = DATA_DIR / "sponge_history"
 CHROMADB_DIR: Final = DATA_DIR / "chromadb"
 
-ANTHROPIC_API_KEY: Final = os.environ.get("ANTHROPIC_API_KEY")
+API_KEY: Final = os.environ.get("SONALITY_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
+# Backward-compatible alias kept for tests/integrations that still reference it.
+ANTHROPIC_API_KEY: Final = API_KEY
 MODEL: Final = os.environ.get("SONALITY_MODEL", "claude-sonnet-4-20250514")
 ESS_MODEL: Final = os.environ.get("SONALITY_ESS_MODEL", MODEL)
 LOG_LEVEL: Final = os.environ.get("SONALITY_LOG_LEVEL", "INFO")

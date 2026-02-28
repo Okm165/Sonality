@@ -1,6 +1,6 @@
 """Live API tests for Sonality personality evolution.
 
-These tests require a real ANTHROPIC_API_KEY and make actual API calls.
+These tests require a real SONALITY_API_KEY and make actual API calls.
 They exercise the full agent pipeline against the real model, measuring
 ESS calibration, personality development, persistence, and sycophancy
 resistance.
@@ -8,7 +8,7 @@ resistance.
 Run:  make test-live         (or: uv run pytest tests/test_live.py -v --tb=short)
 Skip: uv run pytest          (these are marked with @pytest.mark.live)
 
-Set ANTHROPIC_API_KEY in .env before running.
+Set SONALITY_API_KEY in .env before running.
 """
 
 from __future__ import annotations
@@ -31,8 +31,8 @@ from .scenarios import (
 )
 
 live = pytest.mark.skipif(
-    not config.ANTHROPIC_API_KEY,
-    reason="ANTHROPIC_API_KEY not set",
+    not config.API_KEY,
+    reason="SONALITY_API_KEY not set",
 )
 
 

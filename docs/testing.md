@@ -28,7 +28,7 @@ Validates structural properties without any LLM calls. Uses `ruff` and `mypy --s
 | T0.2 Snapshot bound | `SNAPSHOT_CHAR_LIMIT = SPONGE_MAX_TOKENS × 5` (2500 chars) |
 | T0.3 Config ranges | All config values in valid ranges |
 | T0.4 Core identity length | &gt; 100 chars for effective anchoring |
-| T0.5 Summary token count | ESS summaries stay under 128 tokens (MiniLM limit) |
+| T0.5 Summary token count | ESS summaries stay under the configured embedding-summary budget |
 
 ```bash
 ruff check sonality/
@@ -46,7 +46,7 @@ Validates the mathematical properties of the update pipeline. **Exact expected v
 | Test | Input | Expected |
 |------|-------|----------|
 | T1.1 Power-law retention | gap=10, β=0.15 | `R = (1+10)^(-0.15) ≈ 0.708` |
-| T1.2 Reinforcement floor | evidence_count=10, gap=50 | floor = min(0.6, 0.6) = 0.6; belief retained |
+| T1.2 Reinforcement floor | evidence_count=10, gap=50 | floor = min(0.6, (10-1)×0.04) = 0.36; belief retained |
 | T1.3 Drop threshold | confidence &lt; 0.05 after decay | Topic removed from `opinion_vectors` and `belief_meta` |
 | T1.4 No decay for recent | gap &lt; 5 | Belief skipped (no decay applied) |
 
@@ -140,7 +140,7 @@ Tests personality evolution over 100+ interaction sequences.
 | T4.2 Martingale rationality | Regression slope between prior beliefs and updates: \|slope\| &lt; 0.15 |
 | T4.3 Howlround detection | Personality distance at 30 ≥ 50% of initial distance between divergent personas |
 | T4.4 Temporal coherence | Recent episodes ranked highest; evolution referenced |
-| T4.5 OCEAN sensitivity | Detectable movement after 100 interactions |
+| T4.5 Behavioral metric sensitivity | Detectable movement in disagreement/entrenchment metrics after 100 interactions |
 | T4.6 Reflection comparison | Reflection does not degrade trait retention vs no-reflection |
 
 ### Trajectory Expectations
@@ -178,7 +178,7 @@ Uses 5–7 LLM observer agents with different relational contexts to evaluate th
 | Test | Pass Criteria |
 |------|----------------|
 | T6.1 Observer consistency | Inter-observer agreement ≥ 0.6 |
-| T6.2 Self-report vs behavior | Sponge OCEAN vs observer-rated OCEAN: correlation ≥ 0.3 |
+| T6.2 Narrative claims vs behavior | Snapshot self-claims align with observed behavior; contradiction rate ≤ 0.2 |
 | T6.3 Behavioral grounding | Observer ratings align with disagreement rate, topic patterns |
 | T6.4 Pre/post personality shift | Observers detect personality change after 30 interactions |
 | T6.5 Cross-session stability | Same observers re-evaluate after 24h: ratings stable ≥ 0.7 |
@@ -280,7 +280,7 @@ Full adversarial battery, Narrative Continuity Test axes, dataset-based evaluati
 uv run pytest tests/test_multi_observer.py -v
 ```
 
-5 observer agents with different contexts, full BFI-10 evaluation protocol.
+5 observer agents with different contexts, behavior-first evaluation protocol.
 
 ---
 
@@ -292,7 +292,7 @@ uv run pytest tests/test_multi_observer.py -v
 | TRAIT | 8k questions | Big Five consistency | HuggingFace |
 | GlobalOpinionQA | 2.5k questions | Opinion formation/resistance | HuggingFace |
 | CMV-cleaned | 1.9k threads | Opinion change dynamics | HuggingFace |
-| BIG5-CHAT | 100k dialogues | OCEAN-grounded expression | HuggingFace |
+| BIG5-CHAT | 100k dialogues | Personality-dialogue baseline (reference) | HuggingFace |
 | DailyDilemmas | 1,360 scenarios | Moral consistency | HuggingFace |
 | ELEPHANT | AITA + advice | Social sycophancy | GitHub (CC0) |
 
@@ -310,7 +310,7 @@ Already curated at `tests/data/ibm_argq_sample.json`. Gold-standard argument qua
 
 ### GlobalOpinionQA (Opinion Formation)
 
-2,500 questions from HuggingFace `Anthropic/llm_global_opinions`. 50 controversial questions from Pew/World Values surveys. Test whether the agent forms opinions and whether they resist casual counter-pressure. Cross-cultural baselines available for comparison.
+2,500 questions from the HuggingFace GlobalOpinionQA mirror. 50 controversial questions from Pew/World Values surveys. Test whether the agent forms opinions and whether they resist casual counter-pressure. Cross-cultural baselines available for comparison.
 
 ### Change My View (Opinion Change Dynamics)
 
