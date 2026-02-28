@@ -590,3 +590,43 @@ class SonalityAgent:
                 },
             }
         )
+TRUSTED_REASONING: Final[frozenset[ReasoningType]] = frozenset(
+    {
+        ReasoningType.LOGICAL_ARGUMENT,
+        ReasoningType.EMPIRICAL_DATA,
+        ReasoningType.EXPERT_OPINION,
+    }
+)
+TRUSTED_SOURCES: Final[frozenset[SourceReliability]] = frozenset(
+    {
+        SourceReliability.PEER_REVIEWED,
+        SourceReliability.ESTABLISHED_EXPERT,
+        SourceReliability.INFORMED_OPINION,
+    }
+)
+AGM_CONTRACTION_SCORE: Final = 0.65
+AGM_CONTRACTION_CONFIDENCE: Final = 0.55
+AGM_CONTRACTION_POSITION: Final = 0.45
+AGM_CONTRACTION_RATIO: Final = 0.35
+
+
+def _status_code(exc: APIError) -> int | None:
+    code = getattr(exc, "status_code", None)
+    return code if isinstance(code, int) else None
+
+
+def _extract_text_block(response: object) -> str:
+    content = getattr(response, "content", None)
+    if not isinstance(content, list):
+        return ""
+    for block in content:
+        if getattr(block, "type", None) != "text":
+            continue
+        text = getattr(block, "text", "")
+        if isinstance(text, str):
+            return text
+    for block in content:
+        text = getattr(block, "text", "")
+        if isinstance(text, str):
+            return text
+    return ""
