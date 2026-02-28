@@ -18,6 +18,46 @@ log = logging.getLogger(__name__)
 
 MAX_RETRIES: Final = 3
 RETRY_BACKOFF: Final = 1.5
+TRUSTED_REASONING: Final[frozenset[ReasoningType]] = frozenset(
+    {
+        ReasoningType.LOGICAL_ARGUMENT,
+        ReasoningType.EMPIRICAL_DATA,
+        ReasoningType.EXPERT_OPINION,
+    }
+)
+TRUSTED_SOURCES: Final[frozenset[SourceReliability]] = frozenset(
+    {
+        SourceReliability.PEER_REVIEWED,
+        SourceReliability.ESTABLISHED_EXPERT,
+        SourceReliability.INFORMED_OPINION,
+    }
+)
+AGM_CONTRACTION_SCORE: Final = 0.65
+AGM_CONTRACTION_CONFIDENCE: Final = 0.55
+AGM_CONTRACTION_POSITION: Final = 0.45
+AGM_CONTRACTION_RATIO: Final = 0.35
+
+
+def _status_code(exc: APIError) -> int | None:
+    code = getattr(exc, "status_code", None)
+    return code if isinstance(code, int) else None
+
+
+def _extract_text_block(response: object) -> str:
+    content = getattr(response, "content", None)
+    if not isinstance(content, list):
+        return ""
+    for block in content:
+        if getattr(block, "type", None) != "text":
+            continue
+        text = getattr(block, "text", "")
+        if isinstance(text, str):
+            return text
+    for block in content:
+        text = getattr(block, "text", "")
+        if isinstance(text, str):
+            return text
+    return ""
 
 
 def _api_call_with_retry[T](fn: Callable[..., T], *args: object, **kwargs: object) -> T:
@@ -25,11 +65,12 @@ def _api_call_with_retry[T](fn: Callable[..., T], *args: object, **kwargs: objec
         try:
             return fn(*args, **kwargs)
         except APIError as exc:
-            if exc.status_code and exc.status_code >= 500 and attempt < MAX_RETRIES - 1:
+            status = _status_code(exc)
+            if status is not None and status >= 500 and attempt < MAX_RETRIES - 1:
                 wait = RETRY_BACKOFF ** (attempt + 1)
                 log.warning(
                     "API error %s on attempt %d/%d, retrying in %.1fs",
-                    exc.status_code,
+                    status,
                     attempt + 1,
                     MAX_RETRIES,
                     wait,
@@ -49,7 +90,7 @@ class SonalityAgent:
             log.warning(
                 "Main and ESS models are identical; using a separate ESS model reduces self-judge coupling"
             )
-        self.client = Anthropic(api_key=config.ANTHROPIC_API_KEY)
+        self.client = Anthropic(api_key=config.API_KEY)
         self.sponge = SpongeState.load(config.SPONGE_FILE)
         self.episodes = EpisodeStore(str(config.CHROMADB_DIR))
         self.conversation: list[dict[str, str]] = []
@@ -98,7 +139,9 @@ class SonalityAgent:
             system=system_prompt,
             messages=self.conversation,
         )
-        assistant_msg = response.content[0].text
+        assistant_msg = _extract_text_block(response)
+        if not assistant_msg:
+            log.warning("Model response contained no text block; using empty reply")
         self.conversation.append({"role": "assistant", "content": assistant_msg})
 
         self._post_process(user_message, assistant_msg)
@@ -164,7 +207,31 @@ class SonalityAgent:
 
     def _store_episode(self, user_message: str, agent_response: str, ess: ESSResult) -> None:
         try:
-            memory_type = "semantic" if ess.score > config.ESS_THRESHOLD else "episodic"
+            # Keep semantic memory high-precision: storing weak/fragile arguments
+            # as "semantic" increases replay risk (AgentPoison 2024, MemoryGraft 2025).
+            semantic_candidate = (
+                ess.score >= 0.55
+                and ess.internal_consistency
+                and ess.reasoning_type in TRUSTED_REASONING
+                and ess.source_reliability in TRUSTED_SOURCES
+            )
+            memory_type = "semantic" if semantic_candidate else "episodic"
+            admission_policy = (
+                "semantic_strict"
+                if semantic_candidate
+                else "episodic_quality_demotion"
+                if ess.score > config.ESS_THRESHOLD
+                else "episodic_low_ess"
+            )
+            provenance_quality = (
+                "trusted"
+                if semantic_candidate and not ess.used_defaults
+                else "uncertain"
+                if ess.score > config.ESS_THRESHOLD
+                and ess.internal_consistency
+                and not ess.used_defaults
+                else "low"
+            )
             self.episodes.store(
                 user_message=user_message,
                 agent_response=agent_response,
@@ -173,7 +240,20 @@ class SonalityAgent:
                 summary=ess.summary,
                 interaction_count=self.sponge.interaction_count + 1,
                 memory_type=memory_type,
+                reasoning_type=ess.reasoning_type,
+                source_reliability=ess.source_reliability,
+                internal_consistency=ess.internal_consistency,
+                admission_policy=admission_policy,
+                provenance_quality=provenance_quality,
             )
+            if ess.score > config.ESS_THRESHOLD and memory_type == "episodic":
+                log.info(
+                    "Stored high-ESS episode as episodic due to quality gates "
+                    "(type=%s source=%s consistent=%s)",
+                    ess.reasoning_type,
+                    ess.source_reliability,
+                    ess.internal_consistency,
+                )
         except Exception:
             log.exception("Episode storage failed")
 
@@ -196,8 +276,68 @@ class SonalityAgent:
                 return True
         return False
 
+    def _collect_unresolved_contradictions(self) -> list[str]:
+        """Summarize staged deltas that currently oppose strong held beliefs."""
+        candidates: list[tuple[float, str]] = []
+        for staged in self.sponge.staged_opinion_updates:
+            pos = self.sponge.opinion_vectors.get(staged.topic, 0.0)
+            if abs(pos) < 0.35 or pos * staged.signed_magnitude >= 0:
+                continue
+            summary = (
+                f"{staged.topic}({pos:+.2f} vs {staged.signed_magnitude:+.3f},"
+                f" due #{staged.due_interaction})"
+            )
+            candidates.append((abs(staged.signed_magnitude), summary))
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        return [summary for _, summary in candidates]
+
+    def _should_contract_before_revision(
+        self, topic: str, direction: float, ess: ESSResult
+    ) -> bool:
+        old_pos = self.sponge.opinion_vectors.get(topic, 0.0)
+        meta = self.sponge.belief_meta.get(topic)
+        if meta is None:
+            return False
+        return (
+            old_pos * direction < 0
+            and abs(old_pos) >= AGM_CONTRACTION_POSITION
+            and meta.confidence >= AGM_CONTRACTION_CONFIDENCE
+            and ess.score >= AGM_CONTRACTION_SCORE
+            and ess.internal_consistency
+            and ess.reasoning_type in TRUSTED_REASONING
+            and ess.source_reliability in TRUSTED_SOURCES
+        )
+
+    def _apply_agm_contraction(self, topic: str, ess: ESSResult) -> None:
+        old_pos = self.sponge.opinion_vectors.get(topic, 0.0)
+        if abs(old_pos) < 1e-9:
+            return
+        step = min(abs(old_pos), max(0.02, abs(old_pos) * AGM_CONTRACTION_RATIO))
+        new_pos = old_pos - (1.0 if old_pos > 0 else -1.0) * step
+        self.sponge.opinion_vectors[topic] = new_pos
+        if topic in self.sponge.belief_meta:
+            self.sponge.belief_meta[topic].confidence *= 1.0 - AGM_CONTRACTION_RATIO / 2.0
+        self.sponge.record_shift(
+            description=f"AGM contraction on {topic} (ESS {ess.score:.2f})",
+            magnitude=step,
+        )
+        self._log_event(
+            {
+                "event": "opinion_contract",
+                "interaction": self.sponge.interaction_count,
+                "topic": topic,
+                "old_pos": round(old_pos, 4),
+                "new_pos": round(new_pos, 4),
+                "delta": round(step, 4),
+                "ess_score": ess.score,
+            }
+        )
+
     def _update_opinions(self, ess: ESSResult) -> None:
         if ess.score <= config.ESS_THRESHOLD or not ess.topics:
+            return
+        if ess.used_defaults:
+            log.info("Skipping opinion update due to ESS fallback defaults")
             return
         direction = ess.opinion_direction.sign
         if direction == 0.0:
@@ -207,6 +347,8 @@ class SonalityAgent:
 
         provenance = f"ESS {ess.score:.2f}: {ess.summary[:60]}"
         for topic in ess.topics:
+            if self._should_contract_before_revision(topic, direction, ess):
+                self._apply_agm_contraction(topic, ess)
             old_pos = self.sponge.opinion_vectors.get(topic, 0.0)
             conf = (
                 self.sponge.belief_meta[topic].confidence
@@ -241,6 +383,9 @@ class SonalityAgent:
         bottleneck). Snapshot only changes during reflection (Park et al. 2023).
         """
         if ess.score <= config.ESS_THRESHOLD:
+            return
+        if ess.used_defaults:
+            log.info("Skipping insight extraction due to ESS fallback defaults")
             return
         try:
             insight = extract_insight(self.client, ess, user_message, agent_response)
@@ -283,9 +428,7 @@ class SonalityAgent:
         opinions_line = ", ".join(opinions_parts) if opinions_parts else "none yet"
 
         recent = [s for s in self.sponge.recent_shifts[-3:] if s.magnitude > 0]
-        evolution_line = (
-            ", ".join(s.description[:50] for s in recent) if recent else "stable"
-        )
+        evolution_line = ", ".join(s.description[:50] for s in recent) if recent else "stable"
         staged_topics = [u.topic for u in self.sponge.staged_opinion_updates[-3:]]
         staged_line = ", ".join(staged_topics) if staged_topics else "none"
 
@@ -299,11 +442,11 @@ class SonalityAgent:
         )
 
     def _maybe_reflect(self) -> None:
-        since = self.sponge.interaction_count - self.sponge.last_reflection_at
-        if since < config.REFLECTION_EVERY // 2:
+        window_interactions = self.sponge.interaction_count - self.sponge.last_reflection_at
+        if window_interactions < config.REFLECTION_EVERY // 2:
             return
 
-        periodic = since >= config.REFLECTION_EVERY
+        periodic = window_interactions >= config.REFLECTION_EVERY
         recent_mag = sum(
             s.magnitude
             for s in self.sponge.recent_shifts
@@ -317,10 +460,16 @@ class SonalityAgent:
         trigger = "periodic" if periodic else f"event-driven (mag={recent_mag:.3f})"
         log.info("=== Reflection at #%d (%s) ===", self.sponge.interaction_count, trigger)
 
-        # Ebbinghaus decay: unreinforced beliefs lose confidence (FadeMem 2025; SAGE 2024)
         dropped = self.sponge.decay_beliefs(decay_rate=config.BELIEF_DECAY_RATE)
         if dropped:
             log.info("Decay removed %d stale beliefs: %s", len(dropped), dropped)
+
+        entrenched = self.sponge.detect_entrenched_beliefs()
+        if entrenched:
+            log.warning("Entrenched beliefs detected: %s", entrenched)
+        contradictions = self._collect_unresolved_contradictions()
+        if contradictions:
+            log.info("Contradiction backlog (%d): %s", len(contradictions), contradictions[:3])
 
         recent_episodes = self.episodes.retrieve(
             "recent personality development and opinion changes",
@@ -388,7 +537,7 @@ class SonalityAgent:
                 max_tokens=700,
                 messages=[{"role": "user", "content": prompt}],
             )
-            reflected = response.content[0].text.strip()
+            reflected = _extract_text_block(response).strip()
             if reflected and reflected != pre_snapshot:
                 if not validate_snapshot(pre_snapshot, reflected):
                     log.warning("Reflection output rejected by validation")
@@ -413,8 +562,19 @@ class SonalityAgent:
             consolidated = len(self.sponge.pending_insights)
             self.sponge.pending_insights.clear()
             self.sponge.last_reflection_at = self.sponge.interaction_count
-            self._log_reflection_summary(dropped, consolidated)
-            self._log_reflection_event(dropped, consolidated)
+            self._log_reflection_summary(
+                dropped=dropped,
+                consolidated=consolidated,
+                entrenched=entrenched,
+                contradictions=contradictions,
+            )
+            self._log_reflection_event(
+                dropped=dropped,
+                consolidated=consolidated,
+                entrenched=entrenched,
+                contradictions=contradictions,
+                window_interactions=window_interactions,
+            )
         except Exception:
             log.exception("Reflection cycle failed")
 
@@ -453,17 +613,25 @@ class SonalityAgent:
 
         log.info("SUMMARY: %s", " | ".join(parts))
 
-    def _log_reflection_summary(self, dropped: list[str], consolidated: int) -> None:
+    def _log_reflection_summary(
+        self,
+        dropped: list[str],
+        consolidated: int,
+        entrenched: list[str],
+        contradictions: list[str],
+    ) -> None:
         metas = list(self.sponge.belief_meta.values())
         ic = self.sponge.interaction_count
         log.info(
             "REFLECTION: insights=%d beliefs=%d high_conf=%d stale=%d dropped=%d "
-            "disagree=%.0f%% snapshot=%dch v%d",
+            "entrenched=%d contradictions=%d disagree=%.0f%% snapshot=%dch v%d",
             consolidated,
             len(self.sponge.opinion_vectors),
             sum(1 for m in metas if m.confidence > 0.5),
             sum(1 for m in metas if ic - m.last_reinforced > 30),
             len(dropped),
+            len(entrenched),
+            len(contradictions),
             self.sponge.behavioral_signature.disagreement_rate * 100,
             len(self.sponge.snapshot),
             self.sponge.version,
@@ -494,9 +662,7 @@ class SonalityAgent:
 
     def _log_health_event(self) -> None:
         words = self.sponge.snapshot.split()
-        unique_ratio = (
-            len(set(w.lower() for w in words)) / len(words) if words else 0.0
-        )
+        unique_ratio = len(set(w.lower() for w in words)) / len(words) if words else 0.0
         metas = list(self.sponge.belief_meta.values())
         high_conf = sum(1 for m in metas if m.confidence > 0.5)
         high_conf_ratio = high_conf / len(metas) if metas else 0.0
@@ -511,6 +677,15 @@ class SonalityAgent:
             warnings.append("snapshot_bland")
         if self.sponge.interaction_count >= 40 and len(self.sponge.opinion_vectors) < 3:
             warnings.append("low_belief_growth")
+        if high_conf_ratio > 0.8 and len(metas) >= 5:
+            warnings.append("ossified_beliefs")
+
+        entrenched = self.sponge.detect_entrenched_beliefs()
+        if entrenched:
+            warnings.append("entrenched_beliefs")
+        contradictions = self._collect_unresolved_contradictions()
+        if contradictions:
+            warnings.append("contradiction_backlog")
 
         self._log_event(
             {
@@ -523,6 +698,8 @@ class SonalityAgent:
                 "snapshot_unique_ratio": round(unique_ratio, 3),
                 "pending_insights": len(self.sponge.pending_insights),
                 "staged_updates": len(self.sponge.staged_opinion_updates),
+                "entrenched": entrenched,
+                "contradictions": contradictions,
                 "warnings": warnings,
             }
         )
@@ -538,14 +715,20 @@ class SonalityAgent:
         except Exception:
             log.debug("JSONL logging failed", exc_info=True)
 
-    def _log_reflection_event(self, dropped: list[str], consolidated: int) -> None:
+    def _log_reflection_event(
+        self,
+        dropped: list[str],
+        consolidated: int,
+        entrenched: list[str],
+        contradictions: list[str],
+        window_interactions: int = 1,
+    ) -> None:
         old_words = set((self.previous_snapshot or "").lower().split())
         new_words = set(self.sponge.snapshot.lower().split())
         union = old_words | new_words
         jaccard = len(old_words & new_words) / len(union) if union else 1.0
 
-        since = self.sponge.interaction_count - self.sponge.last_reflection_at
-        insight_yield = consolidated / max(since, 1)
+        insight_yield = consolidated / max(window_interactions, 1)
 
         self._log_event(
             {
@@ -561,6 +744,8 @@ class SonalityAgent:
                 "snapshot_chars": len(self.sponge.snapshot),
                 "snapshot_jaccard": round(jaccard, 3),
                 "insight_yield": round(insight_yield, 3),
+                "entrenched": entrenched,
+                "contradictions": contradictions,
             }
         )
 

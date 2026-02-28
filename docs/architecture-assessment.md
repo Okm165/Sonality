@@ -1,360 +1,407 @@
 # Architecture Assessment
 
-A research-driven evaluation of Sonality's architecture against the academic literature on LLM agent memory, belief revision, personality dynamics, and behavioral alignment. Each area receives a verdict (KEEP, MODIFY, ADD, REJECT) with specific citations.
+Research-backed architecture and training blueprint for Sonality under hard constraints:
+
+- API-only access (provider API, no fine-tuning)
+- single-user conversational runtime
+- minimal dependencies and minimal abstraction
+- behavior-first evaluation over self-reported traits
+
+This document is intentionally implementation-oriented: each recommendation is tied to impact, complexity, and what code should be removed or avoided.
 
 ---
 
-## 1. Memory Architecture
+## 1. ARCHITECTURE ASSESSMENT
+
+### 1.1 Memory Architecture (ChromaDB + JSON vs Graph)
+
+**Verdict: MODIFY (lightly), REJECT full graph DB**
+
+- **Research justification**
+  - ENGRAM (Patel and Patel, 2025): typed memory with dense retrieval beats full-context baselines by about 15 points on LongMemEval while using about 1% token budget; no graph DB required.
+  - Mem0 vs Graphiti empirical comparison (2025): vector memory significantly outperforms graph memory on efficiency with no statistically significant accuracy gain.
+  - RecallM (2024): graph+vector excels for temporal multi-hop belief updating, but its gains are strongest in tasks where causal graph traversal is central.
+- **Impact vs complexity**
+  - Full graph layer (Neo4j-style or heavy NetworkX usage): high complexity, uncertain gain for Sonality's single-user conversational pattern.
+  - Typed vector memory + quality rerank + lightweight relational signals: high impact, low complexity.
+- **What to replace/remove**
+  - Keep one store (`ChromaDB`) and remove any need for secondary graph persistence.
+  - Prefer metadata-based relation hints instead of graph entities/edges services.
+- **Minimal implementation**
+  - Keep typed retrieval (`semantic` then `episodic`).
+  - Add optional relation hints in metadata (`related_topics`, `stance_sign`) and apply small rerank bonuses for causally adjacent memories.
+
+### 1.2 ESS Pipeline (Self-Judge Bias, Argument Quality, Calibration)
+
+**Verdict: MODIFY**
+
+- **Research justification**
+  - SYConBench (Hong et al., EMNLP 2025): third-person framing reduces sycophancy up to 63.8%.
+  - BASIL (Atwell et al., 2025): Bayesian consistency requires distinguishing rational updates from agreeableness artifacts.
+  - MArgE (2025), SPARK (2024), ConQRet (2025): richer argument assessment improves quality scoring but adds runtime overhead.
+- **Impact vs complexity**
+  - Separate ESS model: high impact, very low complexity.
+  - Per-turn formal argument trees (MArgE-style): medium potential benefit, high latency/complexity in API-only loop.
+  - Offline calibration harness: medium impact, low-medium complexity.
+- **What to replace/remove**
+  - Replace same-model default ESS in production usage with a dedicated ESS model.
+  - Reject per-turn argument-tree parsing and extra judge calls in online path.
+- **Minimal implementation**
+  - Keep third-person ESS prompt and current structured ESS fields.
+  - Add a small offline calibration suite against curated argument-quality samples (no runtime cost).
+
+### 1.3 Snapshot Update Mechanism (Lossy Rewrites)
+
+**Verdict: KEEP current direction, MODIFY guardrails**
+
+- **Research justification**
+  - ABBEL (2025): belief bottleneck (compact natural-language state) is effective but vulnerable to error propagation.
+  - Park et al. (2023): reflection is a critical mechanism for coherence.
+- **Impact vs complexity**
+  - Per-turn full snapshot rewrite: high drift risk.
+  - Append-only insight ledger + periodic consolidation: high value, low complexity.
+- **What to replace/remove**
+  - Remove any remaining assumptions of per-message full rewrite behavior.
+  - Keep insight accumulation + periodic/event reflection as the only synthesis path.
+- **Minimal implementation**
+  - Continue logging `reflection` integrity metrics (`snapshot_jaccard`, dropped strong beliefs).
+  - Add explicit contradiction count in reflection logs to catch hidden compression failures early.
+
+### 1.4 Embedding Backend (Compact vs Long-Context)
+
+**Verdict: MODIFY via migration path, not immediate mandatory switch**
+
+- **Research justification**
+  - Compact embedding backends can lose semantic fidelity on longer inputs.
+  - For long-horizon memory, stronger embedding quality improves retrieval robustness and reduces contextual tunneling risk.
+- **Impact vs complexity**
+  - Immediate migration: medium impact, medium operational complexity (re-embedding).
+  - Deferred migration with explicit trigger criteria: better operational trade-off.
+- **What to replace/remove**
+  - Keep current embedding path until trigger criteria are met.
+  - Remove ambiguity by documenting exact migration playbook.
+- **Minimal implementation**
+  - Trigger migration when retrieval quality drops on long user inputs or when episode length distribution exceeds the current backend's reliable context range.
+  - Migration sequence:
+    1. export/backup current episode metadata,
+    2. rebuild collection with new embedding function,
+    3. re-ingest summaries with same IDs/metadata,
+    4. run retrieval regression tests,
+    5. switch runtime.
+
+### 1.5 Anti-Sycophancy Measures
+
+**Verdict: KEEP core stack, MODIFY evaluation rigor**
+
+- **Research justification**
+  - PersistBench (Pulipaka et al., 2026): memory-induced sycophancy is a severe failure mode.
+  - SYConBench (Hong et al., 2025): ToF/NoF metrics are practical for multi-turn pressure testing.
+  - BASIL (2025): consistency-aware update logic outperforms naive agreement patterns.
+  - SMART (2025) and MONICA (2025): powerful but require training-time or inference-internals access unavailable in this deployment model.
+- **Impact vs complexity**
+  - Current defenses (third-person ESS, cooling period, confidence resistance, quality gating): high value, low complexity.
+  - RL/MCTS or hidden-state monitors: high complexity, outside API-only constraints.
+- **What to replace/remove**
+  - Keep current runtime defenses.
+  - Add offline sycophancy evaluation protocol and remove reliance on anecdotal checks.
+- **Minimal implementation**
+  - Log ToF/NoF-style session metrics from runtime events.
+  - Keep cooling period (`N=3`) as default.
+
+### 1.6 Forgetting/Decay and OCEAN Interaction
+
+**Verdict: KEEP decay, REJECT dynamic OCEAN as control loop**
+
+- **Research justification**
+  - Ebbinghaus-in-LLMs (2025): forgetting curves remain useful to avoid stale lock-in.
+  - PERSIST (2025), Personality Illusion (NeurIPS 2025): self-reported trait measures are unstable and weakly coupled to real behavior.
+- **Impact vs complexity**
+  - Power-law confidence decay with reinforcement floors: high value, very low complexity.
+  - Dynamic OCEAN update loops: low reliability, unnecessary complexity.
+- **What to replace/remove**
+  - Keep belief confidence decay.
+  - Remove stale OCEAN-centric evaluation assumptions from docs/tests where they are no longer first-class.
+- **Minimal implementation**
+  - Continue decay in reflection path.
+  - Keep behavior-first health metrics as canonical signals.
+
+### 1.7 Opinion Confidence and Belief Revision
+
+**Verdict: KEEP + MODIFY (AGM-lite refinement)**
+
+- **Research justification**
+  - AGM framework: rational change requires expansion/contraction/revision discipline.
+  - Belief-R (2024) and Hurst (2024): practical systems need hybrid revision (formal constraints + heuristics).
+  - Deliberative Reasoning Networks (2025): uncertainty-aware updates improve adversarial robustness.
+- **Impact vs complexity**
+  - Current confidence/evidence metadata is strong.
+  - Small contraction-before-revision addition is low complexity and improves rationality.
+- **What to replace/remove**
+  - Replace purely ad-hoc opposition damping with explicit two-step update:
+    1. contraction of confidence under strong counter-evidence,
+    2. directional revision.
+- **Minimal implementation**
+  - Implement in existing update path without theorem prover, new dependency, or extra LLM calls.
+
+### 1.8 Memory Poisoning Defense
+
+**Verdict: MODIFY**
+
+- **Research justification**
+  - AgentPoison (Chan et al., 2024): tiny poison rate can still drive major drift.
+  - MemoryGraft (Srivastava and He, 2025): poisoned retrievals can dominate outputs.
+  - Experience-following property (2025): retrieval quality directly shapes behavior trajectories.
+- **Impact vs complexity**
+  - Provenance-aware metadata and reranking penalties: high impact, low-medium complexity.
+- **What to replace/remove**
+  - Replace trust-by-default retrieval ordering with provenance-aware quality penalties.
+- **Minimal implementation**
+  - Add immutable metadata (`origin`, `ingested_at`, `ess_model`, `session_id`) and penalize low-credibility records even if semantically close.
+
+### 1.9 Disagreement Detection
 
 **Verdict: KEEP**
 
-### What the research says
-
-RecallM (2023) reports 4x better belief updating with graph DB vs vector alone. However, this comparison measures *retrieval-driven* belief updates — the agent queries memory and updates beliefs based on what it retrieves.
-
-Sonality does not work this way. Beliefs are tracked in `opinion_vectors` + `belief_meta` — a structured Bayesian system updated via ESS classification, not via memory retrieval. Memory retrieval serves context assembly, not belief revision. The 4x claim does not apply to this architecture.
-
-Mem0 vs Graphiti (arXiv:2601.07978) provides the decisive empirical evidence: vector databases "significantly outperform graph databases in efficiency" with "NO statistically significant accuracy difference." Graphiti generated 1.17M tokens per test case at $152 before abort.
-
-ENGRAM (2025) achieves SOTA on LoCoMo using typed memory (episodic/semantic/procedural) *without* graph infrastructure. Sonality already implements this pattern via `memory_type` metadata tagging in ChromaDB and `retrieve_typed()` routing.
-
-### Current implementation
-
-```
-episodes.py: store() tags memory_type ("semantic" if ESS > threshold, "episodic" otherwise)
-episodes.py: retrieve_typed() queries semantic first, then episodic
-episodes.py: ESS-weighted reranking: similarity × (1 + ess_score)
-```
-
-### What would need to change for a graph layer
-
-Adding NetworkX for relational edges between topics would require:
-- ~150 lines of graph construction/maintenance
-- A new dependency
-- Topic co-occurrence extraction logic
-- Graph traversal during retrieval
-
-The benefit — "contextual tunneling" resolution (SYNAPSE 2025) — addresses multi-hop reasoning across semantically distant memories. For a personality agent with < 1000 episodes, cosine similarity + ESS reranking is sufficient. Graph becomes valuable at scale (200+ episodes on overlapping topics).
-
-**Upgrade path documented in [Future Opportunities](design-decisions.md#future-opportunities).**
+- **Research justification**
+  - Stance dynamics are more reliable than lexical cue matching for multi-turn sycophancy detection (SYConBench 2025).
+- **Impact vs complexity**
+  - Structural check (`direction x position < 0`) is simple and robust.
+- **What to replace/remove**
+  - Keep structural detector.
+  - Reject keyword-based disagreement heuristics and extra per-turn judge calls.
 
 ---
 
-## 2. Temporal Decay
+## 2. BEHAVIOR DEVELOPMENT PIPELINE
 
-**Verdict: KEEP (already implemented)**
+### 2.1 Personality Formation (APF 3-layer progression)
 
-### What the research says
+Map AI Personality Formation (ICLR 2026 submission) directly onto Sonality:
 
-FadeMem (Jan 2026): biologically-inspired power-law forgetting achieves 45% storage reduction while improving reasoning. Ebbinghaus (1885): power-law (not exponential) matches human forgetting curves. "Ebbinghaus in LLMs" (2025): neural networks exhibit human-like forgetting patterns.
+1. **Linguistic Mimicry (0-20 interactions)**
+   - Use strict ESS gating and dampened updates.
+   - Goal: stabilize style, avoid first-impression overfitting.
+2. **Structured Accumulation (20-80 interactions)**
+   - Use staged updates, confidence growth, typed memory routing.
+   - Goal: turn high-quality repeated evidence into durable beliefs.
+3. **Autonomous Expansion (80+ interactions)**
+   - Reflection proposes tentative extensions to adjacent topics.
+   - Goal: coherent, non-random worldview expansion.
 
-### Current implementation
+### 2.2 Update Granularity
 
-```python
-# sponge.py: decay_beliefs()
-retention = (1 + gap) ** (-decay_rate)        # power-law, β=0.15
-floor = min(0.6, meta.evidence_count * 0.06)  # evidence-based reinforcement floor
-new_conf = max(floor, meta.confidence * retention)
-```
+Use three interacting cadences:
 
-This is exactly the FadeMem-inspired approach. Power-law decay (not exponential), with a reinforcement floor that prevents well-evidenced beliefs from vanishing. Beliefs below `min_confidence=0.05` are dropped entirely.
+- **Per-message:** ESS + topic tracking + staged deltas.
+- **Short-window commit:** cooling-period net commit.
+- **Mid-window consolidation:** reflection synthesis.
 
-The decay rate β=0.15 means:
-- A belief unreinforced for 10 interactions retains ~70% confidence
-- Unreinforced for 30 interactions: ~52%
-- Unreinforced for 100 interactions: ~32%
-- But a belief with 10 evidence points has floor=0.6, so it persists regardless
+Rationale: per-message hard commits are reactive; reflection-only is too sluggish.
 
-This matches the Friedkin-Johnsen stubbornness model: agents balance initial beliefs vs. new information, with diminishing stubbornness leading to consensus but at rates that vary with decay.
+### 2.3 Collapse Prevention Guarantees
 
-**No changes needed.** The implementation already follows the research recommendations.
+Structural safeguards:
 
----
+- append-only insight ledger between reflections,
+- snapshot retention validation,
+- high-confidence belief preservation checks,
+- versioned archives and rollback path,
+- immutable core identity anchor.
 
-## 3. Opinion Confidence
+### 2.4 Measuring Personality Coherence
 
-**Verdict: KEEP (already implemented)**
+Primary metrics (behavior-first):
 
-### What the research says
+- disagreement rate,
+- belief growth trajectory,
+- high-confidence ratio,
+- snapshot jaccard continuity,
+- insight yield,
+- staged-to-committed transition behavior.
 
-Deliberative Reasoning Networks (2025): tracking epistemic uncertainty per hypothesis improves adversarial reasoning by 15.2%. Graph-theoretic belief model (2025): distinguish credibility (source) from confidence (structural support).
+Secondary evaluation:
 
-### Current implementation
+- Narrative Continuity Test axes (Situated Memory, Goal Persistence, Autonomous Self-Correction, Stylistic/Semantic Stability, Persona Continuity),
+- self-report vs behavior contradiction checks.
 
-```python
-# sponge.py: BeliefMeta
-class BeliefMeta(BaseModel):
-    confidence: float = 0.0          # epistemic status
-    evidence_count: int = 1          # structural support
-    last_reinforced: int = 0         # temporal tracking
-    provenance: str = ""             # source tracking
+### 2.5 Reflection Strategy
 
-# confidence grows logarithmically:
-confidence = min(1.0, log2(evidence_count + 1) / log2(20))
-```
+Use dual trigger:
 
-This captures:
-- **Epistemic status** (confidence) — maps to Deliberative Reasoning Networks' uncertainty tracking
-- **Structural support** (evidence_count) — maps to graph-theoretic model's "structural confidence"
-- **Source tracking** (provenance) — maps to credibility distinction
-- **Temporal context** (last_reinforced) — enables decay
+- periodic (every `REFLECTION_EVERY` interactions),
+- event-triggered (cumulative shift threshold).
 
-The Bayesian resistance mechanism in `agent.py:_update_opinions()` scales magnitude by `1 / (confidence + 1)`, making established beliefs harder to shift. Counter-arguments face additional resistance via `conf += abs(old_pos)`.
+This matches Park et al. (2023): reflection should track meaningful events, not only fixed intervals.
 
-**The minimal representation that captures epistemic status is already implemented.**
+### 2.6 Stubbornness/Resistance Model
 
----
+Adopt confidence-driven resistance (Friedkin-Johnsen-compatible behavior):
 
-## 4. Belief Revision
+- resistance increases with accumulated evidence and confidence,
+- no per-domain hard-coded stubbornness knobs,
+- stronger opposition evidence can still contract confidence before revision.
 
-**Verdict: KEEP**
+### 2.7 Teaching Methodology (Practical)
 
-### What the research says
+Recommended training curriculum:
 
-AGM framework (Alchourrón, Gärdenfors, Makinson): formal postulates for rational belief change — contraction, revision, expansion. Belief-R (2024): LLMs struggle with the trade-off between updating and stability. Hurst (2024): hybrid models combining Bayesian and heuristic approaches capture realistic updating best.
+1. **Interview-first** (discover substrate)
+2. **Evidence modules** (thesis/evidence/counterevidence/synthesis)
+3. **Socratic probes** (assumption/falsification/trade-off questions)
+4. **Adversarial pairs** (weak pressure vs strong evidence)
+5. **Constitutional reinforcement** (periodic core-value scenarios)
 
-### Current implementation
-
-Sonality approximates AGM-rational revision through a multi-mechanism pipeline:
-
-1. **Expansion** — new topics enter via ESS-gated `stage_opinion_update()`
-2. **Revision** — counter-evidence against existing beliefs faces Bayesian resistance (confidence-scaled magnitude reduction + extra resistance for direction reversal)
-3. **Contraction** — unreinforced beliefs decay via power-law in `decay_beliefs()`
-4. **Cooling period** — staged updates wait 3 interactions before committing, allowing contradictory evidence to cancel out (BASIL 2025: separating sycophantic from rational shifts)
-
-This is exactly Hurst's "hybrid model" — Bayesian updating (confidence scaling) combined with heuristics (ESS gating, cooling period, decay). A formal theorem prover would add hundreds of lines for marginal benefit in a personality agent.
-
-**No changes needed.** The heuristic approximation matches what the research recommends for practical systems.
+This keeps behavior intentional rather than random conversation drift.
 
 ---
 
-## 5. Memory Tiers
+## 3. IMPLEMENTATION PLAN
 
-**Verdict: KEEP (already implemented)**
+Atomic commit plan ordered by impact-to-complexity.
 
-### What the research says
+### (a) High-impact / low-complexity first
 
-MemoryOS (EMNLP 2025): OS-inspired hierarchical storage improves LoCoMo F1 by 49.11%. ENGRAM (2025): memory typing without graph infrastructure achieves SOTA.
+1. **Docs canonicalization and consistency cleanup**
+   - consolidate architecture decisions and remove stale assumptions.
+   - Est. `+250 / -500`.
 
-### Current implementation
+2. **AGM-lite contraction-before-revision**
+   - implement minimal confidence contraction under strong opposing evidence.
+   - Files: `sonality/agent.py`, tests.
+   - Est. `+35 / -20`.
 
-Sonality implements a three-tier hierarchy:
+3. **Poisoning provenance metadata**
+   - add ingestion provenance + retrieval penalties.
+   - Files: `sonality/memory/episodes.py`, `sonality/agent.py`, tests.
+   - Est. `+40 / -12`.
 
-| Tier | Storage | Contents | Access |
-|------|---------|----------|--------|
-| Working memory | `self.conversation` (in-process) | Current session turns | Direct |
-| Episodic memory | ChromaDB (type="episodic") | Low-ESS interactions | Cosine similarity |
-| Semantic memory | ChromaDB (type="semantic") | High-ESS interactions | Cosine similarity + ESS reranking |
-| Personality state | JSON (sponge.json) | Snapshot + beliefs + traits | Direct |
+### (b) Medium-impact
 
-The `retrieve_typed()` method routes queries through semantic memory first (high-quality), then episodic (contextual), matching ENGRAM's typed retrieval pattern.
+4. **Light relational rerank hints**
+   - add relation-aware metadata bonus without graph dependency.
+   - Files: `sonality/memory/episodes.py`, tests.
+   - Est. `+45 / -15`.
 
-MemoryOS's full short/mid/long-term hierarchy adds value for multi-user agents with thousands of interactions. For a single-user agent, the current two-tier episodic/semantic split plus JSON personality state is sufficient.
+5. **Reflection contradiction ledger**
+   - emit unresolved-contradiction count in reflection events.
+   - Files: `sonality/agent.py`, docs.
+   - Est. `+20 / -5`.
 
-**No changes needed.**
+### (c) Speculative / research-heavy (defer)
 
----
+6. **NetworkX augmentation for memory-belief graph**
+   - only if measured retrieval misses justify complexity.
+   - Est. `+150 / -40`.
 
-## 6. Poisoning Defense
-
-**Verdict: KEEP (already implemented)**
-
-### What the research says
-
-MemoryGraft (Dec 2025): poisoned experience retrieval causes persistent behavioral drift; 47.9% poisoned retrievals on benign workloads. AgentPoison (NeurIPS 2024): > 80% attack success with < 0.1% poison rate. Defenses: provenance attestations, safety-aware reranking, memory quality regulation.
-
-### Current implementation
-
-Sonality has four defense layers:
-
-1. **ESS gating** — low-quality inputs score below threshold and don't trigger opinion updates
-2. **ESS-weighted reranking** — retrieved memories are ranked by `similarity × (1 + ess_score)`, preferring high-quality memories (episodes.py line 99)
-3. **Memory typing** — high-ESS episodes are stored as "semantic" (higher retrieval priority), low-ESS as "episodic"
-4. **Anti-sycophancy memory framing** — the system prompt instructs "evaluate on merit, not familiarity" (prompts.py line 31)
-5. **Cooling period** — staged updates don't commit immediately, allowing contradictory evidence to cancel
-6. **Bayesian resistance** — existing high-confidence beliefs resist change proportionally
-
-PersistBench (2025) shows 97% sycophancy failure when memories contain user preferences. Sonality's anti-sycophancy framing directly addresses this by decoupling memory from endorsement.
-
-The remaining risk: a well-structured poisoned argument (high ESS score with fabricated evidence) will pass all gates. This is an accepted limitation — ESS evaluates argument *structure*, not factual truth.
-
-**No changes needed.** The multi-layer defense already implements the recommended approach.
+7. **Offline SYConBench-style evaluator harness**
+   - richer regression suite, not runtime logic.
+   - Est. `+120 / -20`.
 
 ---
 
-## 7. Disagreement Detection
+## 4. MONITORING SPECIFICATION
 
-**Verdict: KEEP (already implemented)**
+### 4.1 Events to Emit (JSONL)
 
-### What the research says
+Required events:
 
-SYConBench (EMNLP 2025): self-judge bias causes up to 50 percentage point shifts. Third-person prompting reduces sycophancy by 63.8%. Keyword matching is brittle and easily circumvented.
+- `context`
+- `ess`
+- `opinion_staged`
+- `opinion_commit`
+- `health`
+- `reflection`
 
-### Current implementation
+Critical fields:
 
-```python
-# agent.py: _detect_disagreement()
-def _detect_disagreement(self, ess: ESSResult) -> bool:
-    sign = ess.opinion_direction.sign  # from ESS structured output
-    if sign == 0.0:
-        return False
-    for topic in ess.topics:
-        pos = self.sponge.opinion_vectors.get(topic, 0.0)
-        if abs(pos) > 0.1 and pos * sign < 0:
-            return True
-    return False
+- ESS quality dimensions (`reasoning_type`, `source_reliability`, `internal_consistency`, `novelty`)
+- update mechanics (`signed_magnitude`, `effective_magnitude`, confidence before/after)
+- memory routing/provenance (`memory_type`, `origin`, `session_id`)
+- reflection integrity (`snapshot_jaccard`, `beliefs_dropped`, `insight_yield`, `entrenched`)
+
+### 4.2 REPL Operator Surface
+
+Must expose:
+
+- `/health`
+- `/beliefs`
+- `/staged`
+- `/diff`
+- `/shifts`
+
+### 4.3 Automated Anomaly Rules
+
+Flag when:
+
+- disagreement rate < 0.15 after warm-up (`possible_sycophancy`)
+- disagreement rate > 0.50 (`contrarian_drift`)
+- belief_count < 3 after 40 interactions (`low_belief_growth`)
+- reflection drops strong beliefs with low jaccard (`reflection_regression`)
+- high-confidence ratio > 0.80 with low update throughput (`ossified_beliefs`)
+- repeated low-credibility retrieval dominance (`poisoning_risk`)
+
+### 4.4 Example Event Records
+
+```json
+{"event":"ess","interaction":42,"score":0.64,"reasoning_type":"empirical_data","source_reliability":"peer_reviewed","internal_consistency":true,"novelty":0.52,"topics":["education_policy"]}
 ```
 
-This is **structural disagreement detection** — the ESS classifier (third-person framing, separate from response generation) determines opinion direction, and the agent checks whether this direction opposes its existing stance. No keyword matching involved.
+```json
+{"event":"opinion_staged","interaction":42,"topic":"education_policy","signed_magnitude":0.021,"due_interaction":45,"confidence_before":0.44,"confidence_after":0.45}
+```
 
-This is more reliable than:
-- Keyword matching ("I disagree", "that's not") — trivially circumvented
-- LLM self-judgment — self-judge bias (SYConBench)
-- Sentiment analysis — doesn't distinguish argument direction from emotional tone
+```json
+{"event":"health","interaction":42,"belief_count":11,"high_conf_ratio":0.36,"disagreement_rate":0.24,"warnings":[]}
+```
 
-**No changes needed.** The structural approach is already the right one.
-
----
-
-## Summary Table
-
-| Area | Verdict | Justification |
-|------|---------|---------------|
-| Graph memory layer | KEEP (no graph) | Mem0 vs Graphiti: no accuracy gain; ENGRAM: typed memory without graphs is sufficient |
-| Temporal decay | KEEP (implemented) | Power-law decay already follows FadeMem/Ebbinghaus research |
-| Opinion confidence | KEEP (implemented) | BeliefMeta already tracks confidence, evidence count, provenance, temporal context |
-| Belief revision | KEEP (implemented) | ESS + Bayesian resistance + cooling = Hurst's hybrid model |
-| Memory tiers | KEEP (implemented) | Episodic/semantic typing follows ENGRAM pattern |
-| Poisoning defense | KEEP (implemented) | ESS gating + reranking + typing + anti-sycophancy framing |
-| Disagreement detection | KEEP (implemented) | Structural via ESS direction vs existing stance; not keyword-based |
+```json
+{"event":"reflection","interaction":60,"insights_consolidated":4,"beliefs_dropped":[],"snapshot_jaccard":0.71,"insight_yield":0.28,"entrenched":["education_policy"]}
+```
 
 ---
 
-## Behavior Development Pipeline
+## 5. REJECTED IDEAS
 
-### How Personality Emerges (APF Three-Layer Theory)
+Rejected because they violate constraints or add complexity without strong local payoff.
 
-AI Personality Formation (ICLR 2026 submission) identifies three progressive layers. Sonality maps them to interaction phases:
+1. **Full graph database migration**
+   - Conflicts with minimalism and lacks clear single-user benefit vs typed vector memory.
 
-**Layer 1 — Linguistic Mimicry (0–20 interactions)**
+2. **Per-turn MArgE/ConQRet online judges**
+   - Valuable conceptually, too expensive for runtime loop.
 
-The model mirrors `CORE_IDENTITY` and `SEED_SNAPSHOT` style. ESS scores are low for casual chat. Bootstrap dampening (0.5× magnitude) prevents early over-commitment.
+3. **SMART/MONICA runtime replication**
+   - Requires RL pipelines or inference-internal access unavailable here.
 
-Mechanism: `compute_magnitude()` applies `dampening=0.5` when `interaction_count < BOOTSTRAP_DAMPENING_UNTIL`.
+4. **Fine-tuning personality methods (BIG5-CHAT/PISF/Open Character Training)**
+   - Strong research, incompatible with API-only constraint.
 
-**Layer 2 — Structured Accumulation (20–50+ interactions)**
+5. **Activation-space persona-vector production monitor**
+   - Requires hidden-state access not provided by standard API calls.
 
-Opinions form through repeated high-ESS exposure. The `belief_meta` tracks evidence count and confidence. Reflection cycles consolidate insights into the snapshot narrative.
-
-Mechanism: `stage_opinion_update()` → cooling period → `apply_due_staged_updates()` → `update_opinion()` with logarithmic confidence growth.
-
-**Layer 3 — Autonomous Expansion (50+ interactions, 10+ beliefs)**
-
-The reflection prompt's maturity instruction changes: "Your worldview is developing coherence. If a pattern suggests a new position, articulate it tentatively."
-
-Mechanism: `_maybe_reflect()` checks `ic >= 50 and nb >= 10` to switch maturity instruction.
-
-### Teaching the Agent
-
-Teaching means presenting structured arguments that pass ESS thresholds. See the [Training Guide](training-guide.md) for detailed curricula, methodologies, and monitoring approaches.
-
-Key mechanisms:
-- Arguments with evidence and reasoning score ESS > 0.5 (effective teaching)
-- Social pressure and bare assertions score ESS < 0.15 (filtered out)
-- Logical fallacies score ESS < 0.25 (filtered with calibration examples)
-- Established beliefs resist change via Bayesian confidence scaling
-- Unreinforced beliefs decay, creating room for new positions
-
-### Measuring Personality Coherence
-
-Based on PERSIST (2025) and Narrative Continuity Test (2025):
-
-1. **Snapshot Jaccard** — lexical overlap between successive snapshots (logged per reflection)
-2. **Disagreement rate** — running mean of structural disagreements (20–35% = healthy)
-3. **Belief count trajectory** — should grow during Layer 2, stabilize during Layer 3
-4. **High-confidence ratio** — fraction of beliefs with confidence > 0.5 (20–50% = healthy)
-5. **Insight yield** — fraction of interactions producing identity insights (0.1–0.5 = healthy)
-
-All five metrics are logged to `data/ess_log.jsonl` in `health` and `reflection` events.
-
-### Real-Time Monitoring
-
-The JSONL audit trail emits six event types:
-
-| Event | Frequency | Key Fields |
-|-------|-----------|------------|
-| `context` | Every interaction | prompt_chars, relevant_count, snapshot_chars |
-| `ess` | Every interaction | score, type, direction, topics, beliefs |
-| `opinion_staged` | When ESS > threshold | topic, signed_magnitude, due_interaction |
-| `opinion_commit` | When cooling period expires | committed topics, remaining staged |
-| `health` | Every interaction | belief_count, disagree_rate, warnings |
-| `reflection` | Every 20 interactions | jaccard, insight_yield, dropped beliefs |
-
-Health warnings auto-detect:
-- `possible_sycophancy` — disagreement rate < 15% after 20+ interactions
-- `snapshot_too_short` — snapshot < 15 words
-- `snapshot_bland` — vocabulary diversity < 0.4
-- `low_belief_growth` — < 3 beliefs after 40+ interactions
-
-### Reflection Quality
-
-Park et al. (2023) ablation shows reflection is the most critical component. Sonality's reflection uses four structured phases:
-
-1. **EVALUATE** — compare snapshot to accumulated evidence
-2. **RECONCILE** — check beliefs for tensions/contradictions
-3. **SYNTHESIZE** — find meta-patterns across beliefs and insights
-4. **GUARD** — preserve core personality that should not change
-
-The maturity-aware instruction adapts the reflection depth to the agent's development stage, following SAMULE's (EMNLP 2025) insight that reflection should scale with experience.
-
-Belief preservation checking warns when reflection drops high-confidence beliefs, following Constitutional AI Character Training (Nov 2025): losing a trait from the narrative = losing it from behavior.
+6. **Domain-specific stubbornness knobs**
+   - Adds brittle tuning complexity; confidence/evidence-based resistance is simpler and data-driven.
 
 ---
 
-## Rejected Ideas
+## References Used in Decisions
 
-### Knowledge Graph (Neo4j/NetworkX)
-
-**Why rejected:** Mem0 vs Graphiti (arXiv:2601.07978): no statistically significant accuracy difference; Graphiti costs $152/test case. ENGRAM achieves SOTA without graphs. Sonality's belief tracking is structural (opinion_vectors), not retrieval-driven — the 4x RecallM claim doesn't apply to this architecture.
-
-### Full AGM Belief Revision
-
-**Why rejected:** Requires a theorem prover or constraint solver. The ESS-gated heuristic with Bayesian resistance already approximates AGM's expansion/revision/contraction. Hurst (2024) confirms hybrid models outperform pure formal approaches for practical systems.
-
-### Fine-Tuning for Personality (BIG5-CHAT, PISF, Constitutional AI)
-
-**Why rejected:** Requires model weights access. Sonality is API-only. RAG-based personalization achieves 14.92% improvement vs 1.07% for parameter-efficient fine-tuning (arXiv:2409.09510).
-
-### OCEAN as Personality Driver
-
-**Why rejected:** PERSIST (2025): σ > 0.3 measurement noise even in 400B+ models. Personality Illusion (NeurIPS 2025): self-reported traits don't predict behavior. Sonality uses behavioral metrics (disagreement rate, opinion vectors, topic engagement) instead.
-
-### Activation Steering (PERSONA, Persona Vectors)
-
-**Why rejected:** Requires model internals (hidden states) not exposed by API. Could complement Sonality if using open-weight models, but adds complexity for marginal benefit when the prompt-based approach already works.
-
-### Multi-Agent Reflection (MAR)
-
-**Why rejected:** Adds multiple LLM calls per reflection cycle. The single-agent four-phase reflection already covers self-critique (Phase 1), contradiction detection (Phase 2), synthesis (Phase 3), and identity preservation (Phase 4).
-
-### Probabilistic Memory Gating (FluxMem)
-
-**Why rejected:** FluxMem's distribution-aware fusion requires training a gating network. ESS-weighted reranking is a simpler analog. Worth revisiting if retrieval quality degrades at scale.
-
-### Prospective Reflection (PreFlect)
-
-**Why rejected:** PreFlect shifts from post-hoc correction to pre-execution foresight. Valuable for planning agents, but Sonality is a conversational agent where retrospective consolidation is the appropriate pattern. Adding pre-execution reflection would double LLM calls per interaction.
-
----
-
-## What Actually Needs Improvement
-
-The architecture is research-aligned. The genuine remaining opportunities are:
-
-1. **Embedding model upgrade** — MiniLM-L6-v2 has a 256-token window; longer summaries are truncated. Migration to a larger-context model would improve retrieval quality. (Documented in [Future Opportunities](design-decisions.md#embedding-model-upgrade))
-
-2. **Separate ESS model** — Using a different model for ESS classification reduces Neural Howlround (arXiv:2504.07992: same model at every stage creates self-reinforcing bias in 67% of conversations). The config already supports `SONALITY_ESS_MODEL` but defaults to the same model.
-
-3. **Martingale entrenchment detection** — NeurIPS 2025 (arXiv:2512.02914): all LLMs exhibit belief entrenchment violating Bayesian rationality. A periodic check during reflection could detect when opinion trajectories become predictable. Low complexity, medium impact.
-
-These are documented as future opportunities, not architectural gaps. The current system works as designed.
+- AGM framework (Alchourron, Gardenfors, Makinson)
+- Park et al. (2023), Generative Agents
+- RecallM (2024)
+- Belief-R (2024)
+- Hurst (2024)
+- AgentPoison (2024)
+- ENGRAM (2025)
+- BASIL (2025)
+- MArgE (2025)
+- SPARK (2024)
+- ConQRet (2025)
+- MemoryOS (2025)
+- SMART (2025)
+- MONICA (2025)
+- Mem0 vs Graphiti comparison (2025)
+- Personality Illusion (NeurIPS 2025)
+- PERSIST (2025)
+- AI Personality Formation (ICLR 2026 submission)
+- PersistBench (2026)

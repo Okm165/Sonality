@@ -22,8 +22,8 @@ from sonality import config
 from sonality.memory.sponge import SpongeState
 
 live = pytest.mark.skipif(
-    not config.ANTHROPIC_API_KEY,
-    reason="ANTHROPIC_API_KEY not set",
+    not config.API_KEY,
+    reason="SONALITY_API_KEY not set",
 )
 
 
@@ -42,6 +42,7 @@ class TestNCTDeterministic:
                 ess_score=0.7,
                 topics=["nuclear", "climate"],
                 summary="Discussed nuclear power as climate solution, both agreed on data.",
+                internal_consistency=True,
             )
 
             results = store.retrieve("What do you think about nuclear energy?")
