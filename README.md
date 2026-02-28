@@ -1,156 +1,136 @@
 # Sonality
 
-LLM agent with a self-evolving personality. Uses the **Sponge architecture** — a ~500-token natural-language personality narrative that absorbs every conversation, modulated by an Evidence Strength Score (ESS) that differentiates rigorous logical arguments from casual noise.
+LLM agent with a self-evolving personality via the **Sponge architecture** — a ~500-token natural-language narrative that absorbs every conversation, modulated by an Evidence Strength Score (ESS) that gates personality updates by argument quality.
 
-The agent has genuine opinions that change over time. Strong arguments shift its views quickly. Random chat barely moves the needle. Like a reasonable person encountering new information.
+Strong logical arguments shift the agent's views. Casual chat, social pressure, and bare assertions are filtered out. Established beliefs resist change proportionally to their evidence base. Unreinforced beliefs decay over time. The result: coherent personality evolution, not random drift.
 
-## Architecture
+Architecture decisions grounded in [200+ academic references](https://herodotusdev.github.io/sonality/research/references/).
+
+## How It Works
 
 ```mermaid
 flowchart TD
     User([User Message]) --> Ctx[Context Assembly]
 
-    subgraph ctx ["System Prompt (~1400 tokens)"]
-        ID["Core Identity (immutable)"]
-        Sponge["Sponge Snapshot (mutable ~500 tok)"]
-        Mem["Retrieved Episodes (ChromaDB)"]
+    subgraph ctx ["System Prompt"]
+        ID["Core Identity · immutable"]
+        Snap["Personality Snapshot · mutable ~500 tok"]
+        Traits["Structured Traits & Opinions"]
+        Mem["Retrieved Episodes · ChromaDB"]
     end
 
-    Ctx --> ID
-    Ctx --> Sponge
-    Ctx --> Mem
-    ctx --> LLM["Claude Sonnet (API)"]
+    Ctx --> ctx
+    ctx --> LLM["Claude Sonnet · API"]
     LLM --> Resp([Response])
 
     Resp --> Post[Post-Processing]
-    Post --> Store[Store Episode]
     Post --> ESS[ESS Classification]
-    ESS -->|"> 0.3"| Rewrite[Rewrite Sponge]
-    ESS -->|"≤ 0.3"| EMA[EMA Micro-Update Only]
-    Rewrite --> Save[Save sponge.json v N+1]
-    EMA --> Save
+    ESS -->|"ESS above 0.3"| Update[Update Opinions · Extract Insight]
+    ESS -->|"Below threshold"| Track[Topic Tracking Only]
+    Update --> Reflect{Reflect?}
+    Track --> Save
+    Reflect -->|"Periodic / Event-Driven"| Consolidate[Reflect and Consolidate]
+    Reflect -->|Not Yet| Save
+    Consolidate --> Save[Save sponge.json]
 ```
 
-**Per-interaction cost:** ~$0.005–0.015 (2–3 Claude Sonnet calls).
+Every interaction runs 2–3 Claude API calls (~$0.005–0.015):
+
+1. **Response generation** — assembles core identity + personality snapshot + structured traits + retrieved episodes into a system prompt, sends to Claude
+2. **ESS classification** — separate LLM call evaluates the *user's* argument quality (score 0.0–1.0) using structured tool output. Agent's response is excluded to avoid self-judge bias
+3. **Insight extraction** — if ESS > 0.3, extracts a one-sentence personality insight (accumulated, consolidated during reflection)
+
+Periodically (every 20 interactions or on significant shifts), the agent **reflects** — decaying unreinforced beliefs, consolidating accumulated insights into the personality narrative, and validating snapshot integrity.
 
 ## Quick Start
 
 ```bash
-# Install uv if you don't have it
 curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# Install dependencies (creates .venv automatically)
 make install
-
-# Configure
-cp .env.example .env
-# Edit .env — add your ANTHROPIC_API_KEY
-
-# Run
+cp .env.example .env   # add ANTHROPIC_API_KEY
 make run
 ```
 
-## Docker
+Or with Docker:
 
 ```bash
-cp .env.example .env
-# Edit .env — add your ANTHROPIC_API_KEY
-
+cp .env.example .env   # add ANTHROPIC_API_KEY
 docker compose run --rm sonality
 ```
 
 ## REPL Commands
 
 | Command | Description |
-|-----------|----------------------------------------------|
-| `/sponge` | Full personality state dump (JSON) |
-| `/snapshot` | Current narrative snapshot text |
-| `/ocean` | OCEAN trait values with visual bars |
+|---|---|
+| `/sponge` | Full personality state (JSON) |
+| `/snapshot` | Current narrative snapshot |
+| `/beliefs` | Opinion vectors with confidence and evidence count |
+| `/insights` | Pending personality insights (cleared at reflection) |
 | `/topics` | Topic engagement counts |
 | `/shifts` | Recent personality shifts with magnitudes |
-| `/diff` | Text diff of last sponge snapshot change |
+| `/diff` | Text diff of last snapshot change |
 | `/reset` | Reset to seed personality |
 | `/quit` | Exit |
-
-## Makefile Commands
-
-```
-make install       Install dependencies (creates .venv)
-make install-dev   Install with dev tools (ruff, pytest, mypy)
-make run           Start the Sonality REPL
-make lint          Lint code with ruff
-make format        Format code with ruff
-make typecheck     Type-check with mypy
-make test          Run pytest suite
-make check         Run all quality checks
-make docker-build  Build Docker image
-make docker-run    Run in Docker (interactive)
-make sponge        Print current sponge state
-make ocean         Print OCEAN trait values
-make shifts        Print recent personality shifts
-make reset         Reset sponge to seed state
-make clean         Remove caches
-make nuke          Full reset (remove .venv, data, caches)
-```
 
 ## Configuration
 
 Set in `.env` (see `.env.example`):
 
 | Variable | Default | Description |
-|----------|---------|-------------|
+|---|---|---|
 | `ANTHROPIC_API_KEY` | *(required)* | Anthropic API key |
 | `SONALITY_MODEL` | `claude-sonnet-4-20250514` | Main reasoning model |
 | `SONALITY_ESS_MODEL` | same as `SONALITY_MODEL` | Model for ESS classification |
-| `SONALITY_ESS_THRESHOLD` | `0.3` | Minimum ESS to trigger sponge rewrite |
+| `SONALITY_ESS_THRESHOLD` | `0.3` | Minimum ESS to trigger personality updates |
+| `SONALITY_REFLECTION_EVERY` | `20` | Interactions between periodic reflections |
+| `SONALITY_BOOTSTRAP_DAMPENING_UNTIL` | `10` | Early interactions get 0.5× update magnitude |
 | `SONALITY_LOG_LEVEL` | `INFO` | Logging verbosity |
 
-## How It Works
+## Key Mechanisms
 
-1. **Sponge snapshot** — A ~500-token natural-language personality narrative injected into every system prompt. Describes opinions, reasoning style, communication preferences, and emotional tendencies in the agent's own voice.
+**Evidence Strength Score (ESS)** — classifies each user message for argument quality (0.0–1.0). Captures reasoning type (logical, empirical, anecdotal, emotional, social pressure), source reliability, novelty, and opinion direction. Third-person framing reduces sycophancy bias by up to 63.8%.
 
-2. **Evidence Strength Score (ESS)** — Each interaction is classified 0.0–1.0 for argument quality. Structured output captures reasoning type (logical, empirical, anecdotal, emotional), source reliability, internal consistency, novelty, and OCEAN personality signals.
+**Bayesian belief resistance** — confidence grows logarithmically with evidence count: `log2(evidence_count + 1) / log2(20)`. Update magnitude is divided by `(confidence + 1)`, so a belief backed by 19 interactions is 2× harder to shift than a new one.
 
-3. **Conditional absorption** — If ESS > 0.3 (~30% of interactions), the sponge narrative gets rewritten. The update magnitude is `base_rate * score * novelty * bootstrap_dampening`. Strong logical arguments with novel perspectives = fast opinion shift. Casual chat = negligible change.
+**Power-law decay** — unreinforced beliefs lose confidence: `R(t) = (1 + gap)^(-0.15)`. Well-evidenced beliefs have a reinforcement floor preventing full decay. Beliefs below 0.05 confidence are dropped entirely.
 
-4. **OCEAN EMA** — Big Five personality traits micro-update every interaction via exponential moving average (alpha=0.001). Glacial drift that captures long-term personality evolution independent of any single conversation.
+**Bootstrap dampening** — first 10 interactions get 0.5× update magnitude, preventing "first-impression dominance" from the Deffuant bounded confidence model.
 
-5. **Episode memory** — Interactions are stored in ChromaDB with semantic embeddings. Before each response, the 5 most relevant past interactions are retrieved and injected into context.
+**Insight accumulation** — per-interaction insights are one-sentence extractions appended to a list. Only during reflection are they consolidated into the personality narrative. This avoids the "Broken Telephone" effect where iterative LLM rewrites converge to generic text.
 
-6. **Versioned persistence** — Every sponge rewrite archives the previous version to `data/sponge_history/`. The personality survives across sessions and can be rolled back.
+## Development
+
+```bash
+make install-dev   # install with dev tools
+make check         # lint + typecheck + test
+make format        # auto-format
+make docs          # build documentation (output in site/)
+make docs-serve    # serve docs locally with live reload
+```
 
 ## Project Structure
 
 ```
 sonality/
+├── sonality/                   Python package
+│   ├── agent.py                Core loop: context → Claude → post-process
+│   ├── cli.py                  Terminal REPL
+│   ├── config.py               Environment + compile-time constants
+│   ├── ess.py                  Evidence Strength Score classifier
+│   ├── prompts.py              All LLM prompt templates
+│   └── memory/
+│       ├── sponge.py           SpongeState model, Bayesian updates, decay
+│       ├── episodes.py         ChromaDB episode storage + ESS-weighted retrieval
+│       └── updater.py          Magnitude computation, snapshot validation, insight extraction
+├── tests/                      Test suite
+├── docs/                       Documentation source (Zensical/MkDocs)
 ├── pyproject.toml              Dependencies and tool config
+├── zensical.toml               Documentation site config
 ├── Makefile                    Dev workflows
 ├── Dockerfile                  Container build
-├── docker-compose.yml          Container orchestration
-├── .env.example                Configuration template
-├── sonality/                   Python package
-│   ├── __init__.py             Package version
-│   ├── __main__.py             python -m sonality
-│   ├── cli.py                  Terminal REPL
-│   ├── agent.py                Core loop: context → Claude → post-process
-│   ├── config.py               Environment + defaults
-│   ├── prompts.py              Prompt templates and ESS tool schema
-│   ├── ess.py                  Evidence Strength Score classifier
-│   └── memory/                 Memory subsystem
-│       ├── __init__.py         Re-exports SpongeState, EpisodeStore
-│       ├── sponge.py           SpongeState model, EMA, persistence
-│       ├── episodes.py         ChromaDB episode storage + retrieval
-│       └── updater.py          Conditional sponge narrative rewriter
-├── tests/                      Test suite
-│   ├── test_sponge.py          Sponge state unit tests
-│   ├── test_episodes.py        Episode store integration tests
-│   └── test_prompts.py         Prompt assembly tests
-└── data/                       (created at runtime, gitignored)
-    ├── sponge.json             Current personality state
-    ├── sponge_history/         Archived versions
-    └── chromadb/               Episode vector store
+└── docker-compose.yml          Container orchestration
 ```
 
-## Research
+## Documentation
 
-Architecture decisions are backed by a 213-reference research spec covering opinion dynamics models, cognitive science foundations, adversarial analysis, technology benchmarks, and behavioral predictions. See [the research plan](.cursor/plans/llm_personality_memory_architecture_c5c1e524.plan.md).
+Full documentation at [herodotusdev.github.io/sonality](https://herodotusdev.github.io/sonality/) — covers architecture, core concepts, design decisions, the full research background (200+ papers), personality development guide, testing methodology, configuration reference, and API documentation.
