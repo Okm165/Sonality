@@ -120,7 +120,7 @@ Sonality deliberately avoids per-interaction snapshot rewrites:
 | Source | Key Finding |
 |--------|-------------|
 | **Park et al. (2023)** | Reflection ablation: most critical component for believable agents |
-| **Sleep-time Compute (Letta, arXiv:2504.13171)** | +13–18% accuracy with background consolidation, 5× compute savings |
+| **Sleep-time Compute (arXiv:2504.13171)** | +13–18% accuracy with background consolidation, 5× compute savings |
 | **SAGE (arXiv:2409.00872)** | Ebbinghaus-based memory management: 2.26× improvement |
 | **EvolveR (arXiv:2510.16079)** | Experience lifecycle closure enables learning from experience |
 | **ABBEL (2025)** | Belief bottleneck: compact state outperforms full context; frequent rewrites lose minority opinions |

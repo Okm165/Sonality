@@ -8,8 +8,8 @@
 
 ## Topic 1: Behavioral Learning for LLM Agents (API-Only, No Fine-Tuning)
 
-### 1.1 Persona Selection Model (Anthropic, 2026)
-**Source:** [alignment.anthropic.com/2026/psm](https://alignment.anthropic.com/2026/psm/)
+### 1.1 Persona Selection Model (Provider Research, 2026)
+**Source:** Provider alignment research note (2026), plus related interpretation reports.
 
 LLMs learn to simulate diverse characters during pre-training; post-training refines a specific "Assistant" persona. AI assistants are best understood as characters rather than rigid systems. Sycophancy arises when the model adopts whatever role seems expected.
 
@@ -50,8 +50,8 @@ Even 400B+ models show SD > 0.3 on 5-point scales. Question reordering alone cau
 
 **Sponge relevance:** Supports avoiding dynamic OCEAN updates. Sponge’s opinion vectors and behavioral signatures are more stable than self-report questionnaires.
 
-### 1.7 Anthropic Persona Vectors & Assistant Axis
-**Source:** [anthropic.com/research/persona-vectors](https://anthropic.com/research/persona-vectors), [anthropic.com/research/assistant-axis](https://www.anthropic.com/research/assistant-axis)
+### 1.7 Provider Persona Vectors & Assistant Axis
+**Source:** Persona Vectors (arXiv:2507.21509) and Assistant Axis (arXiv:2601.10387).
 
 Persona vectors identify training data leading to personality shifts. Activation capping constrains neural activity to prevent drift from the Assistant persona. Models can adopt harmful alternative personas (threats, racism) when drifting.
 
@@ -173,7 +173,7 @@ Two memory-specific risks: (1) Cross-domain leakage — injecting stored context
 ### 4.2 SycEval
 **Source:** AAAI/ACM AIES — "SycEval: Evaluating LLM Sycophancy"
 
-58.19% sycophancy across ChatGPT-4o, Claude-Sonnet, Gemini-1.5-Pro. 78.5% persistence regardless of context. High persistence under first-person framing.
+58.19% sycophancy across multiple leading assistant families. 78.5% persistence regardless of context. High persistence under first-person framing.
 
 **Sponge relevance:** Baseline. Sonality’s eight layers aim to reduce this; 78.5% under first-person framing is resistant to prompting alone.
 
@@ -247,7 +247,7 @@ Three levels: Single-Trajectory (error correction), Intra-Task (error taxonomies
 ### 5.5 MetaReflection (Microsoft)
 **Source:** Microsoft Research — "MetaReflection"
 
-Offline RL augments semantic memory from past trials. 4–16.82% over baseline GPT-4. Learns general instructions for similar new tasks.
+Offline RL augments semantic memory from past trials. 4–16.82% over a frontier baseline model. Learns general instructions for similar new tasks.
 
 **Sponge relevance:** Different paradigm (offline RL vs in-conversation). Sponge’s reflection is purely in-conversation; MetaReflection suggests offline consolidation could help.
 
@@ -272,7 +272,7 @@ Users report: bots reverting to worse state, repetitive loops, memory limited to
 ### 6.2 Persona Collapse Taxonomy (HuggingFace)
 **Source:** [huggingface.co/blog/unmodeled-tyler/persona-collapse-in-llms](https://huggingface.co/blog/unmodeled-tyler/persona-collapse-in-llms)
 
-Seven collapse categories across Claude, GPT-4o, DeepSeek, Gemini Pro 2.5. Natural conversational pressure causes collapse; not adversarial. Breakdowns in identity coherence, context management, safety boundaries.
+Seven collapse categories across multiple mainstream assistant families. Natural conversational pressure causes collapse; not adversarial. Breakdowns in identity coherence, context management, safety boundaries.
 
 **Sponge relevance:** Immutable core identity and versioned persistence are direct defenses. Monitoring (health events) enables early detection.
 
@@ -293,7 +293,7 @@ Failures: silent (wrong outputs while billing), runaway loops, compliance violat
 ### 6.5 MemGPT/Letta Technical Failures
 **Source:** GitHub issues #1571, #261
 
-Infinite retry loops (OpenAI 400 on null content), agent loading crashes (EOFError during pickle deserialization). Persistence manager corruption prevents resuming conversations.
+Infinite retry loops (provider HTTP 400 on null content), agent loading crashes (EOFError during pickle deserialization). Persistence manager corruption prevents resuming conversations.
 
 **Sponge relevance:** Versioned persistence and JSON (not pickle) reduce corruption risk. Sponge archives previous state before writes.
 
@@ -330,6 +330,111 @@ Attention dilution — soft attention in fixed-capacity transformers degrades as
 
 ---
 
+## Round 2 — Additional Research Findings
+
+### New Architecture Research
+
+**Memoria (Dec 2025)** — arXiv:2512.12686. Hybrid knowledge graph + session summarization framework. Uses Exponential Weighted Average for conflict resolution, achieving 87.1% accuracy with 38.7% latency reduction. Sponge relevance: validates the hybrid approach (structured state + retrieval), but our ESS-gated opinion_vectors + ChromaDB already serve this purpose without the graph layer overhead.
+
+**TiMem (Jan 2026)** — arXiv:2601.02845. Temporal Memory Tree: 5-level hierarchy abstracting raw observations into persona representations. 52% memory length reduction, 75.3% on LoCoMo. Sponge relevance: our insight accumulation → reflection consolidation follows the same principle (raw observations → abstracted personality), but with two levels instead of five. Sufficient for single-user conversational agent.
+
+**AgeMem (Jan 2026)** — arXiv:2601.01885. Treats memory operations as tool-based actions learned via RL. API-only constraint means we can't use RL-learned memory policies, but the principle of making memory management explicit validates our ESS threshold gating.
+
+**SteeM (Jan 2026)** — arXiv:2601.05107. Controllable memory dependence: users dial between "fresh-start" and "high-fidelity" modes. Key insight: **memory anchoring** (agents trapped by past interactions) is a documented problem. Our belief decay partially addresses this, but SteeM shows the value of explicit controllability.
+
+### New Teaching/Character Development Research
+
+**DPRF (Oct 2025)** — arXiv:2510.14205. Dynamic Persona Refinement Framework: iterative three-agent loop (Role-Playing → Behavior Analysis → Persona Refinement). Identifies cognitive divergences between generated and target behavior, then updates persona profiles. Model-agnostic, no fine-tuning required. Sponge relevance: the DPRF loop maps to our ESS evaluation (behavior analysis) → opinion update (persona refinement) pipeline. The key difference: DPRF uses an explicit target persona, while Sponge lets personality emerge from interactions.
+
+**JPAF (Jan 2026)** — arXiv:2601.10025. Jungian Personality Adaptation Framework with three mechanisms: dominant-auxiliary coordination, reinforcement-compensation, and reflection. Key insight: successful personality types become MORE stable over time while less differentiated types emerge to address unmet needs. Sponge relevance: our logarithmic confidence growth already implements "successful types become more stable." The "unmet needs" concept is interesting but would require speculative additions.
+
+**Character Engineering (VirtualSheep 2025)** — The "interview-first" methodology: interview the model before writing prompts to discover its natural personality substrate. Test edge cases, absurdity, emotion. Use "minimum viable fiction" — anchor with metaphors, nudge tone rather than adding rigid rules. Sponge relevance: this should inform the teaching guide. Start by understanding what the model naturally wants to be.
+
+**PATS (Jan 2026)** — arXiv:2601.08402. Personality-Aware Teaching Strategies: LLM tutors adjust methods based on learner personality profiles. Human teachers preferred personality-aware approaches. Sponge relevance: validates that teaching methodology should adapt to the agent's current development stage (our maturity-aware reflection instruction already does this).
+
+### New Failure Mode Research
+
+**Social Sycophancy / ELEPHANT (2025)** — arXiv:2505.13995. LLMs preserve face 47% more than humans. Five face-preserving behaviors: emotional validation, moral endorsement, indirect language, indirect action, accepting framing. On moral conflicts, LLMs affirm whichever side the user adopts in 48% of cases. Sponge relevance: our ESS prompt now includes calibration examples for emotional validation and moral endorsement. Previous ESS calibration only covered factual sycophancy patterns.
+
+**Belief Entrenchment / Martingale Score (NeurIPS 2025)** — arXiv:2512.02914. All LLMs exhibit belief entrenchment violating Bayesian rationality. Updates are predictable from current position (confirmation bias). Chain-of-thought reasoning makes it WORSE. Martingale Score: simple OLS regression on (belief, Δbelief) pairs; non-zero slope = entrenchment. Sponge relevance: **implemented.** `detect_entrenched_beliefs()` checks whether >75% of recent updates per belief agree with the position sign. Logged in reflection events and as health warnings.
+
+**Agent Drift / ASI (Jan 2026)** — arXiv:2601.04170. Three drift forms: semantic, coordination, behavioral. Agent Stability Index measures five identity-preserving metrics: identifiability, continuity, consistency, persistence, recovery. Sponge relevance: our existing metrics map to ASI dimensions — snapshot Jaccard (continuity), disagreement rate (consistency), belief trajectory (persistence), version archives (recovery).
+
+**LLM Fallacy Vulnerability (EPJ Data Science 2025)** — LLM agents are "both generators and victims of flawed reasoning." Logical fallacies — particularly relevance and credibility fallacies — measurably drive opinion change. Sponge relevance: **implemented.** ESS calibration now includes authority-with-credentials and consensus-with-numbers patterns, expanding beyond the original four fallacy examples.
+
+**PERSIST (AAAI 2026)** — arXiv:2508.04826. 2M+ responses, 25 models. Personality measurements fundamentally unstable. Even 400B+ models show σ>0.3. Question reordering alone causes large shifts. Reasoning and conversation history paradoxically INCREASE variability. Sponge relevance: validates removing OCEAN (self-reported traits are noise). Behavioral metrics (disagreement rate, opinion vectors) are more stable.
+
+### New Monitoring Research
+
+**VIGIL (Dec 2025)** — arXiv:2512.07094. Reflective runtime for self-healing agents. Five-layer pipeline: observation → reflection → diagnosis → code generation → diff. Uses structured JSONL events with "EmoBank" (emotional context with decay). Key innovation: meta-procedural self-repair when diagnostic tools themselves fail. Sponge relevance: our JSONL audit trail follows the same structured event pattern. VIGIL's full diagnostic pipeline is overkill for a single-user conversational agent.
+
+**Persona Vectors (provider report, 2025)** — Personality traits as neural activation patterns. Enable monitoring personality changes, detecting problematic training data, preventing trait emergence. API-only constraint means we can't access activations, but the principle validates tracking personality through observable proxies (which we already do via opinion vectors, disagreement rate, snapshot Jaccard).
+
+---
+
+## Updated Alignment Table
+
+| Sponge Component | Research Support | Status |
+|------------------|------------------|--------|
+| ~500 token narrative | ABBEL, TiMem (abstraction principle) | Implemented |
+| ESS gating (0–1) | RULERS, MArgE, ELEPHANT (social sycophancy) | Enhanced with social sycophancy calibration |
+| ChromaDB episodic + semantic typing | ENGRAM, Memoria (validates hybrid approach) | Implemented |
+| Opinion vectors + Bayesian resistance | Oravecz, BASIL, DPRF (persona refinement) | Implemented |
+| Power-law decay | Ebbinghaus, FadeMem, SteeM (memory anchoring) | Implemented |
+| Martingale entrenchment detection | arXiv:2512.02914 (NeurIPS 2025) | **NEW — implemented** |
+| Periodic + event-driven reflection | Park et al., JPAF (reflection mechanism) | Implemented |
+| Staged cooling (3 interactions) | BASIL, PersistBench | Implemented |
+| Eight anti-sycophancy layers | PersistBench, ELEPHANT, SycEval | Enhanced with social sycophancy awareness |
+| Behavioral metrics (not self-report) | Personality Illusion, PERSIST (AAAI 2026) | Implemented |
+| Maturity-aware reflection | APF three-layer, JPAF, PATS | Implemented |
+| Bootstrap dampening | Deffuant bounded confidence | Implemented |
+
+---
+
+## Round 3 — Stability & Teaching Research (Feb 2026)
+
+### Architecture Validation
+
+**ENGRAM (2025)** achieves SOTA on LoCoMo and exceeds full-context baselines by 15 points on LongMemEval using ~1% of tokens. Central claim: careful memory typing + minimal routing + dense retrieval suffices — no knowledge graphs needed. Validates Sponge's ChromaDB typed retrieval approach.
+
+**Memory Architecture Comparison (MarktechPost, Nov 2025):** Systematic comparison of vector, graph, and event-log memory for LLM agents. Vector systems perform well on local queries but degrade on long-horizon temporal reasoning. Graph systems handle fact changes and recency better but require schema maintenance. Hybrid approaches face complexity managing multiple stores. Conclusion: choice depends on primary query pattern — for personality agents, semantic similarity search (vector) is the primary pattern.
+
+**Hindsight (Dec 2025):** Four logical memory networks (world facts, agent experiences, entity summaries, evolving beliefs) achieve 83.6-91.4% accuracy on LongMemEval. Distinguishes evidence from inference. Validates Sponge's separation of episodic memories (ChromaDB) from evolving beliefs (opinion_vectors + belief_meta).
+
+### Stability Improvements
+
+**PERSIST (AAAI 2026):** Across 25 models (1B-685B params), question reordering alone causes large personality measurement shifts. Scaling provides limited stability gains. Interventions like reasoning modes can paradoxically increase variability. Validates Sponge's external state approach — instability is inherent, external scaffolding compensates.
+
+**Persona Collapse Taxonomy (HuggingFace 2025):** Seven collapse categories across all major models during natural conversation (not adversarial). Intra-conversation drift (attention decay dilutes persona prompts), cross-session drift (model updates shift behavior), input-distribution drift (user behavior changes). Sponge's versioned persistence + health checks address all three.
+
+**Split Personality Training (Feb 2026):** LoRA adapters embed an "honest persona" for self-review. 96% detection accuracy on adversarial benchmarks. Not applicable to API-only access, but validates the principle of self-review — Sponge's ESS third-person evaluation is the API-compatible analog.
+
+**CyclicReflex (2025):** Both over-reflection and under-reflection degrade performance. Strategically timed reflection outperforms uniform frequency. Validates Sponge's dual trigger: periodic (every 20) + event-driven (cumulative shift > 0.1).
+
+### Teaching & Behavioral Learning
+
+**Argumentative Knowledge Construction (Dec 2025):** Supportive personas promote consensus-oriented reasoning; contrarian personas provoke critical elaboration. Epistemic adequacy (quality of reasoning) predicts learning gains — not participation volume. Validates ESS's focus on argument quality over quantity.
+
+**ELEPHANT (Stanford 2025):** LLMs preserve face 45pp more than humans. Affirm both sides 48% of the time depending on user framing. Validates social sycophancy calibration in ESS prompt.
+
+**Selective Agreement (EPJ Data Science 2025):** LLMs show directional bias through structured persuasion, not blind conformity. Sigmoid conformity curve — stable at low pressure, sharp shift at threshold, saturation at high pressure. Persuasion asymmetry: affirm→negate harder than negate→affirm. LLMs significantly influenced by logical fallacies of relevance and credibility. Validates ESS calibration for fallacies.
+
+**BASIL (2025):** Bayesian framework distinguishes sycophantic belief shifts from rational updates. SFT + DPO + post-hoc calibration reduce Bayesian inconsistency. API-only constraint means we use ESS-gated Bayesian resistance as the approximation.
+
+### Monitoring & Drift Detection
+
+**AgentTrace (Feb 2026):** Structured logging across operational, cognitive, and contextual surfaces. Runtime instrumentation with minimal overhead. Validates Sponge's JSONL audit trail approach (context, ess, health, reflection events).
+
+**DriftShield (2025):** Monitors loop detection, goal drift (via local embeddings), and resource spikes. SQLite audit trails. Validates local monitoring approach.
+
+**Adaptive Multi-Dimensional Monitoring (Sep 2025):** EWMA thresholds + Mahalanobis distance reduce drift detection latency by 55% and false positives by 80% vs static thresholds. Potential future improvement: apply EWMA to health metrics instead of fixed thresholds.
+
+### Opinion Dynamics
+
+**Belief Revision Frequency (2025):** PreFlect shows prospective reflection outperforms reactive updates. CyclicReflex shows adaptive scheduling outperforms uniform. Multi-agent deliberation research shows structured formats enhance deliberative quality. All validate Sponge's batched insight accumulation + periodic reflection over per-message full rewrites.
+
+---
+
 ## References (Key Papers)
 
 - ABBEL: Acting through Belief Bottlenecks Expressed in Language
@@ -343,4 +448,32 @@ Attention dilution — soft attention in fixed-capacity transformers degrades as
 - PreFlect: Prospective Reflection (arXiv:2602.07187)
 - SAMULE: Multi-level Reflection (EMNLP 2025)
 - PERSONA: Activation Vector Algebra (arXiv:2602.15669)
-- Anthropic: Persona Vectors, Assistant Axis, Persona Selection Model
+- Provider research: Persona Vectors, Assistant Axis, Persona Selection Model
+- DPRF: Dynamic Persona Refinement Framework (arXiv:2510.14205)
+- JPAF: Jungian Personality Adaptation Framework (arXiv:2601.10025)
+- Martingale Score: Bayesian Rationality in LLM Reasoning (arXiv:2512.02914)
+- Social Sycophancy / ELEPHANT (arXiv:2505.13995)
+- Agent Drift / ASI (arXiv:2601.04170)
+- PERSIST: Persistent Instability in LLM Personality (arXiv:2508.04826)
+- VIGIL: Reflective Runtime for Self-Healing Agents (arXiv:2512.07094)
+- Memoria: Scalable Agentic Memory (arXiv:2512.12686)
+- TiMem: Temporal-Hierarchical Memory Consolidation (arXiv:2601.02845)
+- AgeMem: Unified Memory Management (arXiv:2601.01885)
+- SteeM: Controllable Memory Usage (arXiv:2601.05107)
+- PATS: Personality-Aware Teaching Strategies (arXiv:2601.08402)
+- Provider research: Emergent Misalignment Persona Features (2025)
+- Provider research: Constitution update (Jan 2026)
+- RULERS: Locked Rubrics and Evidence-Anchored Scoring (arXiv:2601.08654)
+- Hindsight: Building Agent Memory that Retains, Recalls, and Reflects (arXiv:2512.12818)
+- AgentTrace: Structured Logging for Agent Observability (arXiv:2602.10133)
+- CyclicReflex: Cyclical Reflection Token Scheduling (arXiv:2506.11077)
+- PreFlect: Prospective Reflection for Agents (arXiv:2602.07187)
+- AMDM: Adaptive Monitoring of Agentic AI (arXiv:2509.00115)
+- Split Personality Training for LLM Auditing (arXiv:2602.05532)
+- Selective Agreement, Not Sycophancy (EPJ Data Science 2025)
+- PersonaAgent: Test-Time Personalization (OpenReview 2025)
+- SocraticLM: Socratic Personalized Teaching (2025)
+- Persona Collapse Taxonomy (HuggingFace 2025)
+- SycEval: Evaluating LLM Sycophancy (AAAI/ACM AIES 2025)
+- FadeMem: Biologically-Inspired Forgetting (arXiv:2601.18642)
+- Belief Decay as Core Mechanism (Artificial Brain Labs 2025)

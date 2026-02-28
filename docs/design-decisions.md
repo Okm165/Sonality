@@ -37,7 +37,7 @@ Every architectural choice in Sonality is backed by specific research findings. 
 |--------|--------|
 | **Problem** | Raw memory accumulation without consolidation produces incoherent beliefs. Per-interaction processing alone cannot form higher-order personality structure. |
 | **Solution** | Dual-trigger reflection: periodic (every N interactions, default 20) OR event-driven (cumulative shift magnitude > 0.1). Reflection consolidates pending insights into the snapshot, applies belief decay, and synthesizes patterns. |
-| **Research** | Park et al. (2023) ablation: reflection is the **most critical component** for believable agents. Letta — "sleep-time compute" for idle-time consolidation. |
+| **Research** | Park et al. (2023) ablation: reflection is the **most critical component** for believable agents. Sleep-time compute studies show gains from idle-time consolidation. |
 | **Alternative** | No reflection; rely on per-interaction updates only. Rejected: Park et al. showed agents accumulate raw memories but cannot form coherent beliefs without reflection. |
 
 ### 5. Bootstrap Dampening
@@ -126,7 +126,7 @@ Every architectural choice in Sonality is backed by specific research findings. 
 
 ### OCEAN as Personality Driver
 
-**Why rejected:** PERSIST: σ>0.3 measurement noise even in 400B+ models. Personality Illusion: social desirability bias shifts Big Five by 1.20 SD in GPT-4. Self-reported traits don't predict behavior. Measurement unreliable; reliable measurement wouldn't translate to behavioral change.
+**Why rejected:** PERSIST: σ>0.3 measurement noise even in 400B+ models. Personality Illusion: social desirability bias shifts Big Five by about 1.20 SD in frontier chat models. Self-reported traits don't predict behavior. Measurement unreliable; reliable measurement wouldn't translate to behavioral change.
 
 ### Real-Time Entity/Fact Extraction
 
@@ -193,7 +193,7 @@ Prioritized by severity. Each is a genuine architectural limitation, not a futur
 | # | Weak Spot | Evidence | Sonality's Mitigation | Residual Risk |
 |---|-----------|----------|-----------------------|---------------|
 | W1 | **Bland Convergence** | ACL 2025: LLMs distort own output toward "attractor states." P(survive, 40 rewrites) = 12.9% at p=0.95 per rewrite. | Insight accumulation reduces rewrites from ~40 to ~5 per 100 interactions. Snapshot validation catches catastrophic loss. | Subtle blandification still accumulates across reflections. |
-| W2 | **RLHF-Amplified Sycophancy** | Anthropic (arXiv:2602.01002): RLHF explicitly creates "agreement is good" heuristic. PersistBench: 97% sycophancy with memory in system prompt. | Seven anti-sycophancy layers. ESS decoupling breaks the self-judge feedback loop. | Residual sycophancy under first-person framing (78.5%, SycEval). |
+| W2 | **RLHF-Amplified Sycophancy** | RLHF reward-model analysis (arXiv:2602.01002): RLHF explicitly creates "agreement is good" heuristic. PersistBench: 97% sycophancy with memory in system prompt. | Seven anti-sycophancy layers. ESS decoupling breaks the self-judge feedback loop. | Residual sycophancy under first-person framing (78.5%, SycEval). |
 | W3 | **Belief Entrenchment** | Martingale Score (NeurIPS 2025): ALL models exhibit entrenchment violating Bayesian rationality. Future updates predictable from current beliefs. | Belief decay weakens unreinforced opinions. Novelty scoring reduces magnitude for repeated arguments. | Early opinions calcify. No Martingale Score check implemented. |
 | W4 | **ESS Calibration Brittleness** | ConfTuner (arXiv:2508.18847): verbalized confidence unreliable. PERSIST: question reordering shifts scores by >0.3 on 5-point scales. | Structured tool_use schema constrains output. Calibration examples anchor scoring. Retry logic with safe defaults. | ESS is the single gatekeeper. Miscalibration cascades to all downstream updates. |
 
@@ -211,7 +211,7 @@ Prioritized by severity. Each is a genuine architectural limitation, not a futur
 | # | Weak Spot | Evidence | Sonality's Mitigation | Residual Risk |
 |---|-----------|----------|-----------------------|---------------|
 | W9 | **Ternary Opinion Direction** | Argument mining research: ternary classification loses critical nuance. "Partially agrees with caveats" → supports or neutral? | Magnitude formula includes novelty and ESS score for granularity. | All agreement is treated equally; all opposition is treated equally. |
-| W10 | **MiniLM-L6-v2 Truncation** | Model trained on 128 tokens; 128–256 tokens "perform quite poorly." | ESS summaries are constrained to single sentences. | No explicit validation that summaries stay under 128 tokens. |
+| W10 | **Short-Context Embedding Truncation** | Compact embedding backbones can degrade on longer text spans, reducing semantic fidelity. | ESS summaries are constrained to single sentences. | No explicit validation that summaries stay under the configured embedding budget. |
 | W11 | **No Fact-Checking** | ESS evaluates argument structure, not truth. Well-structured misinformation will score high. | By design — fact-checking is a separate problem. ESS gates on reasoning quality. | Agent can form confident opinions based on well-argued falsehoods. |
 
 ---
@@ -238,9 +238,9 @@ Park et al. (2023): `score = α × recency + β × relevance + γ × importance`
 
 **Effort:** Medium. **Impact:** Medium. **When:** If retrieved episodes are frequently irrelevant.
 
-### Embedding Model Upgrade
+### Embedding Backend Upgrade
 
-MiniLM-L6-v2 has a 256-token window. nomic-embed-text-v1 offers 8192 context and outperforms ada-002. Would improve episode retrieval for longer summaries.
+The current compact embedding backend favors short inputs. A long-context embedding backend can improve retrieval quality for longer summaries. Keep concrete model choices in [Model Considerations](model-considerations.md) and keep this core document provider-neutral.
 
 **Effort:** Medium (migration needed). **Impact:** Medium. **When:** If retrieval quality is the bottleneck.
 

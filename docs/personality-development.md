@@ -140,7 +140,7 @@ Based on research findings and empirical testing:
 | **Pure system-prompt personality** | Persona drift within 8 rounds (arXiv:2402.10962) | External persistent state (sponge.json) + immutable core identity anchor |
 | **Telling the agent "you believe X"** | Parrot behavior that drops under pressure; no evidential basis | ESS requires genuine reasoning; bare assertions score below 0.15 |
 | **Massive opinion injection** | Overwhelms update mechanism; shallow beliefs with no provenance | Bootstrap dampening (0.5×) + Bayesian resistance + per-topic tracking |
-| **Ignoring base tendencies** | 1.20 SD social desirability shift in GPT-4 (NeurIPS 2025) | Seven anti-sycophancy layers counteract inherent agreement bias |
+| **Ignoring base tendencies** | 1.20 SD social desirability shift in frontier chat models (NeurIPS 2025) | Seven anti-sycophancy layers counteract inherent agreement bias |
 | **Per-interaction full rewrites** | 12.9% trait survival after 40 rewrites (ACL 2025) | Insight accumulation + periodic reflection consolidation |
 | **OCEAN as personality driver** | σ above 0.3 noise; self-report does not predict behavior (PERSIST 2025) | Behavioral metrics: disagreement rate, opinion vectors, topic engagement |
 
