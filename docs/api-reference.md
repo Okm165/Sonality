@@ -23,7 +23,7 @@ response = agent.respond("Your message here")
 
 | Attribute | Type | Description |
 |-----------|------|-------------|
-| `client` | `Anthropic` | LLM API client (current provider SDK) |
+| `client` | `ProviderClient` | LLM provider client |
 | `sponge` | `SpongeState` | Current personality state |
 | `episodes` | `EpisodeStore` | ChromaDB episode storage |
 | `conversation` | `list[dict[str, str]]` | Current session conversation history |
@@ -148,7 +148,7 @@ Frozen dataclass containing the classification output:
 
 ```python
 def classify(
-    client: Anthropic,
+    client: ProviderClient,
     user_message: str,
     sponge_snapshot: str,
 ) -> ESSResult
@@ -367,7 +367,7 @@ Rejects if:
 
 ```python
 def extract_insight(
-    client: Anthropic,
+    client: ProviderClient,
     ess: ESSResult,
     user_message: str,
     agent_response: str,
@@ -443,7 +443,7 @@ Environment-based configuration. Loads from `.env` via `dotenv`.
 
 | Constant | Env Var | Default |
 |----------|---------|---------|
-| `ANTHROPIC_API_KEY` | `ANTHROPIC_API_KEY` | *(required)* |
+| `API_KEY` | `SONALITY_API_KEY` | *(required)* |
 | `MODEL` | `SONALITY_MODEL` | *(see .env.example)* |
 | `ESS_MODEL` | `SONALITY_ESS_MODEL` | Same as `MODEL` |
 

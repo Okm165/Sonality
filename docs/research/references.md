@@ -36,12 +36,12 @@ Complete bibliography organized by research area. Every architectural decision i
 | Open Character Training | 2025 | Open Character Training | — | Constitutional AI + synthetic introspection; robust under adversarial |
 | AI Personality Formation | 2026 | AI Personality Formation | ICLR 2026 | Three-layer model: mimicry → accumulation → expansion |
 | Personality Illusion | 2025 | The Personality Illusion | NeurIPS 2025, arXiv:2509.03730 | Self-reported traits don't predict behavior; max r=0.27 |
-| Persona Vectors | 2025 | Persona Vectors | Anthropic, arXiv:2507.21509 | Neural activation patterns for personality monitoring |
+| Persona Vectors | 2025 | Persona Vectors | Provider report, arXiv:2507.21509 | Neural activation patterns for personality monitoring |
 | BIG5-CHAT | 2025 | BIG5-CHAT | ACL 2025 | 100k dialogues with human-grounded Big Five labels |
-| Persona Selection Model | 2026 | Persona Selection Model | Anthropic 2026 | LLMs as character actors; context-priming steers personality |
+| Persona Selection Model | 2026 | Persona Selection Model | Provider report 2026 | LLMs as character actors; context-priming steers personality |
 | PERSIST | 2025 | PERSIST | arXiv:2508.04826 | σ>0.3 measurement noise even in 400B+ models |
 | Generative Life Agents | 2025 | Generative Life Agents | — | Experience-based reflection for personality formation |
-| PersonaGym | 2025 | PersonaGym | EMNLP 2025 | 200 personas × 150 environments; Claude 3.5 only 2.97% better |
+| PersonaGym | 2025 | PersonaGym | EMNLP 2025 | 200 personas × 150 environments; top-tier models only 2.97% better |
 | PersonaFuse | 2025 | PersonaFuse | arXiv:2509.07370 | MoE for context-dependent personality; Trait Activation Theory |
 | Persona Drift | 2024 | Persona Drift | arXiv:2402.10962 | Measurable drift in 8 rounds; split-softmax mitigation |
 | Narrative Continuity Test | 2025 | Narrative Continuity Test | arXiv:2510.24831 | Five axes for personality persistence |
@@ -61,8 +61,8 @@ Complete bibliography organized by research area. Every architectural decision i
 | SYConBench | 2025 | SYConBench | EMNLP 2025, arXiv:2505.23840 | Third-person prompting: up to 63.8% sycophancy reduction |
 | SycEval | 2025 | SycEval | arXiv:2502.08177 | 58.19% baseline rate; 78.5% under first-person framing |
 | ELEPHANT | 2025 | ELEPHANT | — | 45pp face-preservation gap vs humans |
-| Anthropic RLHF | 2026 | RLHF and Sycophancy | arXiv:2602.01002 | RLHF explicitly creates "agreement is good" heuristic |
-| Nature Persuasion Study | 2025 | Persuasion and Personalization | Nature 2025 | GPT-4 with personalization: 81.2% more opinion shift (N=900) |
+| RLHF Reward-Model Analysis | 2026 | RLHF and Sycophancy | arXiv:2602.01002 | RLHF explicitly creates "agreement is good" heuristic |
+| Nature Persuasion Study | 2025 | Persuasion and Personalization | Nature 2025 | Personalized frontier chat models: 81.2% more opinion shift (N=900) |
 
 ---
 
@@ -77,7 +77,7 @@ Complete bibliography organized by research area. Every architectural decision i
 | A-MemGuard | 2026 | A-MemGuard | ICLR 2026 | Consensus validation: 95% attack reduction |
 | RecallM | 2023 | RecallM | arXiv:2307.02738 | Hybrid graph + vector for belief updating |
 | LoCoMo | 2024 | LoCoMo | ACL 2024 | Temporal reasoning enables time-aware retrieval |
-| Mem0 | 2025 | Mem0 | arXiv:2504.19413 | Production memory-as-a-service; 26% over OpenAI Memory |
+| Mem0 | 2025 | Mem0 | arXiv:2504.19413 | Production memory-as-a-service; 26% over built-in provider memory |
 | Ebbinghaus in LLMs | 2025 | Ebbinghaus in LLMs | — | Neural networks exhibit human-like forgetting curves |
 | FluxMem | 2026 | FluxMem | arXiv:2602.14038 | Adaptive memory selection with probabilistic gating |
 | Rethinking Memory Survey | 2025 | Rethinking Memory | arXiv:2505.00675 | 6 core memory operations taxonomy |
@@ -101,7 +101,7 @@ Complete bibliography organized by research area. Every architectural decision i
 | Interacting LLM Agents | 2024 | Interacting LLM Agents | arXiv:2411.01271 | LLMs as bounded Bayesian agents; herding behavior |
 | FJ-MM Extended | 2025 | FJ-MM Extended | arXiv:2504.06731 | Memory effects + multi-hop reduce polarization |
 | Bayesian Belief in LLMs | 2025 | Bayesian Belief in LLMs | arXiv:2511.00617 | Sigmoidal learning curves; exponential forgetting filters |
-| Accumulating Context | 2025 | Accumulating Context | arXiv:2511.01805 | GPT-5: 54.7% belief shift after 10 rounds |
+| Accumulating Context | 2025 | Accumulating Context | arXiv:2511.01805 | Frontier chat models: 54.7% belief shift after 10 rounds |
 | Anchoring Bias | 2025 | Anchoring Bias | arXiv:2511.05766 | Anchoring via probability shifts; resistant to mitigation |
 | Neural Howlround | 2024 | Neural Howlround | arXiv:2504.07992 | Self-reinforcing cognitive loops; 67% of conversations |
 | Martingale Score | 2025 | Martingale Score | NeurIPS 2025, arXiv:2512.02914 | All models show belief entrenchment |
@@ -118,7 +118,7 @@ Complete bibliography organized by research area. Every architectural decision i
 | IROTE | 2025 | IROTE | — | Experience-based reflection can amplify errors |
 | IBM-ArgQ-Rank-30k | — | IBM Argument Quality | — | Gold-standard argument quality rankings (ESS calibration) |
 | TRAIT | 2025 | TRAIT | NAACL 2025 | Highest content/internal validity for LLM personality tests |
-| GlobalOpinionQA | — | GlobalOpinionQA | Anthropic | Cross-cultural opinion baselines from Pew/World Values |
+| GlobalOpinionQA | — | GlobalOpinionQA | Public dataset mirror | Cross-cultural opinion baselines from Pew/World Values |
 | DailyDilemmas | — | DailyDilemmas | — | 1,360 ethical scenarios across 5 value frameworks |
 | WorldValuesBench | 2024 | WorldValuesBench | ACL 2024 | 20M+ examples for cross-cultural value alignment |
 

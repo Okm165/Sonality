@@ -100,9 +100,9 @@ Keep **append-first, consolidate-later**:
 
 Chroma default embedding remains acceptable for a small codebase and short summaries.
 
-### Recommended migration path to `nomic-embed-text-v1`
+### Recommended migration path to a long-context embedding backend
 
-Switch only when retrieval quality becomes a measured bottleneck:
+Switch only when retrieval quality becomes a measured bottleneck. Keep concrete model names in `docs/model-considerations.md`.
 
 1. baseline retrieval metrics on current embeddings (precision-at-k on held-out memory probes);
 2. dual-index migration window (old + new embeddings side by side);
@@ -113,7 +113,7 @@ Switch only when retrieval quality becomes a measured bottleneck:
 ### Why not force migration immediately
 
 - No new dependency pressure unless quality requires it.
-- Keeps the system within the current dependency budget (`anthropic`, `chromadb`, `pydantic`, `dotenv`).
+- Keeps the system within the current dependency budget (LLM provider SDK, `chromadb`, `pydantic`, `dotenv`).
 
 ---
 

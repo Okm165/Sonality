@@ -86,6 +86,25 @@ Many providers offer prompt caching (up to 90% discount on static prefixes). The
 
 ---
 
+## Recommended Profiles by Use Case
+
+These are practical model-role profiles for common deployment goals.
+
+| Use Case | Response Generation | ESS Classification | Reflection | Why This Fit Works |
+|----------|---------------------|--------------------|------------|--------------------|
+| **Cost-sensitive support agent** | Mid-tier reasoning model | Small structured-output model | Mid-tier model | Keeps quality acceptable while minimizing per-turn cost; ESS remains reliable if calibrated |
+| **Safety-first support agent** | Top-tier reasoning model | Separate mid-tier model | Top-tier model | Maximizes robustness on difficult user pressure and reflection quality |
+| **High-volume operations** | Mid-tier model with caching | Small model | Mid-tier model on reduced cadence | Best throughput/cost balance when handling many sessions |
+| **Deep coaching / long sessions** | Top-tier long-context model | Separate mid-tier model | Top-tier model | Better narrative continuity and contradiction resolution over long horizons |
+
+Selection rule:
+
+1. Start with a separate ESS model to reduce self-judge coupling.
+2. Keep reflection on the strongest available model before upgrading generation.
+3. Only increase generation model size if coherence or resistance metrics degrade.
+
+---
+
 ## Embedding Model
 
 Sonality uses an embedding model for ChromaDB episode storage and retrieval. The default (ChromaDB's built-in model) has limitations:
