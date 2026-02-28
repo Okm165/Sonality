@@ -45,7 +45,7 @@ flowchart TD
     Ctx --> Sponge
     Ctx --> Traits
     Ctx --> Mem
-    ctx --> LLM["Claude Sonnet (API)"]
+    ctx --> LLM["LLM API"]
     LLM --> Resp([Response])
 
     Resp --> Post[Post-Processing]
@@ -80,10 +80,15 @@ After reviewing 200+ papers and frameworks, several aspects of Sonality's design
 |---|---|
 | [Getting Started](getting-started.md) | Installation, configuration, first run |
 | [Architecture](architecture/overview.md) | System design, memory model, data flow |
+| [Research Upgrade Plan](architecture/research-upgrade-plan.md) | Prioritized architecture decisions mapped to latest findings |
 | [Core Concepts](concepts/ess.md) | ESS, opinion dynamics, reflection, anti-sycophancy |
+| [Architecture Assessment](architecture-assessment.md) | Research-driven evaluation of all 7 architectural areas |
 | [Design Decisions](design-decisions.md) | What we chose, what we rejected, and why |
 | [Research Background](research/background.md) | The academic foundations: 200+ papers synthesized |
+| [Web Research Synthesis 2026](research/web-research-synthesis-2026.md) | Extended research notes mapped to architecture choices |
 | [Personality Development](personality-development.md) | How the agent's character forms over time |
+| [Training Guide](training-guide.md) | How to use, train, and monitor the agent (comprehensive) |
 | [Testing & Evaluation](testing.md) | Testing pyramid, behavioral tests, adversarial testing |
+| [Model Considerations](model-considerations.md) | Model selection guidance for each pipeline role |
 | [Configuration](configuration.md) | All tuneable parameters and their rationale |
 | [API Reference](api-reference.md) | Module-level documentation |

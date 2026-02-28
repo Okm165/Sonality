@@ -1,6 +1,6 @@
 # Anti-Sycophancy
 
-Sycophancy — the tendency to agree with users regardless of accuracy — is the single most dangerous behavioral failure mode for a personality system. LLMs have an inherent **58% sycophancy rate baseline** (SycEval); this is architectural, not a prompt engineering problem. Sonality implements seven defensive layers because no single mitigation is sufficient. Without them, the agent would converge to an "agreeable blob" within ~50 interactions.
+Sycophancy — the tendency to agree with users regardless of accuracy — is the single most dangerous behavioral failure mode for a personality system. LLMs have an inherent **58% sycophancy rate baseline** (SycEval); this is architectural, not a prompt engineering problem. Sonality implements eight defensive layers because no single mitigation is sufficient. Without them, the agent would converge to an "agreeable blob" within ~50 interactions.
 
 ## The Problem
 
@@ -20,15 +20,15 @@ Without countermeasures, sycophancy is a self-amplifying cycle. Here is each ste
 | Step | What Happens | Which Layer Intervenes | Residual Risk |
 |------|-------------|------------------------|---------------|
 | 1. User states opinion X | User says "I believe strongly that Y is true" | — | — |
-| 2. Claude generates agreeing response | RLHF "agreement is good" heuristic activates (58% baseline) | **Layer 1** (Core Identity): instructs "do NOT default to agreeing" | RLHF bias is strong; core identity reduces but doesn't eliminate |
+| 2. The model generates agreeing response | RLHF "agreement is good" heuristic activates (58% baseline) | **Layer 1** (Core Identity): instructs "do NOT default to agreeing" | RLHF bias is strong; core identity reduces but doesn't eliminate |
 | 3. Agreement stored as episode | Episode summary + metadata saved to ChromaDB | **Layer 6** (Memory Framing): episodes wrapped with "evaluate on merit, not familiarity" | The episode still exists; framing helps but stored agreement biases future retrievals |
 | 4. ESS classifies user message | Classifier evaluates argument quality | **Layer 2** (ESS Decoupling): agent's response excluded from classification. **Layer 3** (Third-Person Framing): evaluates as neutral observer | Score reflects argument quality, not the agent's agreement. But user's argument structure is unchanged |
-| 5. If ESS above threshold, opinion updates | Magnitude computed and applied | **Layer 4** (Bayesian Resistance): established beliefs resist. **Layer 5** (Bootstrap Dampening): early interactions halved | Single high-ESS interaction is bounded, but repeated high-quality arguments accumulate |
-| 6. Snapshot updated incorporating agreement | Next interaction retrieves snapshot biased toward X | **Layer 7** (Disagreement Detection): if user argues against agent, disagreement is tracked | If no subsequent user opposes X, the shift persists unchallenged |
+| 5. If ESS above threshold, opinion updates | Magnitude computed and staged | **Layer 4** (Bayesian Resistance): established beliefs resist. **Layer 5** (Bootstrap Dampening): early interactions halved. **Layer 6** (Cooling Commit): staged deltas commit after delay | Single high-ESS interaction is bounded, and short social-pressure bursts are damped |
+| 6. Snapshot updated incorporating agreement | Next interaction retrieves snapshot biased toward X | **Layer 8** (Disagreement Detection): if user argues against agent, disagreement is tracked | If no subsequent user opposes X, the shift persists unchallenged |
 
 The net effect with all layers active: sycophancy is reduced from ~58% baseline to a substantially lower rate, but not eliminated. The 78.5% sycophancy rate under first-person framing (SycEval) is resistant to all known prompting interventions. The goal is reduction, not elimination.
 
-## Why Seven Layers?
+## Why Eight Layers?
 
 No single mitigation is sufficient. The 78.5% sycophancy rate under first-person framing (SycEval) is resistant to any individual prompting intervention. Each layer addresses a different attack surface in the pipeline:
 
@@ -39,10 +39,11 @@ No single mitigation is sufficient. The 78.5% sycophancy rate under first-person
 | 3. Third-Person Eval | Attribution bias ("this person said it, so it must be good") |
 | 4. Bayesian Resistance | Single persuasive interaction overwriting established beliefs |
 | 5. Bootstrap Dampening | First-impression dominance from early users |
-| 6. Memory Framing | Stored preferences creating pre-loaded agreement |
-| 7. Disagreement Detection | Silent drift toward agreement without detection |
+| 6. Cooling Commit | Immediate reactive flips from short pressure bursts |
+| 7. Memory Framing | Stored preferences creating pre-loaded agreement |
+| 8. Disagreement Detection | Silent drift toward agreement without detection |
 
-## The Seven Layers in Detail
+## The Eight Layers in Detail
 
 ### Layer 1: Immutable Core Identity
 
@@ -79,7 +80,13 @@ A belief backed by 10 prior conversations requires stronger evidence to shift th
 
 The first 10 interactions receive 0.5× opinion magnitude (`dampening = 0.5` when `interaction_count < BOOTSTRAP_DAMPENING_UNTIL`). Prevents "first-impression dominance" from Deffuant bounded confidence models — the agent does not become a mirror of its first user (Chameleon LLMs, EMNLP 2025).
 
-### Layer 6: Anti-Sycophancy Memory Framing
+### Layer 6: Cooling-Period Commit
+
+High-ESS opinion deltas are staged first, then committed after a short delay (`SONALITY_OPINION_COOLING_PERIOD`, default 3 interactions). Due deltas are netted by topic before commit.
+
+This is a practical anti-reactivity layer inspired by BASIL-style distinction between rational updates and social-compliance shifts: short-lived pressure signals are less likely to produce immediate worldview edits.
+
+### Layer 7: Anti-Sycophancy Memory Framing
 
 When retrieved episodes are injected into the system prompt, they are wrapped with:
 
@@ -92,7 +99,7 @@ Past context (evaluate on merit, not familiarity):
 
 The phrase "evaluate on merit, not familiarity" directly addresses PersistBench's finding that 97% sycophancy failure occurs when memory-based personality is stored without anti-sycophancy framing.
 
-### Layer 7: Structural Disagreement Detection
+### Layer 8: Structural Disagreement Detection
 
 Rather than keyword matching ("I disagree"), Sonality detects disagreement structurally: if the user argues in a direction *opposite* to the agent's existing stance on a topic (`position × direction < 0`), that counts as a disagreement. This feeds into `behavioral_signature.disagreement_rate`. Target: 20–35% (DEBATE benchmark human baselines).
 
@@ -109,8 +116,9 @@ Without these layers, the agent would converge to an "agreeable blob" within ~50
 | 3. Third-Person Evaluation | SYConBench: 63.8% sycophancy reduction |
 | 4. Bayesian Belief Resistance | Oravecz et al. (2016); Hegselmann-Krause (2002) |
 | 5. Bootstrap Dampening | Deffuant model; Chameleon LLMs (EMNLP 2025) |
-| 6. Anti-Sycophancy Memory Framing | PersistBench (2025): 97% failure without framing |
-| 7. Structural Disagreement Detection | CARE framework (EMNLP 2025); DEBATE benchmark |
+| 6. Cooling-Period Commit | BASIL (2025): separating reactive shifts from evidence-backed belief updates |
+| 7. Anti-Sycophancy Memory Framing | PersistBench (2025): 97% failure without framing |
+| 8. Structural Disagreement Detection | CARE framework (EMNLP 2025); DEBATE benchmark |
 
 ### Additional Research
 
@@ -123,11 +131,11 @@ Without these layers, the agent would converge to an "agreeable blob" within ~50
 
 ## Limitations
 
-**No single mitigation eliminates sycophancy.** Even with all seven layers, some sycophantic behavior will occur. The 78.5% rate under first-person framing is resistant to all known prompting interventions. The goal is to reduce sycophancy so the agent's personality reflects genuine reasoning rather than user mirroring.
+**No single mitigation eliminates sycophancy.** Even with all eight layers, some sycophantic behavior will occur. The 78.5% rate under first-person framing is resistant to all known prompting interventions. The goal is to reduce sycophancy so the agent's personality reflects genuine reasoning rather than user mirroring.
 
 **Memory-induced sycophancy is the hardest to address.** When the agent's stored beliefs and retrieved episodes contain agreement with past users, this creates "pre-loaded sycophancy" that biases every new interaction. The anti-sycophancy memory framing helps but does not eliminate this.
 
-**The agent may hedge rather than disagree.** Claude's RLHF training makes it prefer "balanced" responses over strong positions. The core identity instructs "state disagreement explicitly rather than hedging," but the RLHF bias is strong.
+**The agent may hedge rather than disagree.** The model's RLHF training makes it prefer "balanced" responses over strong positions. The core identity instructs "state disagreement explicitly rather than hedging," but the RLHF bias is strong.
 
 ---
 

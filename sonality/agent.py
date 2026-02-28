@@ -45,6 +45,10 @@ class SonalityAgent:
         log.info(
             "Initializing SonalityAgent (model=%s, ess_model=%s)", config.MODEL, config.ESS_MODEL
         )
+        if config.MODEL == config.ESS_MODEL:
+            log.warning(
+                "Main and ESS models are identical; using a separate ESS model reduces self-judge coupling"
+            )
         self.client = Anthropic(api_key=config.ANTHROPIC_API_KEY)
         self.sponge = SpongeState.load(config.SPONGE_FILE)
         self.episodes = EpisodeStore(str(config.CHROMADB_DIR))
@@ -62,13 +66,23 @@ class SonalityAgent:
         log.info("=== Interaction #%d ===", self.sponge.interaction_count + 1)
         log.info("User: %.120s", user_message)
 
-        relevant = self.episodes.retrieve(user_message, config.EPISODE_RETRIEVAL_COUNT)
+        relevant = self.episodes.retrieve_typed(
+            query=user_message,
+            episodic_n=config.EPISODIC_RETRIEVAL_COUNT,
+            semantic_n=config.SEMANTIC_RETRIEVAL_COUNT,
+        )
         structured_traits = self._build_structured_traits()
 
         system_prompt = build_system_prompt(
             sponge_snapshot=self.sponge.snapshot,
             relevant_episodes=relevant,
             structured_traits=structured_traits,
+        )
+        self._log_context_event(
+            user_message=user_message,
+            relevant_episodes=relevant,
+            structured_traits=structured_traits,
+            system_prompt=system_prompt,
         )
         log.debug(
             "System prompt: %d chars (~%d tokens)", len(system_prompt), len(system_prompt) // 4
@@ -109,6 +123,17 @@ class SonalityAgent:
 
         self._store_episode(user_message, agent_response, ess)
         self.sponge.interaction_count += 1
+        committed = self.sponge.apply_due_staged_updates()
+        if committed:
+            log.info("Committed staged beliefs: %s", committed)
+            self._log_event(
+                {
+                    "event": "opinion_commit",
+                    "interaction": self.sponge.interaction_count,
+                    "committed": committed,
+                    "remaining_staged": len(self.sponge.staged_opinion_updates),
+                }
+            )
 
         self._update_topics(ess)
         self._update_opinions(ess)
@@ -117,6 +142,7 @@ class SonalityAgent:
         self.previous_snapshot = self.sponge.snapshot
         self._extract_insight(user_message, agent_response, ess)
         self._maybe_reflect()
+        self._log_health_event()
 
         self.sponge.save(config.SPONGE_FILE, config.SPONGE_HISTORY_DIR)
         self._log_interaction_summary(ess)
@@ -138,13 +164,15 @@ class SonalityAgent:
 
     def _store_episode(self, user_message: str, agent_response: str, ess: ESSResult) -> None:
         try:
+            memory_type = "semantic" if ess.score > config.ESS_THRESHOLD else "episodic"
             self.episodes.store(
                 user_message=user_message,
                 agent_response=agent_response,
                 ess_score=ess.score,
                 topics=ess.topics,
                 summary=ess.summary,
-                interaction_count=self.sponge.interaction_count,
+                interaction_count=self.sponge.interaction_count + 1,
+                memory_type=memory_type,
             )
         except Exception:
             log.exception("Episode storage failed")
@@ -188,8 +216,23 @@ class SonalityAgent:
             if old_pos * direction < 0:
                 conf += abs(old_pos)
             effective_mag = magnitude / (conf + 1.0)
-
-            self.sponge.update_opinion(topic, direction, effective_mag, provenance)
+            due = self.sponge.stage_opinion_update(
+                topic=topic,
+                direction=direction,
+                magnitude=effective_mag,
+                cooling_period=config.OPINION_COOLING_PERIOD,
+                provenance=provenance,
+            )
+            self._log_event(
+                {
+                    "event": "opinion_staged",
+                    "interaction": self.sponge.interaction_count,
+                    "topic": topic,
+                    "signed_magnitude": direction * effective_mag,
+                    "due_interaction": due,
+                    "staged_total": len(self.sponge.staged_opinion_updates),
+                }
+            )
 
     def _extract_insight(self, user_message: str, agent_response: str, ess: ESSResult) -> None:
         """Extract personality insight per interaction, consolidated during reflection.
@@ -239,11 +282,20 @@ class SonalityAgent:
             opinions_parts.append(f"{topic}={pos:+.2f}{conf}")
         opinions_line = ", ".join(opinions_parts) if opinions_parts else "none yet"
 
+        recent = [s for s in self.sponge.recent_shifts[-3:] if s.magnitude > 0]
+        evolution_line = (
+            ", ".join(s.description[:50] for s in recent) if recent else "stable"
+        )
+        staged_topics = [u.topic for u in self.sponge.staged_opinion_updates[-3:]]
+        staged_line = ", ".join(staged_topics) if staged_topics else "none"
+
         return (
             f"Style: {self.sponge.tone}\n"
             f"Top topics: {topics_line}\n"
             f"Strongest opinions: {opinions_line}\n"
-            f"Disagreement rate: {self.sponge.behavioral_signature.disagreement_rate:.0%}"
+            f"Disagreement rate: {self.sponge.behavioral_signature.disagreement_rate:.0%}\n"
+            f"Recent evolution: {evolution_line}\n"
+            f"Staged beliefs: {staged_line}"
         )
 
     def _maybe_reflect(self) -> None:
@@ -303,7 +355,21 @@ class SonalityAgent:
             or "No beliefs formed yet."
         )
 
+        ic = self.sponge.interaction_count
+        nb = len(self.sponge.opinion_vectors)
+        if ic < 20:
+            maturity = "Focus on accurately recording what you've learned so far."
+        elif ic < 50 or nb < 10:
+            maturity = "Look for patterns across your experiences and beliefs."
+        else:
+            maturity = (
+                "Your worldview is developing coherence. Based on your accumulated "
+                "beliefs, you may have nascent views on topics you haven't explicitly "
+                "discussed. If a pattern suggests a new position, articulate it tentatively."
+            )
+
         prompt = REFLECTION_PROMPT.format(
+            trigger=trigger,
             current_snapshot=self.sponge.snapshot,
             structured_traits=self._build_structured_traits(),
             current_beliefs=beliefs_text,
@@ -311,6 +377,7 @@ class SonalityAgent:
             episode_count=len(recent_episodes),
             episode_summaries="\n".join(f"- {ep}" for ep in recent_episodes),
             recent_shifts=shifts_text,
+            maturity_instruction=maturity,
             max_tokens=config.SPONGE_MAX_TOKENS,
         )
 
@@ -326,6 +393,7 @@ class SonalityAgent:
                 if not validate_snapshot(pre_snapshot, reflected):
                     log.warning("Reflection output rejected by validation")
                 else:
+                    self._check_belief_preservation(reflected)
                     self.sponge.snapshot = reflected
                     self.sponge.version += 1
                     self.sponge.record_shift(
@@ -339,7 +407,6 @@ class SonalityAgent:
                         len(reflected),
                         len(reflected) - len(pre_snapshot),
                     )
-                    self._check_snapshot_health()
             else:
                 log.info("Reflection produced no changes")
 
@@ -351,28 +418,25 @@ class SonalityAgent:
         except Exception:
             log.exception("Reflection cycle failed")
 
-    def _check_snapshot_health(self) -> None:
-        """Detect personality collapse or divergence.
+    def _check_belief_preservation(self, new_snapshot: str) -> None:
+        """Warn if reflection dropped high-confidence beliefs from the snapshot.
 
-        Narrative Continuity Test (2025): stylistic/semantic stability axis.
-        PERSIST (2025): even 400B+ models show sigma>0.3 instability.
+        Constitutional AI Character Training (Nov 2025): losing a trait from
+        the narrative = losing it from behavior. PERSIST (2025): monitor for
+        personality erosion across reflections.
         """
-        words = self.sponge.snapshot.split()
-        if len(words) < 15:
-            log.warning("HEALTH: snapshot dangerously short (%d words)", len(words))
-            return
-        unique_ratio = len(set(w.lower() for w in words)) / len(words)
-        if unique_ratio < 0.4:
-            log.warning(
-                "HEALTH: low vocabulary diversity %.2f — possible personality collapse",
-                unique_ratio,
-            )
+        strong = [t for t, m in self.sponge.belief_meta.items() if m.confidence > 0.5]
+        missing = [t for t in strong if t.lower().replace("_", " ") not in new_snapshot.lower()]
+        if missing:
+            log.warning("HEALTH: reflection dropped strong beliefs: %s", missing)
 
     def _log_interaction_summary(self, ess: ESSResult) -> None:
         """Structured per-interaction summary for monitoring personality evolution."""
         parts = [
             f"[#{self.sponge.interaction_count}]",
             f"ESS={ess.score:.2f}({ess.reasoning_type})",
+            f"staged={len(self.sponge.staged_opinion_updates)}",
+            f"pending={len(self.sponge.pending_insights)}",
         ]
         if ess.topics:
             parts.append(f"topics={ess.topics}")
@@ -405,6 +469,64 @@ class SonalityAgent:
             self.sponge.version,
         )
 
+    def _log_context_event(
+        self,
+        user_message: str,
+        relevant_episodes: list[str],
+        structured_traits: str,
+        system_prompt: str,
+    ) -> None:
+        self._log_event(
+            {
+                "event": "context",
+                "interaction": self.sponge.interaction_count + 1,
+                "user_chars": len(user_message),
+                "conversation_chars": sum(len(m["content"]) for m in self.conversation),
+                "prompt_chars": len(system_prompt),
+                "snapshot_chars": len(self.sponge.snapshot),
+                "structured_traits_chars": len(structured_traits),
+                "relevant_count": len(relevant_episodes),
+                "relevant_chars": sum(len(ep) for ep in relevant_episodes),
+                "semantic_budget": config.SEMANTIC_RETRIEVAL_COUNT,
+                "episodic_budget": config.EPISODIC_RETRIEVAL_COUNT,
+            }
+        )
+
+    def _log_health_event(self) -> None:
+        words = self.sponge.snapshot.split()
+        unique_ratio = (
+            len(set(w.lower() for w in words)) / len(words) if words else 0.0
+        )
+        metas = list(self.sponge.belief_meta.values())
+        high_conf = sum(1 for m in metas if m.confidence > 0.5)
+        high_conf_ratio = high_conf / len(metas) if metas else 0.0
+        disagreement = self.sponge.behavioral_signature.disagreement_rate
+
+        warnings: list[str] = []
+        if self.sponge.interaction_count >= 20 and disagreement < 0.15:
+            warnings.append("possible_sycophancy")
+        if words and len(words) < 15:
+            warnings.append("snapshot_too_short")
+        if words and unique_ratio < 0.4:
+            warnings.append("snapshot_bland")
+        if self.sponge.interaction_count >= 40 and len(self.sponge.opinion_vectors) < 3:
+            warnings.append("low_belief_growth")
+
+        self._log_event(
+            {
+                "event": "health",
+                "interaction": self.sponge.interaction_count,
+                "belief_count": len(self.sponge.opinion_vectors),
+                "high_conf_ratio": round(high_conf_ratio, 3),
+                "disagreement_rate": round(disagreement, 3),
+                "snapshot_words": len(words),
+                "snapshot_unique_ratio": round(unique_ratio, 3),
+                "pending_insights": len(self.sponge.pending_insights),
+                "staged_updates": len(self.sponge.staged_opinion_updates),
+                "warnings": warnings,
+            }
+        )
+
     def _log_event(self, event: dict[str, object]) -> None:
         """Append event to JSONL audit trail for personality evolution tracking."""
         log_path = config.DATA_DIR / "ess_log.jsonl"
@@ -417,6 +539,14 @@ class SonalityAgent:
             log.debug("JSONL logging failed", exc_info=True)
 
     def _log_reflection_event(self, dropped: list[str], consolidated: int) -> None:
+        old_words = set((self.previous_snapshot or "").lower().split())
+        new_words = set(self.sponge.snapshot.lower().split())
+        union = old_words | new_words
+        jaccard = len(old_words & new_words) / len(union) if union else 1.0
+
+        since = self.sponge.interaction_count - self.sponge.last_reflection_at
+        insight_yield = consolidated / max(since, 1)
+
         self._log_event(
             {
                 "event": "reflection",
@@ -425,7 +555,12 @@ class SonalityAgent:
                 "insights_consolidated": consolidated,
                 "beliefs_dropped": dropped,
                 "total_beliefs": len(self.sponge.opinion_vectors),
+                "high_confidence": sum(
+                    1 for m in self.sponge.belief_meta.values() if m.confidence > 0.5
+                ),
                 "snapshot_chars": len(self.sponge.snapshot),
+                "snapshot_jaccard": round(jaccard, 3),
+                "insight_yield": round(insight_yield, 3),
             }
         )
 
@@ -433,7 +568,7 @@ class SonalityAgent:
         self._log_event(
             {
                 "event": "ess",
-                "interaction": self.sponge.interaction_count,
+                "interaction": self.sponge.interaction_count + 1,
                 "score": ess.score,
                 "type": ess.reasoning_type,
                 "direction": ess.opinion_direction,
@@ -442,6 +577,7 @@ class SonalityAgent:
                 "source": ess.source_reliability,
                 "defaults": ess.used_defaults,
                 "pending_insights": len(self.sponge.pending_insights),
+                "staged_updates": len(self.sponge.staged_opinion_updates),
                 "msg_preview": user_message[:80],
                 "beliefs": {
                     t: {

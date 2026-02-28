@@ -10,7 +10,7 @@ Every architectural choice in Sonality is backed by specific research findings. 
 |--------|--------|
 | **Problem** | How to personalize an LLM's personality without retraining? Fine-tuning requires training data that doesn't exist, risks catastrophic forgetting, and prevents runtime evolution. |
 | **Solution** | RAG-based personalization through system prompt injection. The sponge snapshot and retrieved episodes are injected into the system prompt each turn. |
-| **Research** | RAG achieves **14.92%** improvement over baselines vs **1.07%** for parameter-efficient fine-tuning (arXiv:2409.09510). Anthropic Persona Selection Model (2026) confirms external context-priming can meaningfully steer personality. |
+| **Research** | RAG achieves **14.92%** improvement over baselines vs **1.07%** for parameter-efficient fine-tuning (arXiv:2409.09510). Persona Selection Model research (2026) confirms external context-priming can meaningfully steer personality. |
 | **Alternative** | Fine-tuning for personality. Rejected: only 1.07% gain, requires non-existent training data, prevents evolution during deployment. Character.AI attempted fine-tuning and still experienced drift. |
 
 ### 2. Evidence Quality Gating (ESS)
@@ -28,7 +28,7 @@ Every architectural choice in Sonality is backed by specific research findings. 
 |--------|--------|
 | **Problem** | Without an anchor, persona drift occurs within 8 rounds (arXiv:2402.10962). The personality system could overwrite fundamental values. |
 | **Solution** | A fixed `CORE_IDENTITY` block (~200 tokens) injected into every system prompt. The personality system cannot modify it. Defines intellectual honesty, curiosity, independence, explicit disagreement, merit-based evaluation, and sycophancy resistance. |
-| **Research** | Anthropic "Soul Document" and Parametric Identity Layer research (2024) converge on separating immutable core traits from learnable preferences. The core identity serves as a gravitational anchor against drift. |
+| **Research** | "Soul Document" concept from personality AI research and Parametric Identity Layer research (2024) converge on separating immutable core traits from learnable preferences. The core identity serves as a gravitational anchor against drift. |
 | **Alternative** | Fully editable personality. Rejected: leads to rapid drift; no stable reference point for "who the agent is." |
 
 ### 4. Periodic Reflection
@@ -273,51 +273,6 @@ PAMU (arXiv:2510.09720) fuses sliding-window averages (captures recent shifts) w
 ## Fundamental Constraints
 
 **The Cost-Accuracy-Latency Trilemma.** Improving any one dimension degrades the others. More LLM calls improve accuracy (more gating, more validation) but increase cost and latency. Cheaper models reduce cost but decrease ESS calibration quality. Sonality optimizes for accuracy (evidence-gated updates, multi-step pipeline) at the cost of 2–3 LLM calls per interaction (~$0.005–0.015). See [Architecture Overview — Cost Analysis](architecture/overview.md#cost-analysis) for per-call breakdowns.
-
----
-
-## Verifiable Personality — The Blockchain Dimension
-
-The crypto AI agent space (Truth Terminal, ElizaOS, ZerePy, LOLA) has a fundamental credibility problem: the **Mechanical Turk Problem** (Nous Research, TEE_HEE 2024). When an AI agent claims to have "its own personality," users cannot verify whether the agent is genuinely autonomous, whether the personality actually evolved through interactions, or whether someone manually edited it.
-
-Sonality is built in the Herodotus/Starknet ecosystem. Herodotus storage proofs allow any third party to verify that a specific personality state existed at a specific time on-chain, without trusting the agent's operator.
-
-### How It Works
-
-After each reflection cycle, Sonality can commit a personality checkpoint to Starknet:
-
-1. Serialize the current sponge state to a deterministic hash (SHA-256)
-2. Create a checkpoint containing: belief graph root hash, core identity hash (should never change), interaction count, timestamp, and Merkle root of all provenance chains since the last checkpoint
-3. Submit the checkpoint to a Starknet smart contract
-4. Herodotus storage proofs allow anyone to verify: the personality changed (belief hash differs between checkpoints), the core identity did NOT change (immutability proven cryptographically), and the evolution history is auditable
-
-### What This Proves
-
-- The agent's personality is genuinely evolving, not static
-- No one manually edited the personality between checkpoints (hash chain is unbroken)
-- The core identity is genuinely immutable (cryptographic proof, not just a promise)
-- The evolution history is auditable by anyone
-
-### Why Starknet
-
-STARKs are quantum-resistant zero-knowledge proofs. CairoVM is Turing-complete, enabling proof that personality update logic was executed correctly. 2-second confirmation and sub-cent transaction costs make personality checkpointing economically feasible. The Herodotus Integrity Verifier enables verification of Stone proofs on Starknet.
-
-### Competitive Landscape: Crypto AI Agents
-
-| Feature | Truth Terminal | ElizaOS | ZerePy | LOLA | **Sonality** |
-|---------|--------------|---------|--------|------|-------------|
-| Personality source | Fine-tuning | Static config | Static config | Pre-scripted | **Emergent evolution** |
-| Changes over time | No | No | No | Pre-scripted trajectory | **Yes, genuinely** |
-| Verifiable | No | No | No | No | **Yes (Herodotus proofs)** |
-| Evolution auditable | No | No | No | No | **Yes (provenance + on-chain)** |
-| Blockchain integration | Limited | Solana/ETH | Multi-chain | Solana | **Starknet** |
-| Memory architecture | None (weights) | 6-type flat | JSON config | Trading reflections | **5-tier hierarchical** |
-
-Sonality's differentiator: it is the only system where personality evolution is both **genuine** AND **verifiable**. Every other system either has static personality or unverifiable evolution.
-
-### Future: zkAgent and Full Verifiable Inference
-
-The zkAgent paper (IACR 2026/199) demonstrates SNARK proofs for complete LLM agent execution at 1.05s/token proving time. This would prove not just THAT the personality changed, but that a specific LLM processed specific input to produce specific personality updates. For the current architecture, hash-based commitments via Herodotus are practical and sufficient. Full zkAgent integration is the long-term roadmap target.
 
 ---
 

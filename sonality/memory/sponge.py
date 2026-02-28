@@ -4,6 +4,7 @@ import json
 import logging
 import math
 import shutil
+from collections import defaultdict
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final
@@ -51,6 +52,14 @@ class Shift(BaseModel):
     magnitude: float
 
 
+class StagedOpinionUpdate(BaseModel):
+    topic: str
+    signed_magnitude: float
+    staged_at: int
+    due_interaction: int
+    provenance: str = ""
+
+
 class SpongeState(BaseModel):
     version: int = 0
     interaction_count: int = 0
@@ -61,6 +70,7 @@ class SpongeState(BaseModel):
     behavioral_signature: BehavioralSignature = Field(default_factory=BehavioralSignature)
     recent_shifts: list[Shift] = Field(default_factory=list)
     pending_insights: list[str] = Field(default_factory=list)
+    staged_opinion_updates: list[StagedOpinionUpdate] = Field(default_factory=list)
     last_reflection_at: int = 0
 
     @model_validator(mode="before")
@@ -81,7 +91,12 @@ class SpongeState(BaseModel):
         return data
 
     def update_opinion(
-        self, topic: str, direction: float, magnitude: float, provenance: str = ""
+        self,
+        topic: str,
+        direction: float,
+        magnitude: float,
+        provenance: str = "",
+        evidence_increment: int = 1,
     ) -> None:
         old = self.opinion_vectors.get(topic, 0.0)
         new = max(-1.0, min(1.0, old + direction * magnitude))
@@ -89,14 +104,16 @@ class SpongeState(BaseModel):
 
         meta = self.belief_meta.get(topic)
         if meta is None:
-            initial_conf = min(1.0, math.log2(2) / math.log2(20))
+            evidence_count = max(1, evidence_increment)
+            initial_conf = min(1.0, math.log2(evidence_count + 1) / math.log2(20))
             self.belief_meta[topic] = BeliefMeta(
                 confidence=initial_conf,
+                evidence_count=evidence_count,
                 last_reinforced=self.interaction_count,
                 provenance=provenance,
             )
         else:
-            meta.evidence_count += 1
+            meta.evidence_count += max(1, evidence_increment)
             meta.last_reinforced = self.interaction_count
             meta.confidence = min(1.0, math.log2(meta.evidence_count + 1) / math.log2(20))
             if provenance:
@@ -112,6 +129,68 @@ class SpongeState(BaseModel):
             self.belief_meta[topic].confidence,
             self.belief_meta[topic].evidence_count,
         )
+
+    def stage_opinion_update(
+        self,
+        topic: str,
+        direction: float,
+        magnitude: float,
+        cooling_period: int,
+        provenance: str = "",
+    ) -> int:
+        signed = direction * magnitude
+        if abs(signed) < 1e-9:
+            return self.interaction_count
+        due = self.interaction_count + max(1, cooling_period)
+        self.staged_opinion_updates.append(
+            StagedOpinionUpdate(
+                topic=topic,
+                signed_magnitude=signed,
+                staged_at=self.interaction_count,
+                due_interaction=due,
+                provenance=provenance,
+            )
+        )
+        return due
+
+    def apply_due_staged_updates(self) -> list[str]:
+        if not self.staged_opinion_updates:
+            return []
+
+        due: list[StagedOpinionUpdate] = []
+        future: list[StagedOpinionUpdate] = []
+        for update in self.staged_opinion_updates:
+            if update.due_interaction <= self.interaction_count:
+                due.append(update)
+            else:
+                future.append(update)
+        self.staged_opinion_updates = future
+
+        if not due:
+            return []
+
+        grouped: dict[str, list[StagedOpinionUpdate]] = defaultdict(list)
+        for update in due:
+            grouped[update.topic].append(update)
+
+        applied: list[str] = []
+        for topic, updates in grouped.items():
+            net = sum(u.signed_magnitude for u in updates)
+            if abs(net) < 1e-4:
+                continue
+            direction = 1.0 if net > 0 else -1.0
+            magnitude = abs(net)
+            evidence_increment = len(updates)
+            provenance = updates[-1].provenance
+            self.update_opinion(
+                topic=topic,
+                direction=direction,
+                magnitude=magnitude,
+                provenance=provenance,
+                evidence_increment=evidence_increment,
+            )
+            applied.append(f"{topic}:{net:+.4f} ({evidence_increment} staged)")
+        return applied
 
     def decay_beliefs(self, decay_rate: float = 0.15, min_confidence: float = 0.05) -> list[str]:
         """Power-law decay for unreinforced beliefs. Returns dropped topic names.

@@ -19,7 +19,7 @@ flowchart TB
     end
 
     subgraph Stage2["2. Response Generation"]
-        CLAUDE[Claude API messages.create]
+        LLM["LLM API · messages.create"]
     end
 
     subgraph Stage3["3. ESS Classification"]
@@ -36,7 +36,7 @@ flowchart TB
 
     subgraph Stage5["5. Reflection"]
         DECAY[decay_beliefs]
-        REFLECT[REFLECTION_PROMPT + Claude]
+        REFLECT[REFLECTION_PROMPT + LLM]
         VALIDATE[validate_snapshot]
     end
 
@@ -48,8 +48,8 @@ flowchart TB
     UM --> TRAITS
     RET --> BUILD
     TRAITS --> BUILD
-    BUILD --> CLAUDE
-    CLAUDE --> CLASSIFY
+    BUILD --> LLM
+    LLM --> CLASSIFY
     CLASSIFY --> STORE
     CLASSIFY --> TOPICS
     CLASSIFY --> OPINIONS
@@ -64,7 +64,7 @@ flowchart TB
 ```
 
 !!! info "Entry Point"
-    The main loop is `SonalityAgent.respond(user_message: str) -> str` in `agent.py`. It appends the user message to `self.conversation`, calls `_truncate_conversation()` to enforce `MAX_CONVERSATION_CHARS`, then invokes `_post_process()` after receiving the Claude response.
+    The main loop is `SonalityAgent.respond(user_message: str) -> str` in `agent.py`. It appends the user message to `self.conversation`, calls `_truncate_conversation()` to enforce `MAX_CONVERSATION_CHARS`, then invokes `_post_process()` after receiving the LLM response.
 
 ## Pipeline Stages in Depth
 
@@ -77,7 +77,7 @@ Before every LLM call, the system assembles a system prompt of approximately 1,4
 | Core Identity | ~200 tokens | `CORE_IDENTITY` in `prompts.py` | Yes |
 | Personality Snapshot | ~500 tokens | `sponge.snapshot` | Yes |
 | Structured Traits | ~100 tokens | `_build_structured_traits()` | Yes |
-| Retrieved Episodes | ~400 tokens | ChromaDB top-5 | If available |
+| Retrieved Episodes | ~400 tokens | ChromaDB typed retrieval (semantic 2 + episodic 3) | If available |
 
 `build_system_prompt(sponge_snapshot, relevant_episodes, structured_traits)` wraps each in XML-style tags: `<core_identity>`, `<personality_state>`, `<personality_traits>`, `<relevant_memories>`, and `<instructions>`. The core identity is immutable and anchors the agent's fundamental values regardless of how opinions evolve — research shows persona drift occurs within 8 rounds without such an anchor[^1].
 
@@ -85,13 +85,13 @@ Before every LLM call, the system assembles a system prompt of approximately 1,4
 
 ### 2. Response Generation
 
-A standard Anthropic Messages API call with `model=config.MODEL` (default `claude-sonnet-4-20250514`), `max_tokens=2048`, the assembled system prompt, and `self.conversation` as messages. The agent responds naturally, drawing on its personality state and retrieved memories. No tool use or structured output is required for the main response.
+A standard LLM API call with `model=config.MODEL`, `max_tokens=2048`, the assembled system prompt, and `self.conversation` as messages. The agent responds naturally, drawing on its personality state and retrieved memories. No tool use or structured output is required for the main response.
 
 ### 3. ESS Classification
 
 A **separate** LLM call evaluates the user's message for argument strength. Critically, **only the user message** is passed — the agent's response is deliberately excluded to avoid self-judge bias (documented at up to 50 percentage points in SYConBench, EMNLP 2025)[^2].
 
-The `classify()` function in `ess.py` uses Claude's `tool_use` with a `classify_evidence` tool to extract structured output:
+The `classify()` function in `ess.py` uses the LLM's `tool_use` with a `classify_evidence` tool to extract structured output:
 
 | Field | Type | Description |
 |-------|------|--------------|
@@ -108,7 +108,7 @@ The `classify()` function in `ess.py` uses Claude's `tool_use` with a `classify_
 
 ### 4. Conditional Processing
 
-Post-processing runs unconditionally for: episode storage, interaction counting, topic tracking, and disagreement detection. The ESS score gates opinion updates and insight extraction:
+Post-processing runs unconditionally for: episode storage, interaction counting, staged-commit checks, topic tracking, and disagreement detection. The ESS score gates opinion staging and insight extraction:
 
 | ESS | Episode Storage | Topic Tracking | Opinion Update | Insight Extraction |
 |-----|-----------------|----------------|----------------|--------------------|
@@ -135,7 +135,7 @@ When triggered:
 
 1. **Decay**: `decay_beliefs(decay_rate=0.15)` applies power-law forgetting: \( R(t) = (1 + \text{gap})^{-0.15} \), with floor \( \min(0.6, \text{evidence\_count} \times 0.06) \). Beliefs below 0.05 confidence are dropped.
 2. **Retrieve**: Recent episodes are fetched with `where={"interaction": {"$gte": last_reflection_at}}`.
-3. **Consolidate**: `REFLECTION_PROMPT` is sent to Claude with current snapshot, traits, beliefs, pending insights, episode summaries, and recent shifts. The LLM outputs a revised narrative.
+3. **Consolidate**: `REFLECTION_PROMPT` is sent to the LLM with current snapshot, traits, beliefs, pending insights, episode summaries, and recent shifts. The LLM outputs a revised narrative.
 4. **Validate**: `validate_snapshot()` rejects if `len(new) / len(old) < 0.6` (minimum retention ratio).
 5. **Clear**: `pending_insights` is cleared; `last_reflection_at` is updated.
 
@@ -150,7 +150,7 @@ When triggered:
 
 | Component | Technology | Justification |
 |-----------|------------|---------------|
-| LLM | Claude Sonnet (Anthropic API) | Best reasoning for structured output and belief extraction without fine-tuning; RAG-based personalization achieves ~14.92% improvement vs 1.07% for PEFT[^3] |
+| LLM | Configurable (see [Configuration — Model Selection](../configuration.md#model-selection)) | Best reasoning for structured output and belief extraction without fine-tuning; RAG-based personalization achieves ~14.92% improvement vs 1.07% for PEFT[^3] |
 | Vector Store | ChromaDB | Sufficient for prototype scale; cosine similarity; Mem0 vs Graphiti benchmark: vector DB wins on efficiency with no significant accuracy gap[^4] |
 | Personality State | Pydantic models → JSON on disk | Simple, inspectable, versionable; no database needed at this scale |
 | Orchestration | Plain Python | No framework overhead; pipeline is a single function call chain |
@@ -189,11 +189,11 @@ Research shows the bottleneck is **reasoning quality, not context space** — Pe
 
 The entire personality state uses less than 10% of a 128k context window. Context space is not the bottleneck — retrieval quality and reasoning fidelity are.
 
-**Prompt caching:** The system prompt and core identity are placed at the start of the message (static prefix). Anthropic provides a 90% discount on cached tokens. For ~1,500 tokens of static personality cached at Anthropic rates: $0.30/M instead of $3.00/M.
+**Prompt caching:** The system prompt and core identity are placed at the start of the message (static prefix). Many LLM providers offer prompt caching discounts (up to 90%) for static prefixes. For ~1,500 tokens of static personality, this can reduce costs significantly.
 
 ## Cost Analysis
 
-Per-interaction cost: **~$0.005–0.015** at current Claude Sonnet pricing.
+Per-interaction cost: **~$0.005–0.015** depending on the configured model.
 
 | Call | Model | Purpose | Approx. Tokens |
 |------|-------|---------|----------------|
@@ -214,7 +214,7 @@ Each interaction makes **2–3** API calls: always response + ESS; conditionally
 
 ## Retrieval Strategy: Always-Retrieve vs Tool-Based vs Selective
 
-Sonality uses **always-retrieve**: every interaction triggers `EpisodeStore.retrieve(user_message, n_results=5)` before building the system prompt. Episodes are reranked by `similarity × (1 + ess_score)` — higher-quality memories are preferred, addressing the 47.9% retrieval poisoning risk documented in MemoryGraft (2025).
+Sonality uses **always-retrieve with typing**: every interaction triggers `EpisodeStore.retrieve_typed(user_message, semantic_n=2, episodic_n=3)` before building the system prompt. Each branch is reranked by `similarity × (1 + ess_score)` — higher-quality memories are preferred, addressing the 47.9% retrieval poisoning risk documented in MemoryGraft (2025).
 
 | Strategy | Pros | Cons |
 |----------|------|------|

@@ -1,11 +1,12 @@
 from .episodes import EpisodeStore
-from .sponge import BeliefMeta, SpongeState
+from .sponge import BeliefMeta, SpongeState, StagedOpinionUpdate
 from .updater import compute_magnitude, extract_insight, validate_snapshot
 
 __all__ = [
     "BeliefMeta",
     "EpisodeStore",
     "SpongeState",
+    "StagedOpinionUpdate",
     "compute_magnitude",
     "extract_insight",
     "validate_snapshot",

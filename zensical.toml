@@ -1,9 +1,9 @@
 [project]
 site_name = "Sonality"
 site_description = "LLM agent with a self-evolving personality via the Sponge architecture — grounded in 200+ academic references"
-site_author = "Herodotus Dev"
-site_url = "https://herodotusdev.github.io/sonality"
-copyright = "&copy; 2025–2026 Herodotus Dev"
+site_author = "Sonality"
+site_url = ""
+copyright = "&copy; 2025–2026 Sonality contributors"
 
 extra_css = ["stylesheets/extra.css"]
 
@@ -18,6 +18,8 @@ nav = [
         { "System Overview" = "architecture/overview.md" },
         { "Memory Model" = "architecture/memory-model.md" },
         { "Data Flow" = "architecture/data-flow.md" },
+        { "Research Upgrade Plan" = "architecture/research-upgrade-plan.md" },
+        { "Architecture Assessment" = "architecture-assessment.md" },
     ] },
     { "Core Concepts" = [
         { "Evidence Strength Score" = "concepts/ess.md" },
@@ -29,9 +31,12 @@ nav = [
     { "Research" = [
         { "Background" = "research/background.md" },
         { "References" = "research/references.md" },
+        { "Web Research Synthesis 2026" = "research/web-research-synthesis-2026.md" },
     ] },
     { "Personality Development" = "personality-development.md" },
+    { "Training Guide" = "training-guide.md" },
     { "Testing & Evaluation" = "testing.md" },
+    { "Model Considerations" = "model-considerations.md" },
     { "Configuration" = "configuration.md" },
     { "API Reference" = "api-reference.md" },
 ]

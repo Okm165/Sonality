@@ -75,7 +75,7 @@ The `REFLECTION_PROMPT` tasks are ordered deliberately:
 3. **SYNTHESIZE** — higher-order patterns (e.g., "I notice I tend to value X")
 4. **Inject specificity** — if the personality has become generic, add detail from strongest recent insights
 
-This PRESERVE-first ordering is inspired by Open Character Training (2025) — personality changes must be robust. Anthropic Persona Vectors (2025): losing a specific trait means losing neural activation patterns.
+This PRESERVE-first ordering is inspired by Open Character Training (2025) — personality changes must be robust. Persona Vectors research (2025): losing a specific trait means losing neural activation patterns.
 
 ### Step 5: Validate Output
 

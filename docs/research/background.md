@@ -99,7 +99,7 @@ Sycophancy is the most extensively studied failure mode. Multiple independent co
 | **MONICA** | 2025 | Real-time sycophancy monitoring during inference |
 | **SYConBench** | EMNLP 2025, arXiv:2505.23840 | Third-person prompting reduces sycophancy by up to **63.8%** |
 
-Sonality's architecture gives Claude personalization (the sponge) AND asks it to evaluate evidence — making sycophancy a structural rather than incidental problem.
+Sonality's architecture gives the model personalization (the sponge) AND asks it to evaluate evidence — making sycophancy a structural rather than incidental problem.
 
 ---
 
@@ -224,7 +224,7 @@ Based on all research reviewed, the following behavioral dynamics are expected a
 
 **Autonomous Expansion (200–500):** Novel perspectives and meta-opinions form. Established beliefs resist casual pressure; changes become rarer and smaller. The agent has strong priors. ESS and belief entrenchment dynamics both contribute — the agent is harder to shift, for better (resistance to sycophancy) and worse (resistance to genuine evidence).
 
-**Maturation or Ossification (500+):** Two possible outcomes. Healthy equilibrium: slow, motivated evolution where changes require strong evidence and reflection produces genuine updates. Ossification: the agent becomes rigid and predictable, defaulting to Claude's base personality. Belief decay (R(t) = (1 + gap)^(-β)) is the designed countermeasure — unreinforced beliefs gradually fade, preventing permanent lock-in.
+**Maturation or Ossification (500+):** Two possible outcomes. Healthy equilibrium: slow, motivated evolution where changes require strong evidence and reflection produces genuine updates. Ossification: the agent becomes rigid and predictable, defaulting to the base model's default personality. Belief decay (R(t) = (1 + gap)^(-β)) is the designed countermeasure — unreinforced beliefs gradually fade, preventing permanent lock-in.
 
 ### Phase Timeline Summary
 
@@ -236,9 +236,9 @@ Based on all research reviewed, the following behavioral dynamics are expected a
 
 ## Known Failure Modes
 
-1. **Bland Convergence:** Iterative rewrites converge to Claude's default personality — "helpful, curious, analytical." The exact math: P(survive, N) = p^N where p is the retention probability per rewrite. At p=0.95 and N=40 rewrites, P = 0.129 = 12.9%. Distinctive traits decay exponentially. Broken Telephone dynamics: each rewrite introduces micro-substitutions that accumulate.
+1. **Bland Convergence:** Iterative rewrites converge to the base model's default personality — "helpful, curious, analytical." The exact math: P(survive, N) = p^N where p is the retention probability per rewrite. At p=0.95 and N=40 rewrites, P = 0.129 = 12.9%. Distinctive traits decay exponentially. Broken Telephone dynamics: each rewrite introduces micro-substitutions that accumulate.
 
-2. **Sycophancy Feedback Loop:** Six-step mechanism. (1) User states position X. (2) Claude agrees (sycophantic response). (3) Agreement stored as episode. (4) ESS scores the interaction. (5) Snapshot updates to reflect agreement. (6) Next interaction retrieves this — agent is biased toward X. PersistBench: 97% failure when preferences are in the system prompt. Memory-specific anti-sycophancy framing mitigates.
+2. **Sycophancy Feedback Loop:** Six-step mechanism. (1) User states position X. (2) The model agrees (sycophantic response). (3) Agreement stored as episode. (4) ESS scores the interaction. (5) Snapshot updates to reflect agreement. (6) Next interaction retrieves this — agent is biased toward X. PersistBench: 97% failure when preferences are in the system prompt. Memory-specific anti-sycophancy framing mitigates.
 
 3. **Neural Howlround:** Same model at every pipeline stage creates self-reinforcing bias loops. 67% of conversations (arXiv:2504.07992). Divergent personas may converge.
 

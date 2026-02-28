@@ -4,7 +4,7 @@ Sonality's belief system draws from formal opinion dynamics models — mathemati
 
 ## The Magnitude Formula
 
-When an interaction passes the ESS threshold (`ess.score > 0.3`), the raw update magnitude is:
+When an interaction passes the ESS threshold (`ess.score > 0.3`), Sonality computes a raw delta and stages it for delayed commit:
 
 $$\text{magnitude} = \text{OPINION\_BASE\_RATE} \times \text{ess.score} \times \max(\text{ess.novelty}, 0.1) \times \text{dampening}$$
 
@@ -25,6 +25,16 @@ $$\text{magnitude} = \text{OPINION\_BASE\_RATE} \times \text{ess.score} \times \
 | Typical high-ESS (score=0.7, novelty=0.6) | 0.042 | 4.2% |
 | Bootstrap (score=0.7, novelty=0.6, first 10) | 0.021 | 2.1% |
 | Minimum meaningful (score=0.31, novelty=0.1) | 0.003 | 0.3% |
+
+## Cooling-Period Staging
+
+Opinion deltas are not committed immediately. They are queued in `staged_opinion_updates` and committed after `OPINION_COOLING_PERIOD` interactions (default 3).
+
+At commit time, due deltas for the same topic are netted:
+
+$$\text{net\_delta(topic)} = \sum \text{signed\_magnitude}_k$$
+
+This reduces short-burst social pressure effects while preserving accumulated evidence.
 
 ## Bayesian Belief Resistance
 

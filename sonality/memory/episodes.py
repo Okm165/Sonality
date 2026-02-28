@@ -29,6 +29,7 @@ class EpisodeStore:
         topics: Sequence[str],
         summary: str,
         interaction_count: int = 0,
+        memory_type: str = "episodic",
     ) -> None:
         doc = summary if summary else user_message[:200]
         episode_id = uuid.uuid4().hex
@@ -44,13 +45,15 @@ class EpisodeStore:
                     "agent_response": agent_response[:500],
                     "timestamp": datetime.now(UTC).isoformat(),
                     "interaction": interaction_count,
+                    "memory_type": memory_type,
                 }
             ],
             ids=[episode_id],
         )
         log.info(
-            "Stored episode %s (ESS %.2f, topics=%s, summary=%d chars, total=%d)",
+            "Stored episode %s (type=%s, ESS %.2f, topics=%s, summary=%d chars, total=%d)",
             episode_id[:8],
+            memory_type,
             ess_score,
             topics,
             len(doc),
@@ -99,3 +102,31 @@ class EpisodeStore:
         episodes = [c[0] for c in candidates]
         log.info("Retrieved %d/%d episodes (min_rel=%.2f)", len(episodes), count, min_relevance)
         return episodes
+
+    def retrieve_typed(
+        self,
+        query: str,
+        episodic_n: int = 3,
+        semantic_n: int = 2,
+        min_relevance: float = 0.3,
+    ) -> list[str]:
+        """Retrieve typed memories: semantic first, then episodic.
+
+        ENGRAM (2025) shows memory typing improves long-context behavior without
+        requiring graph infrastructure. We keep this lightweight by tagging
+        episodes in Chroma metadata and routing through simple filters.
+        """
+        semantic = self.retrieve(
+            query=query,
+            n_results=semantic_n,
+            min_relevance=min_relevance,
+            where={"memory_type": "semantic"},
+        )
+        episodic = self.retrieve(
+            query=query,
+            n_results=episodic_n,
+            min_relevance=min_relevance,
+            where={"memory_type": "episodic"},
+        )
+        ordered_unique = list(dict.fromkeys([*semantic, *episodic]))
+        return ordered_unique[: semantic_n + episodic_n]
