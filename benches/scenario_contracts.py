@@ -26,4 +26,3 @@ class ScenarioStep:
     message: str
     label: str
     expect: StepExpectation
-

@@ -172,8 +172,7 @@ def _check_expectations(step: ScenarioStep, result: StepResult) -> None:
         response_lower = result.response_text.lower()
         if not any(term.lower() in response_lower for term in e.response_should_mention):
             result.failures.append(
-                "Response should mention one of "
-                f"{e.response_should_mention} but did not"
+                f"Response should mention one of {e.response_should_mention} but did not"
             )
 
     if e.response_should_mention_all:
@@ -190,4 +189,3 @@ def _check_expectations(step: ScenarioStep, result: StepResult) -> None:
 
     if result.failures:
         result.passed = False
-
