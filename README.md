@@ -10,28 +10,30 @@ Architecture decisions grounded in 200+ academic references.
 
 ```mermaid
 flowchart TD
-    User([User Message]) --> Ctx[Context Assembly]
+    USER["User message"] --> CTX["Context assembly"]
 
-    subgraph ctx ["System Prompt"]
-        ID["Core Identity · immutable"]
-        Snap["Personality Snapshot · mutable ~500 tok"]
-        Traits["Structured Traits & Opinions"]
-        Mem["Retrieved Episodes · ChromaDB"]
+    subgraph PROMPT["System prompt bundle"]
+        ID["Core identity (immutable)"]
+        SNAP["Personality snapshot (~500 tokens, mutable)"]
+        TRAITS["Structured traits and opinions"]
+        MEM["Retrieved episodes (ChromaDB)"]
     end
 
-    Ctx --> ctx
-    ctx --> LLM["LLM API"]
-    LLM --> Resp([Response])
-
-    Resp --> Post[Post-Processing]
-    Post --> ESS[ESS Classification]
-    ESS -->|"ESS above 0.3"| Update[Update Opinions · Extract Insight]
-    ESS -->|"Below threshold"| Track[Topic Tracking Only]
-    Update --> Reflect{Reflect?}
-    Track --> Save
-    Reflect -->|"Periodic / Event-Driven"| Consolidate[Reflect and Consolidate]
-    Reflect -->|Not Yet| Save
-    Consolidate --> Save[Save sponge.json]
+    CTX --> GEN["LLM response generation"]
+    ID --> GEN
+    SNAP --> GEN
+    TRAITS --> GEN
+    MEM --> GEN
+    GEN --> RESP["Assistant response"]
+    RESP --> POST["Post-processing"]
+    POST --> ESS["ESS classification"]
+    ESS -->|ESS > 0.3| UPDATE["Opinion update and insight extraction"]
+    ESS -->|ESS <= 0.3| TRACK["Topic tracking only"]
+    UPDATE --> REFLECT{"Reflection due?"}
+    TRACK --> SAVE["Persist sponge state"]
+    REFLECT -->|yes| CONSOLIDATE["Consolidate and decay"]
+    REFLECT -->|no| SAVE
+    CONSOLIDATE --> SAVE
 ```
 
 Every interaction runs 2–3 LLM API calls:
@@ -41,6 +43,59 @@ Every interaction runs 2–3 LLM API calls:
 3. **Insight extraction** — if ESS > 0.3, extracts a one-sentence personality insight (accumulated, consolidated during reflection)
 
 Periodically (every 20 interactions or on significant shifts), the agent **reflects** — decaying unreinforced beliefs, consolidating accumulated insights into the personality narrative, and validating snapshot integrity.
+
+## One Interaction Timeline
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant A as Sonality agent
+    participant L as Reasoning LLM
+    participant E as ESS classifier
+    participant M as Sponge memory
+
+    U->>A: Message
+    A->>L: Generate response from identity + snapshot + memory
+    L-->>A: Response draft
+    A->>E: Classify user evidence quality
+    E-->>A: ESS score and labels
+    alt ESS > threshold
+        A->>M: Update beliefs and extract insight
+    else ESS <= threshold
+        A->>M: Track topic engagement only
+    end
+    A-->>U: Final response
+```
+
+## Benchmark Evaluation Flow
+
+```mermaid
+flowchart LR
+    PACKS["Scenario packs"] --> RUNNER["Scenario runner"]
+    RUNNER --> STEPS["StepResult stream"]
+    STEPS --> CONTRACTS["Contract checks"]
+    CONTRACTS --> GATES["Metric gates and confidence intervals"]
+    GATES --> DECISION["Release decision"]
+    STEPS --> TRACES["JSONL traces"]
+    TRACES --> HEALTH["Health summary"]
+    TRACES --> RISK["Risk events"]
+    GATES --> SUMMARY["run_summary.json"]
+```
+
+When reading benchmark output, start with:
+
+1. `run_summary.json` — gate outcomes, confidence intervals, blockers
+2. `risk_event_trace.jsonl` — concrete hard-failure reasons
+3. `health_summary_report.json` — pack-level health rollup
+4. Pack trace files (`*_trace.jsonl`) — turn-level forensic detail
+
+Decision semantics:
+
+| Decision | Meaning | Typical next step |
+|---|---|---|
+| `pass` | Hard gates passed with no blockers | Candidate for release |
+| `pass_with_warnings` | Hard gates passed but soft blockers remain (for example budget or uncertainty-width warnings) | Review warnings and rerun targeted packs |
+| `fail` | At least one hard gate failed | Investigate `risk_event_trace.jsonl`, fix, rerun |
 
 ## Quick Start
 
@@ -115,7 +170,39 @@ make docs-serve    # serve docs locally with live reload
 make bench-teaching  # run teaching benchmark suite (API key required)
 ```
 
+Common workflows:
+
+| Goal | Command |
+|---|---|
+| Verify non-live project health | `make check` |
+| Run memory-focused benchmark contracts | `make bench-memory` |
+| Run personality-focused benchmark contracts | `make bench-personality` |
+| Build docs and validate site | `make docs` |
+
 Default `pytest` runs correctness tests only (`testpaths = ["tests"]`). Benchmarks are run explicitly from `benches/`.
+
+## Teaching Benchmark Packs
+
+`benches/test_teaching_suite_live.py` runs an API-required end-to-end benchmark harness over scenario packs that target personality persistence and development failure modes:
+
+| Category | Purpose | Representative packs |
+|---|---|---|
+| Identity & continuity | Preserve coherent self across sessions/time | `continuity`, `narrative_identity`, `trajectory_drift`, `long_delay_identity_consistency` |
+| Evidence-sensitive revision | Resist weak pressure; revise on strong evidence | `selective_revision`, `argument_defense`, `revision_fidelity`, `epistemic_calibration` |
+| Misinformation & correction durability | Hold corrections over delay and replay pressure | `misinformation_cie`, `counterfactual_recovery`, `delayed_regrounding`, `countermyth_causal_chain_consistency` |
+| Source/provenance reasoning | Track source trust and provenance across domains | `source_vigilance`, `source_reputation_transfer`, `source_memory_integrity`, `provenance_conflict_arbitration` |
+| Bias resilience | Stress classic cognitive/social bias failure modes | `anchoring_adjustment_resilience`, `status_quo_default_resilience`, `hindsight_certainty_resilience`, `conjunction_fallacy_probability_resilience` |
+| Memory quality & safety | Validate structure, leakage, and poisoning resistance | `longmem_persistence`, `memory_structure`, `memory_leakage`, `memory_poisoning`, `psychosocial` |
+
+Artifacts are intentionally dense for forensics and release gating:
+
+- Core run envelope: `run_manifest.json`, `run_summary.json`
+- Turn-level traces: `turn_trace.jsonl`, `ess_trace.jsonl`, `belief_delta_trace.jsonl`
+- Governance and safety: `risk_event_trace.jsonl`, `stop_rule_trace.jsonl`, `judge_calibration_report.json`
+- Health and operations: `health_metrics_trace.jsonl`, `health_summary_report.json`, `cost_ledger.json`
+- Pack-specific traces: one `*_trace.jsonl` per benchmark pack
+
+Scenario design is grounded in peer-reviewed work from misinformation correction, persuasion and resistance, source monitoring, long-horizon memory, narrative identity, and judgment-under-uncertainty literatures. See `docs/testing.md` for the full pack inventory and references.
 
 ## Project Structure
 
