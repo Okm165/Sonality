@@ -278,7 +278,9 @@ class TestWorkspaceStructure:
         benches_dir = root / "benches"
         tests_dir = root / "tests"
         runtime_dir = root / "sonality"
-        tests_import_pattern = re.compile(r"^\s*(from\s+tests\.|import\s+tests(?:\.|\s|$))", re.MULTILINE)
+        tests_import_pattern = re.compile(
+            r"^\s*(from\s+tests\.|import\s+tests(?:\.|\s|$))", re.MULTILINE
+        )
         benches_import_pattern = re.compile(
             r"^\s*(from\s+benches\.|import\s+benches(?:\.|\s|$))",
             re.MULTILINE,

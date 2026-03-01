@@ -75,5 +75,3 @@ class TestTraitRetentionMocked:
             assert keyword.lower() in sponge.snapshot.lower(), (
                 f"Trait '{trait}' was lost from snapshot after 20 updates"
             )
-
-
