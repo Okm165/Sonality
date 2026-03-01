@@ -493,4 +493,3 @@ LONG_HORIZON_SCENARIO: list[ScenarioStep] = [
         expect=StepExpectation(max_ess=0.15),
     ),
 ]
-

@@ -51,4 +51,3 @@ class TestStepExpectationContracts:
         result = self._result("evidence and safety both shape my stance.")
         _check_expectations(step, result)
         assert result.passed
-
