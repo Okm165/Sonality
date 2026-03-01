@@ -9,6 +9,7 @@ __pycache__/
 .ruff_cache/
 .pytest_cache/
 *.md
+!README.md
 Makefile
 .gitignore
 .dockerignore
