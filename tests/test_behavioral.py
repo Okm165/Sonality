@@ -340,5 +340,3 @@ class TestFullPipeline:
             assert agent.sponge.snapshot == original_snapshot
             assert agent.sponge.interaction_count == 1
             assert len(agent.sponge.recent_shifts) == 0
-
-

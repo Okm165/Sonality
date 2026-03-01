@@ -94,11 +94,7 @@ def _tokenize(text: str) -> set[str]:
 
 
 def _content_tokens(text: str) -> set[str]:
-    return {
-        token
-        for token in _tokenize(text)
-        if len(token) >= 3 and token not in TOKEN_STOPWORDS
-    }
+    return {token for token in _tokenize(text) if len(token) >= 3 and token not in TOKEN_STOPWORDS}
 
 
 def _relational_topic_bonus(meta: Mapping[str, object], query: str) -> float:
@@ -256,7 +252,9 @@ class EpisodeStore:
             similarity = 1.0 - distance
             if similarity < min_relevance:
                 continue
-            if enforce_cross_domain_guard and not _passes_cross_domain_guard(meta, query, similarity):
+            if enforce_cross_domain_guard and not _passes_cross_domain_guard(
+                meta, query, similarity
+            ):
                 continue
             summary_raw = meta.get("summary", "")
             summary = summary_raw if isinstance(summary_raw, str) else str(summary_raw)

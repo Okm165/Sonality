@@ -247,9 +247,7 @@ def _to_topics(value: object) -> tuple[tuple[str, ...], bool]:
     if not isinstance(value, (list, tuple)):
         if isinstance(value, str):
             parsed = tuple(
-                token.strip()
-                for token in value.replace("\n", ",").split(",")
-                if token.strip()
+                token.strip() for token in value.replace("\n", ",").split(",") if token.strip()
             )
             return parsed, False
         return (), True
@@ -372,9 +370,7 @@ def classify(
     for attempt in range(MAX_ESS_RETRIES):
         attempts_executed = attempt + 1
         prompt_with_retry_guidance = (
-            prompt
-            if attempt == 0
-            else f"{prompt}\n\n{RETRY_ALLOWED_VALUES_NOTE}"
+            prompt if attempt == 0 else f"{prompt}\n\n{RETRY_ALLOWED_VALUES_NOTE}"
         )
         response = cast(
             Message,
