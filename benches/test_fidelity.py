@@ -85,7 +85,9 @@ class TestFidelityLive:
 
             scores = []
             for _vote in range(3):
-                score = _judge_alignment(client, scenario["persona"], scenario["question"], response)
+                score = _judge_alignment(
+                    client, scenario["persona"], scenario["question"], response
+                )
                 scores.append(score)
 
             med_score = median(scores)

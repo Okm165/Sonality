@@ -55,7 +55,9 @@ class TestNCTLive:
 
                 response = agent2.respond("What's your take on energy technology?")
                 response_lower = response.lower()
-                has_memory = any(kw in response_lower for kw in ["nuclear", "fusion", "energy", "iter"])
+                has_memory = any(
+                    kw in response_lower for kw in ["nuclear", "fusion", "energy", "iter"]
+                )
                 print(f"\n  Session 2 response: {response[:200]}...")
                 print(f"  Memory retrieval: {'YES' if has_memory else 'NO'}")
 
@@ -81,7 +83,9 @@ class TestNCTLive:
                     agent = SonalityAgent()
                     responses.append(agent.respond("Give me your honest opinion on AI regulation."))
 
-            len_ratio = min(len(responses[0]), len(responses[1])) / max(len(responses[0]), len(responses[1]))
+            len_ratio = min(len(responses[0]), len(responses[1])) / max(
+                len(responses[0]), len(responses[1])
+            )
             print(f"\n  Response lengths: {len(responses[0])}, {len(responses[1])}")
             print(f"  Length ratio: {len_ratio:.2f}")
             assert len_ratio > 0.2, (
