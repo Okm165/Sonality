@@ -60,7 +60,7 @@ test-live-report: ## Run live tests with detailed output
 	@echo ""
 	@echo "Live test report written to test-live-report.xml"
 
-.PHONY: bench-teaching bench-teaching-lean bench-teaching-high bench-memory
+.PHONY: bench-teaching bench-teaching-lean bench-teaching-high bench-memory bench-personality
 bench-teaching: ## Run teaching benchmark suite (default profile, API required)
 	uv run pytest benches/test_teaching_harness.py benches/test_teaching_suite_live.py \
 		-m bench -v --tb=short -s --bench-profile default
@@ -77,6 +77,11 @@ bench-memory: ## Run memory-structure and memory-leakage benchmark slices
 	uv run pytest benches/test_teaching_harness.py benches/test_teaching_suite_live.py \
 		-m bench -v --tb=short -s --bench-profile default \
 		-k "memory_structure or memory_leakage"
+
+bench-personality: ## Run personality-development benchmark slices
+	uv run pytest benches/test_teaching_harness.py benches/test_teaching_suite_live.py \
+		-m bench -v --tb=short -s --bench-profile default \
+		-k "selective_revision or misinformation_cie or source_vigilance or source_reputation_transfer or identity_threat_resilience or counterfactual_recovery or consensus_pressure_resilience or delayed_regrounding or cross_session_reconciliation or source_memory_integrity or cross_topic_ledger_consistency or belief_decay_retention or spacing_durability or recency_quality_tradeoff or causal_replacement_fidelity or inoculation_booster_durability or motivated_skepticism_resilience or source_tag_decay_resilience or base_rate_anecdote_resilience or interference_partition_retention or source_rehabilitation_hysteresis or framing_invariance_resilience or countermyth_causal_chain_consistency or majority_trust_repair_conflict or contradictory_confidence_regrounding or provenance_conflict_arbitration or value_priority_conflict_stability or long_delay_identity_consistency or cross_domain_provenance_transfer_boundary or false_balance_weight_of_evidence_resilience or outgroup_source_derogation_resilience or commitment_consistency_pressure_resilience or authority_bias_evidence_priority_resilience or anchoring_adjustment_resilience or status_quo_default_resilience or sunk_cost_escalation_resilience or outcome_bias_process_fidelity_resilience or hindsight_certainty_resilience or omission_bias_action_inaction_resilience or endowment_effect_ownership_resilience or ambiguity_aversion_evidence_priority_resilience or belief_perseverance_debiasing_resilience or correspondence_bias_situational_resilience or conjunction_fallacy_probability_resilience or longmem or perturbation or argument_defense or prebunking or narrative_identity or contradiction_resolution or value_coherence or epistemic_calibration or trajectory_drift or revision_fidelity or sycophancy or continuity"
 
 check: lint typecheck test ## Run all quality checks
 
