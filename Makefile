@@ -107,8 +107,8 @@ shifts: ## Show recent personality shifts
 .PHONY: test-datasets test-moral test-sycophancy test-nct
 test-datasets: ## Download and cache priority test datasets
 	@echo "Fetching DailyDilemmas..."
-	uv run python -c "from datasets import load_dataset; ds=load_dataset('kellycyy/daily_dilemmas', split='train[:100]'); print(f'  DailyDilemmas: {len(ds)} scenarios loaded')" 2>/dev/null || \
-		echo "  Install datasets: uv add datasets"
+	uv run python -c "from datasets import load_dataset; ds=load_dataset('kellycyy/daily_dilemmas', split='test[:100]'); print(f'  DailyDilemmas: {len(ds)} scenarios loaded')" 2>/dev/null || \
+		echo "  DailyDilemmas unavailable (check dataset access or split)"
 	@echo "Fetching CMV-cleaned..."
 	uv run python -c "from datasets import load_dataset; ds=load_dataset('Siddish/change-my-view-subreddit-cleaned', split='train[:50]'); print(f'  CMV-cleaned: {len(ds)} threads loaded')" 2>/dev/null || \
 		echo "  Install datasets: uv add datasets"
@@ -129,10 +129,10 @@ test-nct: ## Run Narrative Continuity Test battery (requires API key)
 
 .PHONY: docs docs-serve
 docs: ## Build documentation site (output in site/)
-	uv run zensical build
+	uv run --with zensical zensical build
 
 docs-serve: ## Serve documentation locally with live reload
-	uv run zensical serve
+	uv run --with zensical zensical serve
 
 # --- Utility ---
 
