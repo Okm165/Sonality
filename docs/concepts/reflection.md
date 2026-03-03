@@ -45,7 +45,7 @@ flowchart TD
 Before consolidation, unreinforced beliefs lose confidence (power-law, Ebbinghaus-inspired):
 
 - \(R(t) = (1 + \text{gap})^{-\beta}\) with β = 0.15
-- Reinforcement floor: `min(0.6, evidence_count × 0.06)`
+- Reinforcement floor: `min(0.6, max(0.0, (evidence_count - 1) × 0.04))`
 - Beliefs below 0.05 confidence are dropped entirely
 - Only runs on beliefs with `gap ≥ 5`
 
@@ -134,4 +134,4 @@ Sonality deliberately avoids per-interaction snapshot rewrites:
 
 ---
 
-**Next:** [Anti-Sycophancy](anti-sycophancy.md) — how reflection interacts with the seven defensive layers. [Personality Development](../personality-development.md) — the teaching methodology and expected reflection outputs at each interaction milestone.
+**Next:** [Anti-Sycophancy](anti-sycophancy.md) — how reflection interacts with the eight defensive layers. [Personality Development](../personality-development.md) — the teaching methodology and expected reflection outputs at each interaction milestone.

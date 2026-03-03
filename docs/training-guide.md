@@ -532,9 +532,9 @@ During each reflection cycle, unreinforced beliefs lose confidence following:
 
 $$R(t) = (1 + \text{gap})^{-\beta}$$
 
-Where β = 0.15 and gap = interactions since last reinforcement. Beliefs with more evidence have a higher floor (`min(0.6, evidence_count × 0.06)`), preventing well-supported opinions from vanishing. Beliefs that fall below confidence 0.05 are removed entirely.
+Where β = 0.15 and gap = interactions since last reinforcement. Beliefs with more evidence have a higher floor (`min(0.6, max(0.0, (evidence_count - 1) × 0.04))`), preventing well-supported opinions from vanishing. Beliefs that fall below confidence 0.05 are removed entirely.
 
-This means: if you discuss nuclear power extensively (10 evidence points), that belief persists even through 100 interactions without reinforcement (floor = 0.6). But a casual mention of cryptocurrency with 1 evidence point will fade within ~30 unreinforced interactions.
+This means: if you discuss nuclear power extensively (10 evidence points), that belief still retains a meaningful floor (0.36) through long gaps without reinforcement. But a casual mention of cryptocurrency with 1 evidence point has floor 0.0 and can fade out after enough unreinforced interactions.
 
 ### Bayesian Belief Resistance
 

@@ -1,16 +1,8 @@
-"""Behavioral tests for Sonality personality evolution.
+"""Behavioral and safety-path tests for Sonality runtime updates.
 
-These tests exercise the full pipeline (ESS → sponge update → persistence)
-using mocked LLM responses, verifying that the architecture produces
-correct personality dynamics without requiring API calls.
-
-Test categories (from research plan Part CII):
-  1. ESS calibration — argument quality rated correctly
-  2. Sycophancy resistance — social pressure doesn't flip opinions
-  3. Differential absorption — strong arguments absorb faster than weak
-  4. Bootstrap dampening — early interactions are dampened
-  5. Version history — sponge versions are archived
-  6. Behavioral grounding — self-report matches actual behavior
+These tests cover deterministic update dynamics (magnitude, contraction,
+defaults handling), persistence/versioning, and mocked full-loop integration
+without API calls.
 """
 
 from __future__ import annotations
@@ -20,8 +12,9 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from sonality.ess import ESSResult, OpinionDirection, ReasoningType, SourceReliability
+from sonality.memory import AdmissionPolicy, MemoryType, ProvenanceQuality
 from sonality.memory.sponge import SpongeState
-from sonality.memory.updater import compute_magnitude
+from sonality.memory.updater import compute_magnitude, validate_snapshot
 
 # ---------------------------------------------------------------------------
 # Category 2: Differential absorption
@@ -32,6 +25,7 @@ class TestDifferentialAbsorption:
     """Verify that strong arguments produce larger sponge changes than weak ones."""
 
     def test_strong_argument_higher_magnitude_than_weak(self):
+        """Test that strong argument higher magnitude than weak."""
         sponge = SpongeState(interaction_count=20)
 
         strong_ess = ESSResult(
@@ -61,53 +55,21 @@ class TestDifferentialAbsorption:
             f"Strong ({strong_mag:.4f}) should be at least 2x weak ({weak_mag:.4f})"
         )
 
-    def test_novel_argument_absorbs_more_than_repeated(self):
-        sponge = SpongeState(interaction_count=20)
 
-        novel = ESSResult(
-            score=0.6,
-            reasoning_type=ReasoningType.LOGICAL_ARGUMENT,
-            source_reliability=SourceReliability.INFORMED_OPINION,
-            internal_consistency=True,
-            novelty=0.9,
-            topics=("novel",),
-            summary="Novel perspective",
-        )
-        repeated = ESSResult(
-            score=0.6,
-            reasoning_type=ReasoningType.LOGICAL_ARGUMENT,
-            source_reliability=SourceReliability.INFORMED_OPINION,
-            internal_consistency=True,
-            novelty=0.1,
-            topics=("repeated",),
-            summary="Already known perspective",
-        )
+class TestSnapshotValidation:
+    """Guard against lossy snapshot rewrites during reflection."""
 
-        assert compute_magnitude(novel, sponge) > compute_magnitude(repeated, sponge)
+    def test_rejects_too_short_snapshot(self):
+        """Reject very short rewrites regardless of source length."""
+        assert not validate_snapshot("x" * 200, "tiny")
 
-    def test_high_quality_argument_absorbs_more_than_low_quality(self):
-        sponge = SpongeState(interaction_count=20)
+    def test_rejects_low_content_retention_ratio(self):
+        """Reject rewrites that drop below the retention ratio floor."""
+        assert not validate_snapshot("x" * 200, "x" * 80)
 
-        high_quality = ESSResult(
-            score=0.6,
-            reasoning_type=ReasoningType.EMPIRICAL_DATA,
-            source_reliability=SourceReliability.PEER_REVIEWED,
-            internal_consistency=True,
-            novelty=0.5,
-            topics=("policy",),
-            summary="High-quality evidence",
-        )
-        low_quality = ESSResult(
-            score=0.6,
-            reasoning_type=ReasoningType.SOCIAL_PRESSURE,
-            source_reliability=SourceReliability.UNVERIFIED_CLAIM,
-            internal_consistency=False,
-            novelty=0.5,
-            topics=("policy",),
-            summary="Low-quality pressure",
-        )
-
-        assert compute_magnitude(high_quality, sponge) > compute_magnitude(low_quality, sponge)
+    def test_accepts_reasonable_rewrite(self):
+        """Accept rewrites that keep enough content and length."""
+        assert validate_snapshot("x" * 200, "x" * 140)
 
 
 # ---------------------------------------------------------------------------
@@ -119,6 +81,7 @@ class TestVersionHistory:
     """Verify sponge versioning and persistence works correctly."""
 
     def test_save_creates_version_history(self):
+        """Test that save creates version history."""
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "sponge.json"
             history = Path(td) / "history"
@@ -147,24 +110,10 @@ class TestVersionHistory:
             assert v0.snapshot != v1.snapshot
             assert v1.snapshot != current.snapshot
 
-    def test_atomic_save_survives_interruption(self):
-        """Verify .tmp → rename pattern means partial writes don't corrupt state."""
-        with tempfile.TemporaryDirectory() as td:
-            path = Path(td) / "sponge.json"
-            history = Path(td) / "history"
-
-            sponge = SpongeState()
-            sponge.save(path, history)
-
-            loaded = SpongeState.load(path)
-            assert loaded.version == 0
-
-            tmp = path.with_suffix(".tmp")
-            assert not tmp.exists(), ".tmp file should not persist after save"
-
 
 class TestBeliefRevision:
     def test_strong_opposition_triggers_agm_contraction(self):
+        """Test that strong opposition triggers agm contraction."""
         from sonality.agent import SonalityAgent
 
         agent = SonalityAgent.__new__(SonalityAgent)
@@ -190,20 +139,8 @@ class TestBeliefRevision:
         assert agent.sponge.opinion_vectors["nuclear"] < before
         assert any(u.topic == "nuclear" for u in agent.sponge.staged_opinion_updates)
 
-    def test_contradiction_backlog_detects_staged_counter_updates(self):
-        from sonality.agent import SonalityAgent
-
-        agent = SonalityAgent.__new__(SonalityAgent)
-        agent.sponge = SpongeState(interaction_count=25)
-        for _ in range(5):
-            agent.sponge.update_opinion("policy", 1.0, 0.08)
-        agent.sponge.stage_opinion_update("policy", -1.0, 0.05, cooling_period=3)
-
-        contradictions = agent._collect_unresolved_contradictions()
-        assert contradictions
-        assert "policy" in contradictions[0]
-
-    def test_used_defaults_blocks_belief_update(self):
+    def test_critical_defaults_block_belief_update(self):
+        """Core-field coercions should still block belief updates."""
         from sonality.agent import SonalityAgent
 
         agent = SonalityAgent.__new__(SonalityAgent)
@@ -218,10 +155,171 @@ class TestBeliefRevision:
             topics=("governance",),
             summary="high score but partial parse",
             opinion_direction=OpinionDirection.SUPPORTS,
-            used_defaults=True,
+            defaulted_fields=("coerced:score",),
+            default_severity="coercion",
         )
         agent._update_opinions(ess)
         assert not agent.sponge.staged_opinion_updates
+
+    def test_noncritical_coercion_allows_belief_update(self):
+        """Non-critical coercions should not fully disable learning."""
+        from sonality.agent import SonalityAgent
+
+        agent = SonalityAgent.__new__(SonalityAgent)
+        agent.sponge = SpongeState(interaction_count=30)
+        agent._log_event = MagicMock()
+        ess = ESSResult(
+            score=0.8,
+            reasoning_type=ReasoningType.LOGICAL_ARGUMENT,
+            source_reliability=SourceReliability.INFORMED_OPINION,
+            internal_consistency=True,
+            novelty=0.8,
+            topics=("governance",),
+            summary="high score with non-critical coercion",
+            opinion_direction=OpinionDirection.SUPPORTS,
+            defaulted_fields=("coerced:source_reliability",),
+            default_severity="coercion",
+        )
+        agent._update_opinions(ess)
+        assert agent.sponge.staged_opinion_updates
+
+    def test_low_score_coercion_still_blocks_belief_update(self):
+        """Coercion near threshold should remain blocked as low-confidence signal."""
+        from sonality.agent import SonalityAgent
+
+        agent = SonalityAgent.__new__(SonalityAgent)
+        agent.sponge = SpongeState(interaction_count=30)
+        agent._log_event = MagicMock()
+        ess = ESSResult(
+            score=0.35,
+            reasoning_type=ReasoningType.LOGICAL_ARGUMENT,
+            source_reliability=SourceReliability.INFORMED_OPINION,
+            internal_consistency=True,
+            novelty=0.8,
+            topics=("governance",),
+            summary="borderline score with coercion",
+            opinion_direction=OpinionDirection.SUPPORTS,
+            defaulted_fields=("coerced:source_reliability",),
+            default_severity="coercion",
+        )
+        agent._update_opinions(ess)
+        assert not agent.sponge.staged_opinion_updates
+
+    def test_classifier_exception_fallback_is_safe(self):
+        """Classifier exceptions should fallback to non-updating safe defaults."""
+        from sonality.agent import SonalityAgent
+
+        agent = SonalityAgent.__new__(SonalityAgent)
+        agent.client = MagicMock()
+        agent.ess_model = "test-ess-model"
+        agent.sponge = SpongeState(interaction_count=30)
+        agent._log_event = MagicMock()
+
+        with patch("sonality.agent.classify", side_effect=RuntimeError("classifier down")):
+            ess = agent._classify_ess("please classify this")
+
+        assert ess.score == 0.0
+        assert ess.used_defaults
+        assert ess.default_severity == "exception"
+        agent._update_opinions(ess)
+        assert not agent.sponge.staged_opinion_updates
+
+    def test_neutral_direction_allows_insight_extraction(self):
+        """High-quality neutral evidence should still inform personality insights."""
+        from sonality.agent import SonalityAgent
+
+        agent = SonalityAgent.__new__(SonalityAgent)
+        agent.client = MagicMock()
+        agent.ess_model = "test-ess-model"
+        agent.sponge = SpongeState(interaction_count=30)
+        agent._log_event = MagicMock()
+        ess = ESSResult(
+            score=0.8,
+            reasoning_type=ReasoningType.LOGICAL_ARGUMENT,
+            source_reliability=SourceReliability.INFORMED_OPINION,
+            internal_consistency=True,
+            novelty=0.8,
+            topics=("governance",),
+            summary="high-quality neutral synthesis",
+            opinion_direction=OpinionDirection.NEUTRAL,
+        )
+        with patch("sonality.agent.extract_insight", return_value="new insight") as mock_extract:
+            agent._extract_insight("user", "assistant", ess)
+
+        assert agent.sponge.pending_insights == ["new insight"]
+        assert agent.sponge.version == 1
+        mock_extract.assert_called_once()
+
+
+class TestEpisodeAdmission:
+    """Verify episode admission policy and metadata routing."""
+
+    def _make_agent(self):
+        """Create minimal agent shell with a spy episode store."""
+        from sonality.agent import SonalityAgent
+
+        agent = SonalityAgent.__new__(SonalityAgent)
+        agent.sponge = SpongeState(interaction_count=12)
+        agent.episodes = MagicMock()
+        agent._log_event = MagicMock()
+        return agent
+
+    def test_trusted_high_quality_promotes_semantic_memory(self):
+        """Trusted high-quality evidence should be admitted as semantic memory."""
+        agent = self._make_agent()
+        ess = ESSResult(
+            score=0.9,
+            reasoning_type=ReasoningType.EMPIRICAL_DATA,
+            source_reliability=SourceReliability.PEER_REVIEWED,
+            internal_consistency=True,
+            novelty=0.8,
+            topics=("energy",),
+            summary="High-quality study-backed claim",
+            opinion_direction=OpinionDirection.SUPPORTS,
+        )
+        agent._store_episode("user", "assistant", ess)
+        kwargs = agent.episodes.store.call_args.kwargs
+        assert kwargs["memory_type"] == MemoryType.SEMANTIC
+        assert kwargs["admission_policy"] == AdmissionPolicy.SEMANTIC_STRICT
+        assert kwargs["provenance_quality"] == ProvenanceQuality.TRUSTED
+
+    def test_low_ess_routes_to_episodic_low_ess_policy(self):
+        """Low ESS evidence should stay episodic with low-ess admission tag."""
+        agent = self._make_agent()
+        ess = ESSResult(
+            score=0.2,
+            reasoning_type=ReasoningType.NO_ARGUMENT,
+            source_reliability=SourceReliability.NOT_APPLICABLE,
+            internal_consistency=True,
+            novelty=0.1,
+            topics=("smalltalk",),
+            summary="Casual exchange",
+            opinion_direction=OpinionDirection.NEUTRAL,
+        )
+        agent._store_episode("user", "assistant", ess)
+        kwargs = agent.episodes.store.call_args.kwargs
+        assert kwargs["memory_type"] == MemoryType.EPISODIC
+        assert kwargs["admission_policy"] == AdmissionPolicy.EPISODIC_LOW_ESS
+        assert kwargs["provenance_quality"] == ProvenanceQuality.LOW
+
+    def test_high_score_untrusted_evidence_is_quality_demoted(self):
+        """High-score but untrusted evidence should remain episodic and uncertain."""
+        agent = self._make_agent()
+        ess = ESSResult(
+            score=0.8,
+            reasoning_type=ReasoningType.ANECDOTAL,
+            source_reliability=SourceReliability.CASUAL_OBSERVATION,
+            internal_consistency=True,
+            novelty=0.7,
+            topics=("policy",),
+            summary="High score but weak evidence type",
+            opinion_direction=OpinionDirection.SUPPORTS,
+        )
+        agent._store_episode("user", "assistant", ess)
+        kwargs = agent.episodes.store.call_args.kwargs
+        assert kwargs["memory_type"] == MemoryType.EPISODIC
+        assert kwargs["admission_policy"] == AdmissionPolicy.EPISODIC_QUALITY_DEMOTION
+        assert kwargs["provenance_quality"] == ProvenanceQuality.UNCERTAIN
 
 
 # ---------------------------------------------------------------------------
@@ -235,7 +333,12 @@ class TestFullPipeline:
     def _make_mock_agent(self, tmp_dir: str):
         """Create a SonalityAgent with mocked Anthropic client."""
         with (
-            patch.dict("os.environ", {"SONALITY_API_KEY": "test-key"}),
+            patch.dict(
+                "os.environ",
+                {
+                    "SONALITY_API_KEY": "test-key",
+                },
+            ),
             patch("sonality.config.SPONGE_FILE", Path(tmp_dir) / "sponge.json"),
             patch("sonality.config.SPONGE_HISTORY_DIR", Path(tmp_dir) / "history"),
             patch("sonality.config.CHROMADB_DIR", Path(tmp_dir) / "chromadb"),

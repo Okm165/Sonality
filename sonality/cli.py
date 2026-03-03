@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import argparse
 import difflib
 import json
 import logging
 import sys
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Literal
 
 from . import config
 from .agent import SonalityAgent
@@ -11,6 +15,7 @@ from .memory import SpongeState
 
 
 def _print_status(agent: SonalityAgent) -> None:
+    """Print a one-line post-turn summary of ESS and sponge state."""
     ess = agent.last_ess
     score_str = f"{ess.score:.2f}" if ess else "n/a"
     topics = ", ".join(ess.topics) if ess and ess.topics else ""
@@ -29,6 +34,7 @@ def _print_status(agent: SonalityAgent) -> None:
 
 
 def _show_health(agent: SonalityAgent) -> None:
+    """Print human-readable personality health diagnostics."""
     s = agent.sponge
     metas = list(s.belief_meta.values())
     ic = s.interaction_count or 1
@@ -60,6 +66,7 @@ def _show_health(agent: SonalityAgent) -> None:
 
 
 def _show_diff(agent: SonalityAgent) -> None:
+    """Print unified diff between current and previous personality snapshot."""
     old = agent.previous_snapshot or "(no previous snapshot)"
     new = agent.sponge.snapshot
     if old == new:
@@ -86,6 +93,9 @@ BANNER = """\
   SONALITY v0.1
 ============================================================
   Sponge v{version} | {interactions} prior interactions
+  Base URL: {base_url}
+  Model: {model}
+  ESS model: {ess_model}
 
   Commands:
     /sponge    full personality state (JSON)
@@ -96,30 +106,198 @@ BANNER = """\
     /topics    topic engagement counts
     /shifts    recent personality shifts
     /health    personality health metrics
+    /models    current base-url/model configuration
     /diff      diff of last snapshot change
     /reset     reset to seed personality
     /quit      exit
 ============================================================"""
 
 
-def main() -> None:
+def _show_sponge(agent: SonalityAgent) -> None:
+    """Print full sponge state as indented JSON."""
+    print(json.dumps(agent.sponge.model_dump(), indent=2))
+
+
+def _show_snapshot(agent: SonalityAgent) -> None:
+    """Print the current narrative snapshot text."""
+    print(f"\n  {agent.sponge.snapshot}")
+
+
+def _show_beliefs(agent: SonalityAgent) -> None:
+    """Print tracked belief vectors with confidence metadata."""
+    if not agent.sponge.opinion_vectors:
+        print("  No beliefs formed yet.")
+        return
+    for topic, pos in sorted(agent.sponge.opinion_vectors.items(), key=lambda x: -abs(x[1])):
+        meta = agent.sponge.belief_meta.get(topic)
+        conf = f"conf={meta.confidence:.2f} ev={meta.evidence_count}" if meta else "no meta"
+        print(f"  {topic:30s} {pos:+.3f}  ({conf})")
+
+
+def _show_insights(agent: SonalityAgent) -> None:
+    """Print pending personality insights queued for reflection."""
+    if not agent.sponge.pending_insights:
+        print("  No pending insights (cleared at last reflection).")
+        return
+    for index, insight in enumerate(agent.sponge.pending_insights, 1):
+        print(f"  {index}. {insight}")
+
+
+def _show_staged_updates(agent: SonalityAgent) -> None:
+    """Print staged opinion updates awaiting cooldown commit."""
+    if not agent.sponge.staged_opinion_updates:
+        print("  No staged opinion updates.")
+        return
+    for update in agent.sponge.staged_opinion_updates:
+        print(
+            "  "
+            f"{update.topic:30s} {update.signed_magnitude:+.4f} "
+            f"(due #{update.due_interaction}, staged #{update.staged_at})"
+        )
+
+
+def _show_topics(agent: SonalityAgent) -> None:
+    """Print topic-engagement counters tracked in the behavioral signature."""
+    engagement = agent.sponge.behavioral_signature.topic_engagement
+    if not engagement:
+        print("  No topics tracked yet.")
+        return
+    for topic, count in sorted(engagement.items(), key=lambda x: -x[1]):
+        print(f"  {topic:30s} {count}")
+
+
+def _show_shifts(agent: SonalityAgent) -> None:
+    """Print recent recorded personality shifts."""
+    if not agent.sponge.recent_shifts:
+        print("  No shifts recorded yet.")
+        return
+    for shift in agent.sponge.recent_shifts:
+        print(f"  #{shift.interaction} ({shift.magnitude:.3f}): {shift.description}")
+
+
+def _reset(agent: SonalityAgent) -> None:
+    """Reset sponge state to seed personality and clear in-memory context."""
+    agent.sponge = SpongeState()
+    agent.sponge.save(config.SPONGE_FILE, config.SPONGE_HISTORY_DIR)
+    agent.conversation.clear()
+    agent.previous_snapshot = None
+    print("  Sponge reset to seed state.")
+
+
+def _show_models(agent: SonalityAgent) -> None:
+    """Print active base URL and model selections for this runtime."""
+    print(f"  API variant:{config.API_VARIANT}")
+    print(f"  Base URL:   {config.BASE_URL}")
+    print(f"  Model:      {agent.model}")
+    print(f"  ESS model:  {agent.ess_model}")
+
+
+CommandResult = Literal["handled", "chat", "quit"]
+CommandHandler = Callable[[SonalityAgent], None]
+
+COMMAND_HANDLERS: dict[str, CommandHandler] = {
+    "/sponge": _show_sponge,
+    "/snapshot": _show_snapshot,
+    "/beliefs": _show_beliefs,
+    "/insights": _show_insights,
+    "/staged": _show_staged_updates,
+    "/topics": _show_topics,
+    "/shifts": _show_shifts,
+    "/health": _show_health,
+    "/models": _show_models,
+    "/diff": _show_diff,
+    "/reset": _reset,
+}
+
+
+@dataclass(frozen=True, slots=True)
+class CliArgs:
+    """CLI runtime overrides for model selection."""
+
+    model: str
+    ess_model: str
+
+
+def _parse_args() -> CliArgs:
+    """Parse CLI arguments for runtime model selection overrides."""
+    parser = argparse.ArgumentParser(
+        prog="sonality",
+        description="Interactive Sonality REPL",
+    )
+    parser.add_argument(
+        "--model",
+        default=config.MODEL,
+        help="Main response-generation model ID.",
+    )
+    parser.add_argument(
+        "--ess-model",
+        default=config.ESS_MODEL,
+        help="ESS/insight/reflection model ID.",
+    )
+    parsed = parser.parse_args()
+    return CliArgs(
+        model=parsed.model,
+        ess_model=parsed.ess_model,
+    )
+
+
+def _configure_logging() -> None:
+    """Initialize CLI logging from environment-backed configuration."""
     logging.basicConfig(
         level=getattr(logging, config.LOG_LEVEL.upper(), logging.INFO),
         format="%(levelname)s %(name)s: %(message)s",
     )
 
-    if not config.API_KEY:
-        print("Error: set SONALITY_API_KEY in .env or environment.")
-        print("  cp .env.example .env && $EDITOR .env")
-        sys.exit(1)
 
-    agent = SonalityAgent()
+def _require_api_config() -> None:
+    """Exit process when required API configuration is not configured."""
+    missing = config.missing_live_api_config()
+    if not missing:
+        return
+    print(f"Error: set {', '.join(missing)} in .env or environment.")
+    print("  cp .env.example .env && $EDITOR .env")
+    sys.exit(1)
+
+
+def _print_banner(agent: SonalityAgent) -> None:
+    """Print startup banner with persisted sponge metadata."""
     print(
         BANNER.format(
             version=agent.sponge.version,
             interactions=agent.sponge.interaction_count,
+            base_url=config.BASE_URL,
+            model=agent.model,
+            ess_model=agent.ess_model,
         )
     )
+
+
+def _handle_command(agent: SonalityAgent, command: str) -> CommandResult:
+    """Handle slash-command input and return next REPL action."""
+    if command == "/quit":
+        print("Goodbye.")
+        return "quit"
+    if not command.startswith("/"):
+        return "chat"
+    handler = COMMAND_HANDLERS.get(command)
+    if handler is None:
+        print(f"  Unknown command: {command}")
+        return "handled"
+    handler(agent)
+    return "handled"
+
+
+def main() -> None:
+    """Run the interactive Sonality REPL."""
+    _configure_logging()
+    cli_args = _parse_args()
+    _require_api_config()
+
+    agent = SonalityAgent(
+        model=cli_args.model,
+        ess_model=cli_args.ess_model,
+    )
+    _print_banner(agent)
 
     while True:
         try:
@@ -131,91 +309,10 @@ def main() -> None:
         if not user_input:
             continue
 
-        cmd = user_input.lower()
-
-        if cmd == "/quit":
-            print("Goodbye.")
+        command_result = _handle_command(agent, user_input.lower())
+        if command_result == "quit":
             break
-
-        if cmd == "/sponge":
-            print(json.dumps(agent.sponge.model_dump(), indent=2))
-            continue
-
-        if cmd == "/snapshot":
-            print(f"\n  {agent.sponge.snapshot}")
-            continue
-
-        if cmd == "/beliefs":
-            if not agent.sponge.opinion_vectors:
-                print("  No beliefs formed yet.")
-            else:
-                for topic, pos in sorted(
-                    agent.sponge.opinion_vectors.items(), key=lambda x: -abs(x[1])
-                ):
-                    meta = agent.sponge.belief_meta.get(topic)
-                    conf = (
-                        f"conf={meta.confidence:.2f} ev={meta.evidence_count}"
-                        if meta
-                        else "no meta"
-                    )
-                    print(f"  {topic:30s} {pos:+.3f}  ({conf})")
-            continue
-
-        if cmd == "/insights":
-            if not agent.sponge.pending_insights:
-                print("  No pending insights (cleared at last reflection).")
-            else:
-                for i, insight in enumerate(agent.sponge.pending_insights, 1):
-                    print(f"  {i}. {insight}")
-            continue
-
-        if cmd == "/staged":
-            if not agent.sponge.staged_opinion_updates:
-                print("  No staged opinion updates.")
-            else:
-                for update in agent.sponge.staged_opinion_updates:
-                    print(
-                        "  "
-                        f"{update.topic:30s} {update.signed_magnitude:+.4f} "
-                        f"(due #{update.due_interaction}, staged #{update.staged_at})"
-                    )
-            continue
-
-        if cmd == "/topics":
-            eng = agent.sponge.behavioral_signature.topic_engagement
-            if not eng:
-                print("  No topics tracked yet.")
-            else:
-                for topic, count in sorted(eng.items(), key=lambda x: -x[1]):
-                    print(f"  {topic:30s} {count}")
-            continue
-
-        if cmd == "/shifts":
-            if not agent.sponge.recent_shifts:
-                print("  No shifts recorded yet.")
-            else:
-                for s in agent.sponge.recent_shifts:
-                    print(f"  #{s.interaction} ({s.magnitude:.3f}): {s.description}")
-            continue
-
-        if cmd == "/health":
-            _show_health(agent)
-            continue
-
-        if cmd == "/diff":
-            _show_diff(agent)
-            continue
-
-        if cmd == "/reset":
-            agent.sponge = SpongeState()
-            agent.sponge.save(config.SPONGE_FILE, config.SPONGE_HISTORY_DIR)
-            agent.conversation.clear()
-            agent.previous_snapshot = None
-            print("  Sponge reset to seed state.")
-            continue
-
-        if cmd.startswith("/"):
-            print(f"  Unknown command: {cmd}")
+        if command_result == "handled":
             continue
 
         print()

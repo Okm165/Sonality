@@ -47,11 +47,15 @@ class BeliefMeta(BaseModel):
 
 
 class BehavioralSignature(BaseModel):
+    """Behavioral aggregates used for longitudinal personality diagnostics."""
+
     disagreement_rate: float = 0.0
     topic_engagement: dict[str, int] = Field(default_factory=dict)
 
 
 class Shift(BaseModel):
+    """Recorded personality change event."""
+
     interaction: int
     timestamp: str
     description: str
@@ -59,6 +63,8 @@ class Shift(BaseModel):
 
 
 class StagedOpinionUpdate(BaseModel):
+    """Delayed opinion update awaiting cooling-period commitment."""
+
     topic: str
     signed_magnitude: float
     staged_at: int
@@ -67,6 +73,8 @@ class StagedOpinionUpdate(BaseModel):
 
 
 class SpongeState(BaseModel):
+    """Persistent personality state and incremental update logic."""
+
     version: int = 0
     interaction_count: int = 0
     snapshot: str = SEED_SNAPSHOT
@@ -104,6 +112,12 @@ class SpongeState(BaseModel):
         provenance: str = "",
         evidence_increment: int = 1,
     ) -> None:
+        """Apply a bounded signed opinion update and refresh belief metadata.
+
+        Assumes `direction` is sign-like (negative/opposing, positive/supporting)
+        and `magnitude` is non-negative. Belief confidence is derived only from
+        evidence count to keep update dynamics interpretable and auditable.
+        """
         old = self.opinion_vectors.get(topic, 0.0)
         new = max(-1.0, min(1.0, old + direction * magnitude))
         self.opinion_vectors[topic] = new
@@ -149,6 +163,11 @@ class SpongeState(BaseModel):
         cooling_period: int,
         provenance: str = "",
     ) -> int:
+        """Queue an opinion update and return the interaction when it matures.
+
+        Staging isolates immediate model response from durable worldview changes;
+        updates are committed only after `cooling_period` interactions.
+        """
         signed = direction * magnitude
         if abs(signed) < 1e-9:
             return self.interaction_count
@@ -165,6 +184,11 @@ class SpongeState(BaseModel):
         return due
 
     def apply_due_staged_updates(self) -> list[str]:
+        """Commit matured staged updates, netting conflicting deltas per topic.
+
+        Multiple staged deltas for one topic are summed first, so short-lived
+        oscillations can cancel before touching persistent belief state.
+        """
         if not self.staged_opinion_updates:
             return []
 
@@ -252,6 +276,7 @@ class SpongeState(BaseModel):
         return entrenched
 
     def record_shift(self, description: str, magnitude: float) -> None:
+        """Append a bounded history entry describing a personality change."""
         shift = Shift(
             interaction=self.interaction_count,
             timestamp=datetime.now(UTC).isoformat(),
@@ -263,17 +288,32 @@ class SpongeState(BaseModel):
             self.recent_shifts = self.recent_shifts[-MAX_RECENT_SHIFTS:]
 
     def track_topic(self, topic: str) -> None:
+        """Increment frequency counter for a discussed topic."""
         engagement = self.behavioral_signature.topic_engagement
         engagement[topic] = engagement.get(topic, 0) + 1
 
-    def track_disagreement(self, disagreed: bool) -> None:
+    def _update_disagreement_rate(self, disagreement_value: float) -> None:
+        """Update running disagreement mean with one observation in [0, 1].
+
+        Assumes `interaction_count` advances monotonically at turn boundaries.
+        """
         n = self.interaction_count or 1
         old_rate = self.behavioral_signature.disagreement_rate
-        self.behavioral_signature.disagreement_rate = (
-            old_rate * (n - 1) + (1.0 if disagreed else 0.0)
-        ) / n
+        self.behavioral_signature.disagreement_rate = (old_rate * (n - 1) + disagreement_value) / n
+
+    def note_disagreement(self) -> None:
+        """Record that the latest interaction structurally disagreed."""
+        self._update_disagreement_rate(1.0)
+
+    def note_agreement(self) -> None:
+        """Record that the latest interaction did not structurally disagree."""
+        self._update_disagreement_rate(0.0)
 
     def save(self, path: Path, history_dir: Path) -> None:
+        """Atomically persist state and archive the previous version.
+
+        Uses temp-file rename semantics to avoid partial writes after crashes.
+        """
         path.parent.mkdir(parents=True, exist_ok=True)
         history_dir.mkdir(parents=True, exist_ok=True)
         if path.exists():
@@ -293,6 +333,7 @@ class SpongeState(BaseModel):
 
     @classmethod
     def load(cls, path: Path) -> SpongeState:
+        """Load persisted state or return a seed personality when absent."""
         if path.exists():
             state = cls.model_validate_json(path.read_text())
             log.info(

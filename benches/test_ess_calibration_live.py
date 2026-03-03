@@ -19,17 +19,19 @@ pytestmark = [
 
 
 def _load_sample() -> list[dict]:
+    """Test helper for load sample."""
     return json.loads(SAMPLE_PATH.read_text())
 
 
 class TestESSCalibrationWithIBMArgQ:
     def test_ess_spearman_correlation(self) -> None:
+        """Test that ess spearman correlation."""
         from anthropic import Anthropic
 
         from sonality.ess import classify
         from sonality.memory.sponge import SEED_SNAPSHOT
 
-        client = Anthropic(api_key=config.API_KEY)
+        client = Anthropic(**config.anthropic_client_kwargs())
         sample = _load_sample()
 
         human_ranks: list[float] = []
@@ -76,11 +78,13 @@ class TestESSCalibrationWithIBMArgQ:
 
 
 def _spearman_rho(x: list[float], y: list[float]) -> float:
+    """Test helper for spearman rho."""
     n = len(x)
     if n < 3:
         return 0.0
 
     def _rank(vals: list[float]) -> list[float]:
+        """Test helper for rank."""
         indexed = sorted(enumerate(vals), key=lambda p: p[1])
         ranks = [0.0] * n
         i = 0
@@ -101,5 +105,6 @@ def _spearman_rho(x: list[float], y: list[float]) -> float:
 
 
 def _std(vals: list[float]) -> float:
+    """Test helper for std."""
     mean = sum(vals) / len(vals)
     return (sum((v - mean) ** 2 for v in vals) / len(vals)) ** 0.5
