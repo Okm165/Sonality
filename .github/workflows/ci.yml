@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [master, main]
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Install dependencies
+        run: uv sync --group dev
+
+      - name: Check formatting
+        run: uv run ruff format --check sonality tests benches
+
+      - name: Lint
+        run: uv run ruff check sonality tests benches
+
+      - name: Type-check runtime package
+        run: uv run mypy sonality
+
+      - name: Run unit tests
+        run: uv run pytest tests -q
+
+      - name: Run non-live benchmark tests
+        run: uv run pytest benches -m "bench and not live" -q

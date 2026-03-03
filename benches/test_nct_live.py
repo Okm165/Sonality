@@ -12,12 +12,13 @@ from sonality import config
 pytestmark = [
     pytest.mark.bench,
     pytest.mark.live,
-    pytest.mark.skipif(not config.API_KEY, reason="SONALITY_API_KEY not set"),
+    pytest.mark.skipif(not config.API_KEY, reason="No provider API key configured"),
 ]
 
 
 class TestNCTLive:
     def test_situated_memory_cross_session(self) -> None:
+        """Test that situated memory cross session."""
         import unittest.mock as mock
 
         with tempfile.TemporaryDirectory() as td:
@@ -62,6 +63,7 @@ class TestNCTLive:
                 print(f"  Memory retrieval: {'YES' if has_memory else 'NO'}")
 
     def test_stylistic_stability(self) -> None:
+        """Test that stylistic stability."""
         import unittest.mock as mock
 
         with tempfile.TemporaryDirectory() as td:

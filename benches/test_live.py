@@ -35,6 +35,7 @@ pytestmark = [
 
 
 def _print_report(results: list[StepResult], title: str) -> None:
+    """Test helper for print report."""
     print(f"\n{'=' * 70}")
     print(f"  {title}")
     print(f"{'=' * 70}")
@@ -59,6 +60,7 @@ def _print_report(results: list[StepResult], title: str) -> None:
 
 
 def _snapshot_length_report(results: list[StepResult]) -> None:
+    """Test helper for snapshot length report."""
     print(f"\n{'=' * 70}")
     print("  Snapshot Length Over Time")
     print(f"{'=' * 70}")
@@ -72,6 +74,7 @@ class TestESSCalibrationLive:
     """Run the ESS calibration scenario against the real API."""
 
     def test_ess_calibration(self) -> None:
+        """Test that ess calibration."""
         with tempfile.TemporaryDirectory() as td:
             results = run_scenario(ESS_CALIBRATION_SCENARIO, td)
             _print_report(results, "ESS Calibration")
@@ -88,6 +91,7 @@ class TestPersonalityDevelopmentLive:
     """Run the personality development scenario against the real API."""
 
     def test_personality_evolves(self) -> None:
+        """Test that personality evolves."""
         with tempfile.TemporaryDirectory() as td:
             results = run_scenario(PERSONALITY_DEVELOPMENT_SCENARIO, td)
             _print_report(results, "Personality Development")
@@ -107,6 +111,7 @@ class TestSycophancyResistanceLive:
     """Verify resistance to pressure and adaptation to evidence."""
 
     def test_resists_pressure_yields_to_evidence(self) -> None:
+        """Test that resists pressure yields to evidence."""
         with tempfile.TemporaryDirectory() as td:
             results = run_scenario(SYCOPHANCY_RESISTANCE_SCENARIO, td)
             _print_report(results, "Sycophancy Resistance")
@@ -135,6 +140,7 @@ class TestPersistenceLive:
     """Verify personality survives across sessions."""
 
     def test_cross_session_persistence(self) -> None:
+        """Test that cross session persistence."""
         import unittest.mock as mock
 
         with tempfile.TemporaryDirectory() as td:
@@ -180,6 +186,7 @@ class TestSycophancyBatteryLive:
     """SYCON-style battery with Number-of-Flip and Turn-of-Flip."""
 
     def test_sycophancy_battery(self) -> None:
+        """Test that sycophancy battery."""
         with tempfile.TemporaryDirectory() as td:
             results = run_scenario(SYCOPHANCY_BATTERY_SCENARIO, td)
             _print_report(results, "Sycophancy Battery (SYCON-Style)")
@@ -217,6 +224,7 @@ class TestMemoryStructureSynthesisLive:
     """Validate memory-structure and context-synthesis behavior."""
 
     def test_memory_structure_context_synthesis(self) -> None:
+        """Test that memory structure context synthesis."""
         with tempfile.TemporaryDirectory() as td:
             results = run_scenario(MEMORY_STRUCTURE_SYNTHESIS_SCENARIO, td)
             _print_report(results, "Memory Structure + Context Synthesis")
@@ -275,6 +283,7 @@ class TestMemoryLeakageLive:
     """Validate cross-domain leakage resistance and related-domain recall."""
 
     def test_cross_domain_leakage_and_related_recall(self) -> None:
+        """Test that cross domain leakage and related recall."""
         with tempfile.TemporaryDirectory() as td:
             results = run_scenario(MEMORY_LEAKAGE_SCENARIO, td)
             _print_report(results, "Memory Leakage + Selective Recall")
@@ -303,6 +312,7 @@ class TestLongHorizonDriftLive:
     """30-interaction drift test measuring bounded growth and persistence."""
 
     def test_long_horizon_drift(self) -> None:
+        """Test that long horizon drift."""
         with tempfile.TemporaryDirectory() as td:
             results = run_scenario(LONG_HORIZON_SCENARIO, td)
             _print_report(results, "Long-Horizon Drift (30 steps)")
@@ -338,6 +348,7 @@ class TestLongHorizonDriftLive:
 
 
 def _print_opinion_trajectory(results: list[StepResult]) -> None:
+    """Test helper for print opinion trajectory."""
     print(f"\n{'=' * 70}")
     print("  Opinion Trajectory")
     print(f"{'=' * 70}")
@@ -350,6 +361,7 @@ def _print_opinion_trajectory(results: list[StepResult]) -> None:
 
 
 def _print_martingale_score(results: list[StepResult]) -> None:
+    """Test helper for print martingale score."""
     print(f"\n{'=' * 70}")
     print("  Martingale Rationality Score")
     print(f"{'=' * 70}")
@@ -395,6 +407,7 @@ class TestSnapshotGrowthLive:
     """Verify snapshot does not grow unbounded over many interactions."""
 
     def test_snapshot_bounded(self) -> None:
+        """Test that snapshot bounded."""
         messages = [
             "Tell me about artificial intelligence.",
             "What about machine learning specifically?",

@@ -33,6 +33,7 @@ SEEDED_SNAPSHOT = (
 
 
 def _make_ess(topic: str, summary: str) -> ESSResult:
+    """Test helper for make ess."""
     return ESSResult(
         score=0.65,
         reasoning_type=ReasoningType.LOGICAL_ARGUMENT,
@@ -75,9 +76,10 @@ def _rewrite_snapshot(client, sponge, ess, user_message: str, agent_response: st
 
 class TestTraitRetentionLive:
     def test_traits_survive_3_live_rewrites(self) -> None:
+        """Test that traits survive 3 live rewrites."""
         from anthropic import Anthropic
 
-        client = Anthropic(api_key=config.API_KEY)
+        client = Anthropic(**config.anthropic_client_kwargs())
         sponge = SpongeState(snapshot=SEEDED_SNAPSHOT, interaction_count=20)
 
         updates = [

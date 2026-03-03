@@ -119,16 +119,35 @@ For production use, consider embedding models with 2048+ token windows and bette
 
 ---
 
-## Provider-Specific Notes
+## Endpoint and Routing Notes
 
-Sonality currently uses a single provider SDK. To switch providers:
+Sonality uses an explicit API variant (`SONALITY_API_VARIANT`) with two runtime paths:
 
-1. **Swap the SDK** in `sonality/agent.py`, `sonality/ess.py`, `sonality/memory/updater.py`
-2. **Update the structured output format** in `sonality/ess.py` — the `ESS_TOOL` schema maps to the provider's tool/function calling format
-3. **Update environment variables** in `sonality/config.py`
-4. **Re-run calibration tests** — ESS scoring behavior varies across models
+- **Direct Anthropic:**
+  - `SONALITY_API_VARIANT=anthropic`
+  - Uses `https://api.anthropic.com`
+  - Uses Anthropic `messages` API (tool-use for ESS).
+  - Typical model IDs: `claude-sonnet-4-20250514`, `claude-3-7-sonnet-20250219`.
+- **OpenRouter with one key:**
+  - `SONALITY_API_VARIANT=openrouter`
+  - Uses `https://openrouter.ai/api`
+  - Uses OpenRouter `chat/completions`.
+  - ESS classification uses OpenAI-style function calling for structured output.
+  - Use provider-qualified model IDs like `anthropic/claude-sonnet-4`.
 
-The architecture is designed so that provider-specific code is concentrated in three files. The memory layer (ChromaDB, sponge state) and the prompt templates are provider-independent.
+### OpenRouter-First Selection Pattern (Simple and Reliable)
+
+1. Keep `SONALITY_MODEL` for response generation quality/cost tuning.
+2. Keep `SONALITY_ESS_MODEL` separate for stable classifier behavior.
+3. For policy-constrained accounts, set explicit provider routing:
+   - `SONALITY_OPENROUTER_PROVIDER_ORDER=google-vertex,amazon-bedrock`
+   - `SONALITY_OPENROUTER_ALLOW_FALLBACKS=false` for stricter benchmark reproducibility.
+4. Prefer pinned model IDs for reproducibility in benchmarks.
+5. Optionally experiment with OpenRouter routing slugs (`:nitro`, `:floor`) only
+   after baseline calibration is stable.
+
+If you move to a non-Anthropic-compatible protocol, then a provider adapter (or
+SDK swap) is required in `sonality/agent.py` and `sonality/ess.py`.
 
 ---
 

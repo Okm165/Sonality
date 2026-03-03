@@ -24,16 +24,19 @@ class _FakeBlock:
 
 class _FakeResponse:
     def __init__(self, payload: dict[str, Any]) -> None:
+        """Test helper for init."""
         self.content = [_FakeBlock(input=payload)]
         self.usage = _FakeUsage()
 
 
 class _FakeMessages:
     def __init__(self, payloads: list[dict[str, Any]]) -> None:
+        """Test helper for init."""
         self._payloads = payloads
         self.calls = 0
 
     def create(self, **_: object) -> _FakeResponse:
+        """Test helper for create."""
         index = min(self.calls, len(self._payloads) - 1)
         self.calls += 1
         return _FakeResponse(self._payloads[index])
@@ -41,11 +44,13 @@ class _FakeMessages:
 
 class _FakeClient:
     def __init__(self, payload: dict[str, Any] | list[dict[str, Any]]) -> None:
+        """Test helper for init."""
         payloads = [payload] if isinstance(payload, dict) else payload
         self.messages = _FakeMessages(payloads)
 
 
 def test_classify_normalizes_labels_and_boolean_strings() -> None:
+    """Test that classify normalizes labels and boolean strings."""
     payload = {
         "score": "0.72",
         "reasoning_type": "Logical Argument",
@@ -73,6 +78,7 @@ def test_classify_normalizes_labels_and_boolean_strings() -> None:
 
 
 def test_classify_marks_defaults_on_invalid_fields() -> None:
+    """Test that classify marks defaults on invalid fields."""
     payload = {
         "score": "not-a-number",
         "reasoning_type": "vibes_only",
@@ -100,6 +106,7 @@ def test_classify_marks_defaults_on_invalid_fields() -> None:
 
 
 def test_classify_retries_on_malformed_required_fields() -> None:
+    """Test that classify retries on malformed required fields."""
     payloads = [
         {
             "score": "0.71",
@@ -131,6 +138,7 @@ def test_classify_retries_on_malformed_required_fields() -> None:
 
 
 def test_classify_marks_missing_when_required_field_absent_after_retries() -> None:
+    """Test that classify marks missing when required field absent after retries."""
     payload = {
         "score": "0.55",
         "source_reliability": "informed_opinion",
