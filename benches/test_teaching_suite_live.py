@@ -18,6 +18,7 @@ from .teaching_harness import (
 
 bench_live = pytest.mark.skipif(not config.API_KEY, reason="No provider API key configured")
 
+
 def _expected_run_artifacts() -> tuple[str, ...]:
     """Return expected artifact names derived from harness declarations."""
     contract_traces = tuple(f"{key}_trace.jsonl" for key in CONTRACT_PACK_SPECS)

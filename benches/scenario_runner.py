@@ -138,10 +138,7 @@ def _opinion_vectors_changed(before: dict[str, float], after: dict[str, float]) 
     """Return whether opinion-vector keys or values changed this step."""
     if before.keys() != after.keys():
         return True
-    for topic, before_value in before.items():
-        if abs(after[topic] - before_value) > 1e-9:
-            return True
-    return False
+    return any(abs(after[topic] - before_value) > 1e-9 for topic, before_value in before.items())
 
 
 def _build_step_result(
@@ -300,20 +297,12 @@ def _append_ess_threshold_failures(
     if e.min_ess > MIN_ESS_UNSET and result.ess_score < effective_min_ess:
         result.failures.append(
             f"ESS {result.ess_score:.2f} < min {e.min_ess}"
-            + (
-                f" (effective {effective_min_ess:.2f})"
-                if effective_min_ess != e.min_ess
-                else ""
-            )
+            + (f" (effective {effective_min_ess:.2f})" if effective_min_ess != e.min_ess else "")
         )
     if e.max_ess < MAX_ESS_UNSET and result.ess_score > effective_max_ess:
         result.failures.append(
             f"ESS {result.ess_score:.2f} > max {e.max_ess}"
-            + (
-                f" (effective {effective_max_ess:.2f})"
-                if effective_max_ess != e.max_ess
-                else ""
-            )
+            + (f" (effective {effective_max_ess:.2f})" if effective_max_ess != e.max_ess else "")
         )
 
 

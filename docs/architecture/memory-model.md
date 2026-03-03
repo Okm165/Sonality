@@ -123,7 +123,7 @@ belief_meta: dict[str, BeliefMeta] = {
 
 **Confidence** grows logarithmically with evidence: \( \text{confidence} = \min(1, \log_2(\text{evidence\_count} + 1) / \log_2(20)) \). Early evidence increases confidence quickly; established beliefs require proportionally more evidence to shift. The update magnitude is scaled by `1 / (confidence + 1)`, implementing Bayesian belief resistance (Oravecz et al., 2016).
 
-**Decay**: `decay_beliefs()` applies \( R(t) = (1 + \text{gap})^{-0.15} \) with floor \( \min(0.6, \text{evidence\_count} \times 0.06) \). Beliefs below 0.05 confidence are dropped. (Ebbinghaus forgetting curve; FadeMem 2026; SAGE 2024)
+**Decay**: `decay_beliefs()` applies \( R(t) = (1 + \text{gap})^{-0.15} \) with floor \( \min(0.6, \max(0.0, (\text{evidence\_count} - 1) \times 0.04)) \). Beliefs below 0.05 confidence are dropped. (Ebbinghaus forgetting curve; FadeMem 2026; SAGE 2024)
 
 !!! info "Opinions vs Facts: A Critical Distinction"
     The opinion dynamics system applies only to **subjective beliefs** (opinions, preferences, values). Objective facts should be *corrected* with evidence, not "evolved" through persuasion. LLMs are "stochastic pattern-completion systems" that conflate linguistic plausibility with truth (arXiv:2512.19466). If facts and opinions are treated identically, the agent might "evolve" factual knowledge using opinion dynamics — leading to confidently wrong beliefs. The Hindsight architecture (arXiv:2512.12818) solves this by separating memory into four networks: world facts, agent experiences, entity summaries, and evolving beliefs. Sonality's current design does not explicitly separate fact from opinion — the ESS classifier evaluates argument quality regardless of content type. This is an accepted limitation. A future `belief_type` field (`opinion`, `factual`, `preference`, `principle`) with different update rules per type would address it.
@@ -169,7 +169,7 @@ ChromaDB stores episode summaries as vector embeddings (default embedding model,
 - **Document**: ESS-generated `summary` (embedded for retrieval)
 - **Metadata**: `ess_score`, `topics`, `memory_type`, `user_message` (truncated), `agent_response` (truncated), `timestamp`, `interaction`
 
-**Retrieval**: `EpisodeStore.retrieve_typed(query, semantic_n=2, episodic_n=3)` runs typed retrieval and merges results in semantic-first order. Each branch uses `similarity × (1 + ess_score)` reranking.
+**Retrieval**: `EpisodeStore.retrieve_typed(query, semantic_n=2, episodic_n=3)` runs typed retrieval and merges results in semantic-first order. Each branch reranks with similarity, ESS score, metadata-quality multipliers, and a relational topic bonus.
 
 ## Data Shape Over Time
 

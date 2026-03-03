@@ -10,7 +10,8 @@ Set these in your `.env` file (copy from `.env.example`):
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SONALITY_API_KEY` | *(required)* | API key for the LLM provider |
+| `SONALITY_API_KEY` | *(required)* | API key for the configured provider endpoint |
+| `SONALITY_API_VARIANT` | *(required)* | API endpoint variant (`anthropic` or `openrouter`) |
 | `SONALITY_MODEL` | *(see .env.example)* | Main reasoning model for response generation |
 | `SONALITY_ESS_MODEL` | Same as `SONALITY_MODEL` | Model for ESS classification, insight extraction, and reflection |
 | `SONALITY_ESS_THRESHOLD` | `0.3` | Minimum ESS score to trigger personality updates |
@@ -20,7 +21,6 @@ Set these in your `.env` file (copy from `.env.example`):
 | `SONALITY_SEMANTIC_RETRIEVAL_COUNT` | `2` | Semantic memories retrieved each turn |
 | `SONALITY_EPISODIC_RETRIEVAL_COUNT` | `3` | Episodic memories retrieved each turn |
 | `SONALITY_REFLECTION_EVERY` | `20` | Periodic reflection interval (interactions) |
-| `SONALITY_ESS_AUDIT_LOG_FILE` | `data/ess_log.jsonl` | JSONL audit log output path (useful for isolated benchmark runs) |
 
 ---
 
@@ -41,9 +41,9 @@ These are defined in `sonality/config.py` and `sonality/memory/updater.py`. Not 
 
 | Constant | Value | Location | Rationale |
 |----------|-------|----------|-----------|
-| `EPISODE_RETRIEVAL_COUNT` | 5 | `config.py` | Episodes retrieved per interaction. Balances context richness with prompt length. |
 | `SEMANTIC_RETRIEVAL_COUNT` | 2 | `config.py` | ENGRAM-style semantic memory routing without graph complexity. |
 | `EPISODIC_RETRIEVAL_COUNT` | 3 | `config.py` | Keeps concrete interaction recall while preserving prompt budget. |
+| `SEMANTIC_RETRIEVAL_COUNT + EPISODIC_RETRIEVAL_COUNT` | 5 | `config.py` (derived) | Combined retrieval budget used per interaction. |
 | `MAX_CONVERSATION_CHARS` | 100,000 | `config.py` | Conversation history truncation. Oldest messages removed first when exceeded. |
 
 ### Validation Parameters
@@ -61,7 +61,16 @@ These are defined in `sonality/config.py` and `sonality/memory/updater.py`. Not 
 | `SPONGE_FILE` | `data/sponge.json` | `config.py` |
 | `SPONGE_HISTORY_DIR` | `data/sponge_history` | `config.py` |
 | `CHROMADB_DIR` | `data/chromadb` | `config.py` |
-| `ESS_AUDIT_LOG_FILE` | `data/ess_log.jsonl` (env-overridable) | `config.py` |
+| `ESS_AUDIT_LOG_FILE` | `data/ess_log.jsonl` | `config.py` |
+| `BASE_URL` | Derived from `SONALITY_API_VARIANT` | `config.py` |
+
+---
+
+For OpenRouter, set:
+
+```bash
+SONALITY_API_VARIANT=openrouter
+```
 
 ---
 
@@ -122,6 +131,10 @@ SONALITY_ESS_MODEL=<model-id>  # see .env.example for examples
 
 # Use the main model for response generation only
 SONALITY_MODEL=<model-id>      # see .env.example for defaults
+
+# Runtime overrides (without editing .env)
+uv run sonality --model "<main-model-id>" --ess-model "<ess-model-id>"
+make run ARGS='--model "<main-model-id>" --ess-model "<ess-model-id>"'
 ```
 
 **Trade-off:** Cheaper ESS models may produce less calibrated scores. Run IBM-ArgQ correlation test (T2.1) after changing the ESS model.

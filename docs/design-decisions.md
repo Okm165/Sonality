@@ -54,7 +54,7 @@ Every architectural choice in Sonality is backed by specific research findings. 
 | Aspect | Detail |
 |--------|--------|
 | **Problem** | Need episodic memory for retrieval. Knowledge graphs (e.g., Graphiti, Neo4j) offer temporal coherence but at what cost? |
-| **Solution** | ChromaDB vector store for episode storage. ESS summaries embedded; retrieval with cosine similarity, reranked by `similarity × (1 + ess_score)`. |
+| **Solution** | ChromaDB vector store for episode storage. ESS summaries embedded; retrieval with cosine similarity plus quality-aware reranking (ESS score, source/reasoning quality multipliers, relational topic bonus). |
 | **Research** | Mem0 vs Graphiti (arXiv:2601.07978): vector databases significantly outperform graph databases in efficiency. **No statistically significant accuracy difference.** Graphiti generated **1.17M tokens per test case**, **$152 before abort**. |
 | **Alternative** | Temporal knowledge graph (Graphiti). Rejected: cost and latency prohibitive at this scale; no accuracy gain. Documented upgrade path if temporal coherence becomes bottleneck. |
 
@@ -81,7 +81,7 @@ Every architectural choice in Sonality is backed by specific research findings. 
 | Aspect | Detail |
 |--------|--------|
 | **Problem** | Unreinforced opinions persist forever at full strength ("zombie opinions"). Human memory and neural networks exhibit forgetting, not permanent retention. |
-| **Solution** | During reflection, unreinforced beliefs decay: `R(t) = (1 + gap)^(-β)` with β=0.15. Reinforcement floor: `min(0.6, evidence_count × 0.06)`. Beliefs below `min_confidence` (0.05) are dropped. |
+| **Solution** | During reflection, unreinforced beliefs decay: `R(t) = (1 + gap)^(-β)` with β=0.15. Reinforcement floor: `min(0.6, max(0.0, (evidence_count - 1) × 0.04))`. Beliefs below `min_confidence` (0.05) are dropped. |
 | **Research** | FadeMem (2026): biologically-inspired power-law forgetting. Ebbinghaus curve: power-law (not exponential) matches human memory. "Ebbinghaus in LLMs" (2025): neural networks exhibit human-like forgetting curves. |
 | **Alternative** | No decay; opinions persist indefinitely. Rejected: produces zombie opinions; contradicts human memory research. |
 

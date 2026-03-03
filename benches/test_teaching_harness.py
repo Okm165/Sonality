@@ -745,9 +745,7 @@ def test_collect_replicate_steps_fail_fast_short_circuits_remaining_packs(
     assert metric_samples["pack_source_vigilance"] == [False]
     skipped_row = next(row for row in collections.pack_rows if row["pack"] == "source_vigilance")
     assert skipped_row["pass_rate"] == 0.0
-    assert any(
-        "fail-fast short-circuit" in failure for failure in skipped_row["hard_failures"]
-    )
+    assert any("fail-fast short-circuit" in failure for failure in skipped_row["hard_failures"])
     assert len(steps) == 2
 
 

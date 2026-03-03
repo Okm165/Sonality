@@ -13,7 +13,7 @@ flowchart TB
     end
 
     subgraph Stage1["1. Context Assembly"]
-        RET[EpisodeStore.retrieve]
+        RET[EpisodeStore.retrieve_typed]
         TRAITS[_build_structured_traits]
         BUILD[build_system_prompt]
     end
@@ -30,7 +30,7 @@ flowchart TB
         STORE[_store_episode]
         TOPICS[_update_topics]
         OPINIONS[_update_opinions]
-        DISAGREE[track_disagreement]
+        DISAGREE[_detect_disagreement + note_disagreement/agreement]
         INSIGHT[_extract_insight]
     end
 
@@ -133,7 +133,7 @@ Reflection is triggered by:
 
 When triggered:
 
-1. **Decay**: `decay_beliefs(decay_rate=0.15)` applies power-law forgetting: \( R(t) = (1 + \text{gap})^{-0.15} \), with floor \( \min(0.6, \text{evidence\_count} \times 0.06) \). Beliefs below 0.05 confidence are dropped.
+1. **Decay**: `decay_beliefs(decay_rate=0.15)` applies power-law forgetting: \( R(t) = (1 + \text{gap})^{-0.15} \), with floor \( \min(0.6, \max(0.0, (\text{evidence\_count} - 1) \times 0.04)) \). Beliefs below 0.05 confidence are dropped.
 2. **Retrieve**: Recent episodes are fetched with `where={"interaction": {"$gte": last_reflection_at}}`.
 3. **Consolidate**: `REFLECTION_PROMPT` is sent to the LLM with current snapshot, traits, beliefs, pending insights, episode summaries, and recent shifts. The LLM outputs a revised narrative.
 4. **Validate**: `validate_snapshot()` rejects if `len(new) / len(old) < 0.6` (minimum retention ratio).
@@ -214,7 +214,7 @@ Each interaction makes **2–3** API calls: always response + ESS; conditionally
 
 ## Retrieval Strategy: Always-Retrieve vs Tool-Based vs Selective
 
-Sonality uses **always-retrieve with typing**: every interaction triggers `EpisodeStore.retrieve_typed(user_message, semantic_n=2, episodic_n=3)` before building the system prompt. Each branch is reranked by `similarity × (1 + ess_score)` — higher-quality memories are preferred, addressing the 47.9% retrieval poisoning risk documented in MemoryGraft (2025).
+Sonality uses **always-retrieve with typing**: every interaction triggers `EpisodeStore.retrieve_typed(user_message, semantic_n=2, episodic_n=3)` before building the system prompt. Each branch reranks by similarity, ESS score, metadata quality multipliers, and relational topic bonus — preserving relevance while reducing replay of weak or low-provenance memories.
 
 | Strategy | Pros | Cons |
 |----------|------|------|
@@ -222,7 +222,7 @@ Sonality uses **always-retrieve with typing**: every interaction triggers `Episo
 | **Tool-based** (memory-OS style) | Agent decides when to search; flexible | MemTool (arXiv:2507.21428): 0–60% efficiency on medium models; under-retrieval risk |
 | **Selective** (FluxMem) | Saves tokens on low-quality interactions | Agent lacks episodic context for casual chat; inconsistent behavior |
 
-Always-retrieve was chosen because: (1) ChromaDB retrieval is in-process and fast (milliseconds, not LLM calls); (2) the agent benefits from relevant past context even when the current message is low-ESS; (3) `min_relevance=0.3` filters out weak matches so irrelevant episodes are excluded; (4) ESS-weighted reranking ensures high-quality episodes surface first. Research on mixed memory structures (arXiv:2412.15266) confirms "remarkable resilience in noisy environments" — even if some irrelevant memories are retrieved, the LLM handles them well.
+Always-retrieve was chosen because: (1) ChromaDB retrieval is in-process and fast (milliseconds, not LLM calls); (2) the agent benefits from relevant past context even when the current message is low-ESS; (3) `min_relevance=0.3` plus cross-domain guard filters out weakly related episodes; (4) quality-aware reranking surfaces stronger evidence first.
 
 ---
 
