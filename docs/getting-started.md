@@ -21,7 +21,7 @@ make install
 
 # Configure
 cp .env.example .env
-# Edit .env — add your SONALITY_API_KEY
+# Edit .env — set SONALITY_API_KEY and SONALITY_API_VARIANT
 ```
 
 ## Running
@@ -38,7 +38,7 @@ This starts an interactive REPL where you can chat with the agent and observe it
 
 ```bash
 cp .env.example .env
-# Edit .env — add your API key
+# Edit .env — set SONALITY_API_KEY and SONALITY_API_VARIANT
 docker compose run --rm sonality
 ```
 
@@ -56,9 +56,19 @@ Once running, the REPL supports introspection commands:
 | `/topics` | Topic engagement counts |
 | `/shifts` | Recent personality shifts with magnitudes |
 | `/health` | Personality health and maturation metrics |
+| `/models` | Active provider/model/ESS-model and base URL |
 | `/diff` | Text diff of last sponge snapshot change |
 | `/reset` | Reset to seed personality |
 | `/quit` | Exit |
+
+### Runtime model selection
+
+You can override models per run (no `.env` edit required):
+
+```bash
+uv run sonality --model "<main-model-id>" --ess-model "<ess-model-id>"
+make run ARGS='--model "<main-model-id>" --ess-model "<ess-model-id>"'
+```
 
 ## First Interaction
 
@@ -120,6 +130,8 @@ make nuke          Full reset (remove .venv, data, caches)
 
 ## Project Structure
 
+For the ownership map and placement rules, see [Project Structure](project-structure.md).
+
 ```
 sonality/
 ├── pyproject.toml              Dependencies and tool config
@@ -140,7 +152,7 @@ sonality/
 │       ├── sponge.py           SpongeState model, persistence
 │       ├── episodes.py         ChromaDB episode storage + retrieval
 │       └── updater.py          Magnitude computation, snapshot validation
-├── tests/                      Test suite (166 tests)
+├── tests/                      Deterministic correctness tests
 └── data/                       Runtime data (gitignored)
     ├── sponge.json             Current personality state
     ├── sponge_history/         Archived versions
