@@ -23,6 +23,7 @@ def build_system_prompt(
     relevant_episodes: list[str],
     structured_traits: str = "",
 ) -> str:
+    """Compose the runtime system prompt from identity, state, and memory context."""
     episodes_block = ""
     if relevant_episodes:
         episodes_text = "\n".join(f"- {ep}" for ep in relevant_episodes)
