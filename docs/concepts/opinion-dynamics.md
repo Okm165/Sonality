@@ -81,18 +81,18 @@ Where:
 
 **Reinforcement floor** prevents well-evidenced beliefs from decaying to nothing:
 
-$$\text{floor} = \min(0.6, \text{evidence\_count} \times 0.06)$$
+$$\text{floor} = \min(0.6, \max(0.0, (\text{evidence\_count} - 1) \times 0.04))$$
 
 $$\text{new\_conf} = \max(\text{floor}, \text{conf} \times R(t))$$
 
 **Minimum confidence threshold**: 0.05. Below this, the belief is dropped entirely (removed from `opinion_vectors` and `belief_meta`).
 
-| Gap (interactions) | Retention (β=0.15) | With floor (ev=5, floor=0.30) |
+| Gap (interactions) | Retention (β=0.15) | With floor (ev=10, floor=0.36) |
 |-------------------|--------------------|-------------------------------|
-| 5 | 0.78 | max(0.30, conf × 0.78) |
-| 10 | 0.69 | max(0.30, conf × 0.69) |
-| 20 | 0.61 | max(0.30, conf × 0.61) |
-| 50 | 0.49 | max(0.30, conf × 0.49) |
+| 5 | 0.78 | max(0.36, conf × 0.78) |
+| 10 | 0.69 | max(0.36, conf × 0.69) |
+| 20 | 0.61 | max(0.36, conf × 0.61) |
+| 50 | 0.49 | max(0.36, conf × 0.49) |
 
 Power-law (not exponential) matches the Ebbinghaus human memory curve and neural network forgetting research.[^4]
 

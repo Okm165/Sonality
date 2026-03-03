@@ -114,7 +114,7 @@ Kahneman's dual-process theory distinguishes System 1 (fast, intuitive) from Sys
 
 ---
 
-**Next:** [Opinion Dynamics](opinion-dynamics.md) — how ESS-derived magnitudes translate into belief updates. [Anti-Sycophancy](anti-sycophancy.md) — why ESS decoupling is layer 2 of the seven-layer defense.
+**Next:** [Opinion Dynamics](opinion-dynamics.md) — how ESS-derived magnitudes translate into belief updates. [Anti-Sycophancy](anti-sycophancy.md) — why ESS decoupling is layer 2 of the eight-layer defense.
 
 [^1]: Hegselmann-Krause (2002). Bounded confidence model.
 [^2]: SYConBench (EMNLP 2025, arXiv:2505.23840).

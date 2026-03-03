@@ -270,7 +270,7 @@ These are genuine open problems. No paper, framework, or production system has f
 
 **No Optimal Update Frequency.** Every system either updates too aggressively (volatile personality) or too conservatively (rigid personality). The right frequency depends on the use case and there is no general theory. Sonality's ESS threshold of 0.3 is a calibrated heuristic, not a principled optimum.
 
-**Sycophancy Mitigation Is Partial.** Even with seven defensive layers, some sycophantic behavior will occur. The 78.5% sycophancy rate under first-person framing (SycEval) is resistant to all known prompting interventions. The goal is reduction, not elimination.
+**Sycophancy Mitigation Is Partial.** Even with eight defensive layers, some sycophantic behavior will occur. The 78.5% sycophancy rate under first-person framing (SycEval) is resistant to all known prompting interventions. The goal is reduction, not elimination.
 
 **Long-Term Deployment Data Is Scarce.** The longest documented autonomous agent deployment is Sophia's 36 hours. No research has studied what happens to personality over weeks or months of continuous operation. Sonality's versioned persistence enables studying this, but no external baselines exist for comparison.
 
@@ -314,7 +314,7 @@ MINJA (arXiv:2503.03704) demonstrates 95% injection success rate through normal 
 
 A persistent user repeatedly asserts extreme positions across many sessions. The agent's sycophantic tendency causes partial agreement. These agreements are stored as belief updates. Over 20–30 interactions, the agent's personality shifts toward the attacker's desired state. Requires no technical sophistication — only patience.
 
-**Sonality's defense:** Seven anti-sycophancy layers (see [Anti-Sycophancy](../concepts/anti-sycophancy.md)). The bootstrap dampening (0.5×) for the first 30 interactions limits early-stage hijacking. The disagreement rate tracking detects when the agent is agreeing too often and adjusts ESS classification framing. Belief decay erodes unreinforced opinions. But none of these fully prevent a determined attacker willing to maintain influence over many sessions.
+**Sonality's defense:** Eight anti-sycophancy layers (see [Anti-Sycophancy](../concepts/anti-sycophancy.md)). The bootstrap dampening (0.5×) for the first 10 interactions limits early-stage hijacking. The disagreement-rate tracking exposes collapse toward agreement, while belief decay erodes unreinforced opinions. But none of these fully prevent a determined attacker willing to maintain influence over many sessions.
 
 ### Attack Vector 4: Core Identity Extraction
 

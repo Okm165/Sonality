@@ -81,7 +81,7 @@ Calls 1 and 2 occur on every interaction. Call 3 occurs only when `ess.score > c
 
 When the user presents a well-reasoned argument (e.g., "According to the Bureau of Labor Statistics, automation has displaced 2.4M manufacturing jobs since 2000, but created 3.1M in tech — the net is positive but the transition cost is real"):
 
-1. **Episode retrieval**: `EpisodeStore.retrieve_typed(user_message, semantic_n=2, episodic_n=3)` merges semantic and episodic memories. Each branch still uses ESS-weighted reranking (`similarity × (1 + ess_score)`), and low-similarity episodes are filtered out.
+1. **Episode retrieval**: `EpisodeStore.retrieve_typed(user_message, semantic_n=2, episodic_n=3)` merges semantic and episodic memories. Each branch reranks by similarity, ESS score, metadata quality multipliers, and relational topic signals; low-similarity episodes are filtered out.
 
 2. **System prompt assembly**: `build_system_prompt()` produces:
    - `<core_identity>`: full `CORE_IDENTITY` text
@@ -97,7 +97,7 @@ When the user presents a well-reasoned argument (e.g., "According to the Bureau 
    - `topics=("ai_automation", "labor_markets")`, `opinion_direction=supports`
    - `summary="User cited BLS data on automation job displacement vs creation"`
 
-5. **Episode storage**: `EpisodeStore.store()` adds the episode with `ess_score=0.67`, `topics`, `summary`, `interaction_count`.
+5. **Episode storage**: `EpisodeStore.store()` persists the interaction with a full `ESSResult` payload plus `interaction_count` and typed memory metadata.
 
 6. **Topic tracking**: `_update_topics(ess)` increments `behavioral_signature.topic_engagement["ai_automation"]` and `["labor_markets"]`.
 
@@ -107,7 +107,7 @@ When the user presents a well-reasoned argument (e.g., "According to the Bureau 
    - `stage_opinion_update(...)` queues a delayed commit (`SONALITY_OPINION_COOLING_PERIOD`, default 3).
    - Due staged updates are committed at the start of post-processing with `apply_due_staged_updates()`.
 
-8. **Disagreement detection**: `_detect_disagreement(ess)` checks if user argued against existing stance (`pos * sign < 0`). Result passed to `track_disagreement()`.
+8. **Disagreement detection**: `_detect_disagreement(ess)` checks if user argued against existing stance (`pos * sign < 0`). Result updates running metrics via `note_disagreement()` or `note_agreement()`.
 
 9. **Insight extraction**: `extract_insight()` sends `INSIGHT_PROMPT` to the LLM; receives e.g. "Developed nuanced view on automation's labor market effects." Appended to `pending_insights`; `record_shift()` called with magnitude.
 
@@ -129,7 +129,7 @@ When the user sends a casual or low-evidence message (e.g., "Hey, how's it going
    - `score=0.02`, `reasoning_type=no_argument`, `novelty=0.0`
    - `topics=()`, `opinion_direction=neutral`
 
-5. **Episode storage**: Episode is stored with `ess_score=0.02` — low quality but still recorded for retrieval.
+5. **Episode storage**: Episode is stored with low-ESS metadata — low quality but still recorded for retrieval and traceability.
 
 6. **Topic tracking**: If `topics` is empty, no topic updates. Otherwise `_update_topics` runs.
 
