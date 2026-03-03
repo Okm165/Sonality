@@ -65,15 +65,16 @@ FIDELITY_SCENARIOS = [
 pytestmark = [
     pytest.mark.bench,
     pytest.mark.live,
-    pytest.mark.skipif(not config.API_KEY, reason="SONALITY_API_KEY not set"),
+    pytest.mark.skipif(not config.API_KEY, reason="No provider API key configured"),
 ]
 
 
 class TestFidelityLive:
     def test_persona_fidelity_across_scenarios(self) -> None:
+        """Test that persona fidelity across scenarios."""
         from anthropic import Anthropic
 
-        client = Anthropic(api_key=config.API_KEY)
+        client = Anthropic(**config.anthropic_client_kwargs())
         all_scores: list[float] = []
 
         print(f"\n{'=' * 70}")
@@ -109,6 +110,7 @@ class TestFidelityLive:
 
 
 def _generate_response(client, persona: str, question: str) -> str:
+    """Test helper for generate response."""
     from sonality.prompts import build_system_prompt
 
     system = build_system_prompt(persona, [])
@@ -122,6 +124,7 @@ def _generate_response(client, persona: str, question: str) -> str:
 
 
 def _judge_alignment(client, persona: str, question: str, response: str) -> float:
+    """Test helper for judge alignment."""
     import json
 
     prompt = JUDGE_PROMPT.format(persona=persona, question=question, response=response)

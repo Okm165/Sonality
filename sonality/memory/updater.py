@@ -6,7 +6,8 @@ from typing import Final
 from anthropic import Anthropic
 
 from .. import config
-from ..ess import ESSResult, ReasoningType, SourceReliability
+from ..ess import REASONING_QUALITY_WEIGHTS, SOURCE_RELIABILITY_WEIGHTS, ESSResult
+from ..openrouter import chat_completion
 from ..prompts import INSIGHT_PROMPT
 from .sponge import SpongeState
 
@@ -14,26 +15,10 @@ log = logging.getLogger(__name__)
 
 SNAPSHOT_CHAR_LIMIT: Final = config.SPONGE_MAX_TOKENS * 5
 MIN_SNAPSHOT_RETENTION: Final = 0.6
-REASONING_WEIGHTS: Final = {
-    ReasoningType.EMPIRICAL_DATA: 1.00,
-    ReasoningType.LOGICAL_ARGUMENT: 1.00,
-    ReasoningType.EXPERT_OPINION: 1.00,
-    ReasoningType.ANECDOTAL: 0.85,
-    ReasoningType.SOCIAL_PRESSURE: 0.65,
-    ReasoningType.EMOTIONAL_APPEAL: 0.65,
-    ReasoningType.NO_ARGUMENT: 0.60,
-}
-RELIABILITY_WEIGHTS: Final = {
-    SourceReliability.PEER_REVIEWED: 1.00,
-    SourceReliability.ESTABLISHED_EXPERT: 1.00,
-    SourceReliability.INFORMED_OPINION: 1.00,
-    SourceReliability.CASUAL_OBSERVATION: 0.85,
-    SourceReliability.UNVERIFIED_CLAIM: 0.70,
-    SourceReliability.NOT_APPLICABLE: 0.70,
-}
 
 
 def _extract_text_block(response: object) -> str:
+    """Extract first text block from an Anthropic response payload."""
     content = getattr(response, "content", None)
     if not isinstance(content, list):
         return ""
@@ -61,8 +46,8 @@ def compute_magnitude(ess: ESSResult, sponge: SpongeState) -> float:
     dampening = 0.5 if sponge.interaction_count < config.BOOTSTRAP_DAMPENING_UNTIL else 1.0
     novelty = max(ess.novelty, 0.1)
     quality = (
-        REASONING_WEIGHTS.get(ess.reasoning_type, 0.8)
-        + RELIABILITY_WEIGHTS.get(ess.source_reliability, 0.8)
+        REASONING_QUALITY_WEIGHTS.get(ess.reasoning_type, 0.8)
+        + SOURCE_RELIABILITY_WEIGHTS.get(ess.source_reliability, 0.8)
     ) / 2.0
     if not ess.internal_consistency:
         quality *= 0.75
@@ -104,10 +89,11 @@ def validate_snapshot(old: str, new: str) -> bool:
 
 
 def extract_insight(
-    client: Anthropic,
+    client: Anthropic | None,
     ess: ESSResult,
     user_message: str,
     agent_response: str,
+    model: str = config.ESS_MODEL,
 ) -> str | None:
     """Extract a personality-relevant insight from an interaction.
 
@@ -116,21 +102,26 @@ def extract_insight(
     full rewrites. (ABBEL 2025: belief bottleneck; Park et al. 2023: reflection
     is the critical mechanism for believable agents)
     """
-    response = client.messages.create(
-        model=config.ESS_MODEL,
-        max_tokens=100,
-        messages=[
-            {
-                "role": "user",
-                "content": INSIGHT_PROMPT.format(
-                    user_message=user_message[:300],
-                    agent_response=agent_response[:300],
-                    ess_score=f"{ess.score:.2f}",
-                ),
-            }
-        ],
+    prompt = INSIGHT_PROMPT.format(
+        user_message=user_message[:300],
+        agent_response=agent_response[:300],
+        ess_score=f"{ess.score:.2f}",
     )
-    text = _extract_text_block(response).strip()
+    if client is None:
+        completion = chat_completion(
+            model=model,
+            max_tokens=100,
+            temperature=0.0,
+            messages=({"role": "user", "content": prompt},),
+        )
+        text = completion.text.strip()
+    else:
+        response = client.messages.create(
+            model=model,
+            max_tokens=100,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        text = _extract_text_block(response).strip()
     if not text or text.upper() == "NONE":
         log.info("No personality insight extracted")
         return None

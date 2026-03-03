@@ -23,7 +23,7 @@ response = agent.respond("Your message here")
 
 | Attribute | Type | Description |
 |-----------|------|-------------|
-| `client` | `ProviderClient` | LLM provider client |
+| `client` | `Anthropic` | LLM API client |
 | `sponge` | `SpongeState` | Current personality state |
 | `episodes` | `EpisodeStore` | ChromaDB episode storage |
 | `conversation` | `list[dict[str, str]]` | Current session conversation history |
@@ -52,7 +52,7 @@ Post-processing pipeline after each response:
 3. `_store_episode()` — store in ChromaDB
 4. Increment `sponge.interaction_count`
 5. `_update_topics()`, `_update_opinions()` — opinion vectors
-6. `track_disagreement()` — structural disagreement detection
+6. `note_disagreement()` / `note_agreement()` — structural disagreement signal update
 7. `_extract_insight()` — one-sentence insight if ESS ≥ threshold
 8. `_maybe_reflect()` — periodic or event-driven reflection
 9. `sponge.save()` — persist state
@@ -79,6 +79,8 @@ Style: {tone}
 Top topics: {topic}({count}), ...
 Strongest opinions: {topic}={pos:+.2f} c={conf:.1f}, ...
 Disagreement rate: {rate:.0%}
+Recent evolution: {description...}
+Staged beliefs: {topic...}
 ```
 
 Top 5 topics by engagement; top 5 opinions by `abs(value)`.
@@ -148,9 +150,10 @@ Frozen dataclass containing the classification output:
 
 ```python
 def classify(
-    client: ProviderClient,
+    client: Anthropic,
     user_message: str,
     sponge_snapshot: str,
+    model: str = config.ESS_MODEL,
 ) -> ESSResult
 ```
 
@@ -265,7 +268,7 @@ def decay_beliefs(
 ) -> list[str]
 ```
 
-Power-law decay for unreinforced beliefs. Retention: `R(t) = (1 + gap)^(-β)`. Reinforcement floor: `min(0.6, evidence_count × 0.06)`. Skips `gap < 5`. Returns dropped topic names.
+Power-law decay for unreinforced beliefs. Retention: `R(t) = (1 + gap)^(-β)`. Reinforcement floor: `min(0.6, max(0.0, (evidence_count - 1) × 0.04))`. Skips `gap < 5`. Returns dropped topic names.
 
 #### `record_shift(description: str, magnitude: float) -> None`
 
@@ -275,9 +278,13 @@ Append `Shift` to `recent_shifts`; trim to `MAX_RECENT_SHIFTS` (10).
 
 Increment `behavioral_signature.topic_engagement[topic]`.
 
-#### `track_disagreement(disagreed: bool) -> None`
+#### `note_disagreement() -> None`
 
-Update `behavioral_signature.disagreement_rate` via cumulative running mean.
+Record a disagreement event (`1.0`) in the cumulative running mean.
+
+#### `note_agreement() -> None`
+
+Record a non-disagreement event (`0.0`) in the cumulative running mean.
 
 #### `save(path: Path, history_dir: Path) -> None`
 
@@ -299,24 +306,25 @@ ChromaDB-backed episodic memory with ESS-weighted retrieval.
 
 Initialize ChromaDB `PersistentClient` with collection `"episodes"`, `hnsw:space="cosine"`.
 
-#### `store(user_message, agent_response, ess_score, topics, summary, interaction_count=0, memory_type="episodic") -> None`
+#### `store(user_message, agent_response, ess, interaction_count=0, memory_type=MemoryType.EPISODIC, admission_policy=AdmissionPolicy.UNSPECIFIED, provenance_quality=ProvenanceQuality.UNKNOWN) -> None`
 
 ```python
 def store(
     self,
     user_message: str,
     agent_response: str,
-    ess_score: float,
-    topics: Sequence[str],
-    summary: str,
+    ess: ESSResult,
+    *,
     interaction_count: int = 0,
-    memory_type: str = "episodic",
+    memory_type: MemoryType = MemoryType.EPISODIC,
+    admission_policy: AdmissionPolicy = AdmissionPolicy.UNSPECIFIED,
+    provenance_quality: ProvenanceQuality = ProvenanceQuality.UNKNOWN,
 ) -> None
 ```
 
-Store episode. Document = `summary` or `user_message[:200]`. Metadata: `ess_score`, `topics` (comma-joined), `summary`, `user_message[:500]`, `agent_response[:500]`, `timestamp`, `interaction`.
+Store episode. Document = `ess.summary` or `user_message[:200]`. Metadata includes ESS fields (`score`, `topics`, `reasoning_type`, `source_reliability`, `internal_consistency`) plus typed memory/admission/provenance annotations for retrieval quality gates.
 
-#### `retrieve(query, n_results=5, min_relevance=0.3, where=None) -> list[str]`
+#### `retrieve(query, n_results=5, min_relevance=0.3, cross_domain_guard=CrossDomainGuardMode.ENFORCE, where=EMPTY_WHERE) -> list[str]`
 
 ```python
 def retrieve(
@@ -324,13 +332,14 @@ def retrieve(
     query: str,
     n_results: int = 5,
     min_relevance: float = 0.3,
-    where: dict[str, Any] | None = None,
+    cross_domain_guard: CrossDomainGuardMode = CrossDomainGuardMode.ENFORCE,
+    where: Mapping[str, Any] = EMPTY_WHERE,
 ) -> list[str]
 ```
 
-Retrieve by cosine similarity. Rerank by `similarity × (1 + ess_score)` to prefer high-quality memories. Returns list of summary strings. Supports metadata filtering via `where` (e.g. `{"interaction": {"$gte": N}}`).
+Retrieve by cosine similarity. Rerank by similarity, ESS score, metadata-quality multipliers, and relational topic bonus; low-similarity cross-domain leakage is filtered by a lexical overlap guard. Returns list of summary strings. Supports metadata filtering via `where` (e.g. `{"interaction": {"$gte": N}}`).
 
-#### `retrieve_typed(query, episodic_n=3, semantic_n=2, min_relevance=0.3) -> list[str]`
+#### `retrieve_typed(query, episodic_n=3, semantic_n=2, min_relevance=0.3, cross_domain_guard=CrossDomainGuardMode.ENFORCE) -> list[str]`
 
 Two-pass typed retrieval:
 
@@ -352,9 +361,10 @@ def compute_magnitude(ess: ESSResult, sponge: SpongeState) -> float
 
 Formula:
 
-$$\text{magnitude} = \text{OPINION\_BASE\_RATE} \times \text{score} \times \max(\text{novelty}, 0.1) \times \text{dampening}$$
+$$\text{magnitude} = \text{OPINION\_BASE\_RATE} \times \text{score} \times \max(\text{novelty}, 0.1) \times \text{dampening} \times \text{quality}$$
 
-Dampening: 0.5 if `sponge.interaction_count < BOOTSTRAP_DAMPENING_UNTIL`, else 1.0.
+Dampening: 0.5 if `sponge.interaction_count < BOOTSTRAP_DAMPENING_UNTIL`, else 1.0.  
+Quality: average of reasoning/source weights, with a consistency penalty when `internal_consistency` is false.
 
 ### `validate_snapshot(old: str, new: str) -> bool`
 
@@ -367,10 +377,11 @@ Rejects if:
 
 ```python
 def extract_insight(
-    client: ProviderClient,
+    client: Anthropic,
     ess: ESSResult,
     user_message: str,
     agent_response: str,
+    model: str,
 ) -> str | None
 ```
 
@@ -444,6 +455,8 @@ Environment-based configuration. Loads from `.env` via `dotenv`.
 | Constant | Env Var | Default |
 |----------|---------|---------|
 | `API_KEY` | `SONALITY_API_KEY` | *(required)* |
+| `API_VARIANT` | `SONALITY_API_VARIANT` | `anthropic` |
+| `BASE_URL` | — (derived from `API_VARIANT`) | `https://api.anthropic.com` |
 | `MODEL` | `SONALITY_MODEL` | *(see .env.example)* |
 | `ESS_MODEL` | `SONALITY_ESS_MODEL` | Same as `MODEL` |
 
@@ -454,13 +467,50 @@ Environment-based configuration. Loads from `.env` via `dotenv`.
 | `LOG_LEVEL` | `SONALITY_LOG_LEVEL` | `INFO` | Python logging level |
 | `ESS_THRESHOLD` | `SONALITY_ESS_THRESHOLD` | 0.3 | Min ESS for updates |
 | `SPONGE_MAX_TOKENS` | — | 500 | Snapshot token target |
-| `EPISODE_RETRIEVAL_COUNT` | — | 5 | Episodes per retrieval |
 | `OPINION_BASE_RATE` | — | 0.1 | Base step for opinion updates |
 | `BELIEF_DECAY_RATE` | — | 0.15 | Power-law decay exponent β |
 | `BOOTSTRAP_DAMPENING_UNTIL` | `SONALITY_BOOTSTRAP_DAMPENING_UNTIL` | 10 | Interactions with 0.5× dampening |
 | `OPINION_COOLING_PERIOD` | `SONALITY_OPINION_COOLING_PERIOD` | 3 | Staging delay before belief commits |
 | `SEMANTIC_RETRIEVAL_COUNT` | `SONALITY_SEMANTIC_RETRIEVAL_COUNT` | 2 | Semantic memory retrieval budget |
 | `EPISODIC_RETRIEVAL_COUNT` | `SONALITY_EPISODIC_RETRIEVAL_COUNT` | 3 | Episodic memory retrieval budget |
+| `SEMANTIC_RETRIEVAL_COUNT + EPISODIC_RETRIEVAL_COUNT` | — | 5 | Combined retrieval budget per interaction |
 | `MAX_CONVERSATION_CHARS` | — | 100,000 | Conversation truncation limit |
 | `REFLECTION_EVERY` | `SONALITY_REFLECTION_EVERY` | 20 | Periodic reflection interval |
 | `REFLECTION_SHIFT_THRESHOLD` | — | 0.1 | Cumulative magnitude for early reflection |
+
+---
+
+## `benches.scenario_runner`
+
+Deterministic scenario execution wrapper used by benchmark packs.
+
+### `StepResult`
+
+Canonical per-step result schema used across benchmark reporting. Centralizing this structure keeps all downstream traces (`risk`, `probe`, `health`, `cost`) consistent and avoids duplicated parsing logic.
+
+### `run_scenario(scenario, data_dir, session_split_at=NO_SESSION_SPLIT)`
+
+Executes one scenario step-by-step against a fresh agent state, with optional session restart at a validated split index. This function exists to make pack definitions declarative while preserving reproducible run semantics.
+
+---
+
+## `benches.teaching_harness`
+
+Full benchmark orchestrator for multi-pack reliability and anti-sycophancy evaluation.
+
+### Core Types
+
+- `PackDefinition`: immutable benchmark contract (threat model, threshold, scenario, provenance metadata).
+- `ContractPackSpec`: normalized seed/attack/reexposure/strong/probe contract for packs that share the same invariants.
+- `MetricGate` / `MetricOutcome`: evaluation gates and confidence-aware outcomes used in stop-rule and release decisions.
+
+### Key Entry Point
+
+`run_teaching_benchmark(profile, output_root)` runs all configured packs, records traces, computes interval-aware metric outcomes, applies budget and stop rules, and writes machine-readable artifacts (`run_manifest.json`, `run_summary.json`, trace JSONL files).
+
+### Internal Structure (Why It Exists)
+
+- `_extend_pack_risk_rows(...)`: single place that applies all risk detectors for each pack replicate.
+- `_append_optional_probe_row(...)`: reusable helper for pack-specific probe-row builders that may or may not emit a row.
+- `_hard_failures(...)`: deterministic hard-blocker contract checks that fail a pack regardless of aggregate pass-rate.
+- `_health_summary_report(...)`: aggregates health trace rows into per-pack and global diagnostics for dashboard and CI consumption.

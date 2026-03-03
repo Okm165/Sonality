@@ -26,7 +26,7 @@ Sonality takes a different approach: **personality as external, evolving state**
 
 [^2]: Park et al. (2023) — ablation showed reflection is the most critical component for believable agents.
 
-**Anti-sycophancy by design.** LLMs are architecturally predisposed to agree with users (58% sycophancy rate baseline). Sonality counteracts this through seven defensive layers: immutable core identity, ESS decoupled from the agent's own response, third-person evaluation framing, Bayesian belief resistance, bootstrap dampening, anti-sycophancy memory framing, and structural disagreement detection.
+**Anti-sycophancy by design.** LLMs are architecturally predisposed to agree with users (58% sycophancy rate baseline). Sonality counteracts this through eight defensive layers: immutable core identity, ESS decoupled from the agent's own response, third-person evaluation framing, Bayesian belief resistance, bootstrap dampening, cooling-period commit, anti-sycophancy memory framing, and structural disagreement detection.
 
 ## Architecture at a Glance
 
@@ -74,11 +74,25 @@ After reviewing 200+ papers and frameworks, several aspects of Sonality's design
 
 ---
 
+## Documentation Scope
+
+This documentation set is intentionally product-facing:
+
+- explain system structure, runtime behavior, and design decisions;
+- provide operator/tutorial guidance;
+- document configuration, APIs, and evaluation policy.
+
+Development-history logs (for example refactor diaries or pass-by-pass change
+notes) are intentionally excluded from `docs/`.
+
+---
+
 ## Quick Navigation
 
 | Section | What You'll Learn |
 |---|---|
 | [Getting Started](getting-started.md) | Installation, configuration, first run |
+| [Project Structure](project-structure.md) | Repository layout, module ownership, and placement rules |
 | [Usage and Teaching Plan](usage-and-teaching-plan.md) | Step-by-step operational plan to use, shape, and monitor the agent |
 | [Architecture](architecture/overview.md) | System design, memory model, data flow |
 | [Research Upgrade Plan](architecture/research-upgrade-plan.md) | Prioritized architecture decisions mapped to latest findings |
