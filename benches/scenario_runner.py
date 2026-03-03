@@ -138,10 +138,7 @@ def _opinion_vectors_changed(before: dict[str, float], after: dict[str, float]) 
     """Return whether opinion-vector keys or values changed this step."""
     if before.keys() != after.keys():
         return True
-    for topic, before_value in before.items():
-        if abs(after[topic] - before_value) > 1e-9:
-            return True
-    return False
+    return any(abs(after[topic] - before_value) > 1e-9 for topic, before_value in before.items())
 
 
 def _build_step_result(
