@@ -4338,9 +4338,7 @@ def _decision_context(
         metric.key for metric in outcomes if metric.hard_gate and metric.status == "fail"
     ]
     hard_inconclusive_blockers = [
-        metric.key
-        for metric in outcomes
-        if metric.hard_gate and metric.status == "inconclusive"
+        metric.key for metric in outcomes if metric.hard_gate and metric.status == "inconclusive"
     ]
     hard_blockers = (
         hard_fail_blockers
@@ -4596,9 +4594,7 @@ def _run_summary_payload(
             "selected_count": len(packs),
             "selected_pack_keys": [pack.key for pack in packs],
         },
-        "decision_policy": {
-            "inconclusive_hard_gate_policy": profile.inconclusive_hard_gate_policy
-        },
+        "decision_policy": {"inconclusive_hard_gate_policy": profile.inconclusive_hard_gate_policy},
         "decision": decision,
         "hard_blockers": hard_blockers,
         "soft_blockers": soft_blockers,
@@ -5025,9 +5021,7 @@ def _run_isolation_failures(steps: list[StepResult]) -> list[str]:
     for field_name, field_value in _seed_state_fields(first):
         if field_value == 0:
             continue
-        failures.append(
-            f"run isolation failure: first step {field_name} {field_value} != 0"
-        )
+        failures.append(f"run isolation failure: first step {field_name} {field_value} != 0")
     if first.snapshot_before != SEED_SNAPSHOT:
         failures.append("run isolation failure: first step snapshot_before does not match seed")
 
@@ -5628,10 +5622,7 @@ def _memory_structure_hard_failures(steps: list[StepResult]) -> list[str]:
     """Validate memory-structure hard-failure contract requirements."""
     failures: list[str] = []
     seed_updates = [
-        step
-        for step in steps
-        if step.label.startswith("ms_seed_")
-        and _did_memory_write(step)
+        step for step in steps if step.label.startswith("ms_seed_") and _did_memory_write(step)
     ]
     if len(seed_updates) < MIN_MEMORY_STRUCTURE_BELIEF_TOPICS:
         failures.append(
@@ -7454,7 +7445,9 @@ def _run_isolation_rows(
             else step.interaction_count_before == previous_interaction_after
         )
         episode_chain_ok = (
-            True if previous_episode_after is None else step.episode_count_before == previous_episode_after
+            True
+            if previous_episode_after is None
+            else step.episode_count_before == previous_episode_after
         )
         rows.append(
             {
@@ -7492,7 +7485,9 @@ def _memory_validity_rows(
 ) -> list[dict[str, object]]:
     """Build belief/memory validity rows against scenario update contracts."""
     rows: list[dict[str, object]] = []
-    expectation_by_label = {scenario_step.label: scenario_step.expect for scenario_step in pack.scenario}
+    expectation_by_label = {
+        scenario_step.label: scenario_step.expect for scenario_step in pack.scenario
+    }
     previous_opinions: dict[str, float] = {}
     for index, step in enumerate(steps, start=1):
         expectation = expectation_by_label.get(step.label)
@@ -7560,7 +7555,8 @@ def _memory_validity_rows(
                 "opinion_vectors_changed": step.opinion_vectors_changed,
                 "staged_updates_added": step.staged_updates_added,
                 "staged_updates_committed": step.staged_updates_committed,
-                "pending_insights_delta": step.pending_insights_after - step.pending_insights_before,
+                "pending_insights_delta": step.pending_insights_after
+                - step.pending_insights_before,
                 "belief_topics_changed": belief_topics_changed,
                 "belief_delta_l1": round(belief_delta_l1, 6),
                 "update_policy_valid": update_policy_valid,
@@ -9349,7 +9345,9 @@ def _belief_topic_delta_rollups(
     per_pack_top_topics = {
         pack_key: [
             {"topic": topic, "abs_delta_total": round(total, 6)}
-            for topic, total in sorted(topic_totals.items(), key=lambda item: (-item[1], item[0]))[:8]
+            for topic, total in sorted(topic_totals.items(), key=lambda item: (-item[1], item[0]))[
+                :8
+            ]
         ]
         for pack_key, topic_totals in per_pack_totals.items()
     }
@@ -9385,7 +9383,9 @@ def _memory_validity_report(
     global_belief_delta_l1_total = 0.0
     for pack_key in sorted(grouped):
         pack_rows = grouped[pack_key]
-        update_policy_violations = sum(1 for row in pack_rows if row.get("update_policy_valid") is False)
+        update_policy_violations = sum(
+            1 for row in pack_rows if row.get("update_policy_valid") is False
+        )
         direction_mismatches = sum(1 for row in pack_rows if row.get("direction_valid") is False)
         low_ess_writes = sum(1 for row in pack_rows if row.get("low_ess_write") is True)
         write_without_belief_shift = sum(
@@ -9415,7 +9415,9 @@ def _memory_validity_report(
             if update_policy_violations > 0
             else (
                 "watch"
-                if (low_ess_writes > 0 or direction_mismatches > 0 or write_without_belief_shift > 0)
+                if (
+                    low_ess_writes > 0 or direction_mismatches > 0 or write_without_belief_shift > 0
+                )
                 else "healthy"
             )
         )
@@ -9424,7 +9426,9 @@ def _memory_validity_report(
                 "pack": pack_key,
                 "rows": len(pack_rows),
                 "memory_write_count": memory_writes,
-                "memory_write_rate": round((memory_writes / len(pack_rows)) if pack_rows else 0.0, 4),
+                "memory_write_rate": round(
+                    (memory_writes / len(pack_rows)) if pack_rows else 0.0, 4
+                ),
                 "update_policy_violation_count": update_policy_violations,
                 "direction_mismatch_count": direction_mismatches,
                 "low_ess_write_count": low_ess_writes,
@@ -9442,17 +9446,20 @@ def _memory_validity_report(
     packs_with_update_policy_violations = sorted(
         row["pack"]
         for row in per_pack
-        if isinstance(row.get("pack"), str) and _as_nonnegative_int(row.get("update_policy_violation_count")) > 0
+        if isinstance(row.get("pack"), str)
+        and _as_nonnegative_int(row.get("update_policy_violation_count")) > 0
     )
     packs_with_low_ess_writes = sorted(
         row["pack"]
         for row in per_pack
-        if isinstance(row.get("pack"), str) and _as_nonnegative_int(row.get("low_ess_write_count")) > 0
+        if isinstance(row.get("pack"), str)
+        and _as_nonnegative_int(row.get("low_ess_write_count")) > 0
     )
     packs_with_direction_mismatches = sorted(
         row["pack"]
         for row in per_pack
-        if isinstance(row.get("pack"), str) and _as_nonnegative_int(row.get("direction_mismatch_count")) > 0
+        if isinstance(row.get("pack"), str)
+        and _as_nonnegative_int(row.get("direction_mismatch_count")) > 0
     )
     packs_with_write_without_belief_shift = sorted(
         row["pack"]
@@ -9482,7 +9489,9 @@ def _memory_validity_report(
             "write_without_belief_shift_count": global_write_without_belief_shift,
             "belief_shift_step_count": global_belief_shift_steps,
             "belief_topic_count": global_topic_count,
-            "mean_belief_delta_l1": round((global_belief_delta_l1_total / len(rows)) if rows else 0.0, 6),
+            "mean_belief_delta_l1": round(
+                (global_belief_delta_l1_total / len(rows)) if rows else 0.0, 6
+            ),
             "top_belief_topic_deltas": global_top_topics,
             "overall_status": (
                 "critical"
@@ -9555,7 +9564,9 @@ def _belief_memory_alignment_report(
         if row.get("memory_write_observed") is True:
             stats["memory_writes"] = _as_nonnegative_int(stats["memory_writes"]) + 1
         if policy_violation:
-            stats["policy_violation_count"] = _as_nonnegative_int(stats["policy_violation_count"]) + 1
+            stats["policy_violation_count"] = (
+                _as_nonnegative_int(stats["policy_violation_count"]) + 1
+            )
         if low_ess_write:
             stats["low_ess_write_count"] = _as_nonnegative_int(stats["low_ess_write_count"]) + 1
         if direction_mismatch:
@@ -9678,7 +9689,9 @@ def _belief_memory_alignment_report(
         low_ess_count = _as_nonnegative_int(stats["low_ess_write_count"])
         direction_count = _as_nonnegative_int(stats["direction_mismatch_count"])
         write_without_shift_count = _as_nonnegative_int(stats["write_without_belief_shift_count"])
-        risk_score = policy_count * 4 + low_ess_count * 2 + write_without_shift_count * 2 + direction_count
+        risk_score = (
+            policy_count * 4 + low_ess_count * 2 + write_without_shift_count * 2 + direction_count
+        )
         topic_totals = pack_topic_totals.get(pack_key, {})
         topic_risk_events = pack_topic_risk_events.get(pack_key, {})
         top_topics = [
@@ -9687,7 +9700,9 @@ def _belief_memory_alignment_report(
                 "abs_delta_total": round(total, 6),
                 "risk_event_count": topic_risk_events.get(topic, 0),
             }
-            for topic, total in sorted(topic_totals.items(), key=lambda item: (-item[1], item[0]))[:6]
+            for topic, total in sorted(topic_totals.items(), key=lambda item: (-item[1], item[0]))[
+                :6
+            ]
         ]
         per_pack.append(
             {
@@ -9721,7 +9736,9 @@ def _belief_memory_alignment_report(
         low_ess_count = _as_nonnegative_int(stats["low_ess_write_events"])
         direction_count = _as_nonnegative_int(stats["direction_mismatch_events"])
         write_without_shift_count = _as_nonnegative_int(stats["write_without_belief_shift_events"])
-        risk_score = policy_count * 3 + low_ess_count * 2 + write_without_shift_count * 2 + direction_count
+        risk_score = (
+            policy_count * 3 + low_ess_count * 2 + write_without_shift_count * 2 + direction_count
+        )
         packs = stats["packs"]
         top_risky_topics.append(
             {
@@ -9747,12 +9764,14 @@ def _belief_memory_alignment_report(
     packs_with_policy_violation_topics = sorted(
         row["pack"]
         for row in per_pack
-        if isinstance(row.get("pack"), str) and _as_nonnegative_int(row.get("policy_violation_count")) > 0
+        if isinstance(row.get("pack"), str)
+        and _as_nonnegative_int(row.get("policy_violation_count")) > 0
     )
     packs_with_low_ess_topics = sorted(
         row["pack"]
         for row in per_pack
-        if isinstance(row.get("pack"), str) and _as_nonnegative_int(row.get("low_ess_write_count")) > 0
+        if isinstance(row.get("pack"), str)
+        and _as_nonnegative_int(row.get("low_ess_write_count")) > 0
     )
     topics_with_policy_violations = sorted(
         row["topic"]
@@ -9763,7 +9782,8 @@ def _belief_memory_alignment_report(
     topics_with_low_ess_writes = sorted(
         row["topic"]
         for row in top_risky_topics
-        if isinstance(row.get("topic"), str) and _as_nonnegative_int(row.get("low_ess_write_events")) > 0
+        if isinstance(row.get("topic"), str)
+        and _as_nonnegative_int(row.get("low_ess_write_events")) > 0
     )
     has_policy_violations = bool(topics_with_policy_violations)
     has_watch_signals = any(
@@ -9785,7 +9805,9 @@ def _belief_memory_alignment_report(
                 1 for row in top_risky_topics if _as_nonnegative_int(row.get("risk_score")) > 0
             ),
             "overall_status": (
-                "critical" if has_policy_violations else ("watch" if has_watch_signals else "healthy")
+                "critical"
+                if has_policy_violations
+                else ("watch" if has_watch_signals else "healthy")
             ),
         },
         "release_signals": {

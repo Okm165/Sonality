@@ -197,7 +197,7 @@ class SonalityAgent:
         self.client = (
             None
             if config.API_VARIANT == "openrouter"
-            else Anthropic(**config.anthropic_client_kwargs())
+            else Anthropic(api_key=config.API_KEY, base_url=config.BASE_URL)
         )
         self.sponge = SpongeState.load(config.SPONGE_FILE)
         self.episodes = EpisodeStore(str(config.CHROMADB_DIR))
@@ -492,7 +492,10 @@ class SonalityAgent:
         """
         if ess.default_severity in {"missing", "exception"}:
             return False
-        if ess.default_severity == "coercion" and ess.score < config.ESS_THRESHOLD + COERCION_UPDATE_MARGIN:
+        if (
+            ess.default_severity == "coercion"
+            and ess.score < config.ESS_THRESHOLD + COERCION_UPDATE_MARGIN
+        ):
             return False
         return not any(field in CRITICAL_ESS_DEFAULT_FIELDS for field in ess.defaulted_fields)
 

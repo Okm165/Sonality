@@ -85,12 +85,13 @@ ESS_AUDIT_LOG_FILE: Final = DATA_DIR / "ess_log.jsonl"
 API_KEY: Final = os.environ.get("SONALITY_API_KEY")
 _api_variant_raw = _env_str("SONALITY_API_VARIANT", "").strip().lower()
 if not _api_variant_raw:
-    API_VARIANT: Final[ApiVariant] = "anthropic"
+    _api_variant: ApiVariant = "anthropic"
 elif (resolved_api_variant := _API_VARIANTS.get(_api_variant_raw)) is not None:
-    API_VARIANT = resolved_api_variant
+    _api_variant = resolved_api_variant
 else:
     expected = ", ".join(sorted(_API_VARIANTS))
     raise ValueError(f"SONALITY_API_VARIANT must be one of: {expected}")
+API_VARIANT: Final[ApiVariant] = _api_variant
 BASE_URL: Final = API_BASE_URL_BY_VARIANT[API_VARIANT]
 _raw_model = _env_str("SONALITY_MODEL", DEFAULT_MODEL_BY_VARIANT[API_VARIANT])
 _raw_ess_model = _env_str("SONALITY_ESS_MODEL", DEFAULT_ESS_MODEL_BY_VARIANT[API_VARIANT])
