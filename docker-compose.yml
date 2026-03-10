@@ -7,3 +7,47 @@ services:
       - .env
     volumes:
       - ./data:/app/data
+    depends_on:
+      neo4j:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+  neo4j:
+    image: neo4j:latest
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    volumes:
+      - neo4j_data:/data
+    environment:
+      - NEO4J_AUTH=neo4j/sonality_password
+      - NEO4J_PLUGINS=["apoc"]
+    healthcheck:
+      test: ["CMD-SHELL", "cypher-shell -u neo4j -p sonality_password 'RETURN 1' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init_postgres.sql:/docker-entrypoint-initdb.d/init.sql
+    environment:
+      - POSTGRES_DB=sonality
+      - POSTGRES_USER=sonality
+      - POSTGRES_PASSWORD=sonality_password
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sonality -d sonality"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  neo4j_data:
+  postgres_data:

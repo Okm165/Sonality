@@ -37,6 +37,10 @@ class BeliefMeta(BaseModel):
     resist change. (Bayesian belief updating — Oravecz et al. 2016; ABBEL 2025)
     recent_updates tracks signed magnitudes for Martingale entrenchment detection
     (NeurIPS 2025, arXiv:2512.02914).
+
+    Episode provenance fields (A-MEM Zettelkasten model) link beliefs to their
+    supporting/contradicting episodes for traceability. All new fields have
+    defaults so existing sponge.json files load without error.
     """
 
     confidence: float = 0.0
@@ -44,6 +48,13 @@ class BeliefMeta(BaseModel):
     last_reinforced: int = 0
     provenance: str = ""
     recent_updates: list[float] = Field(default_factory=list)
+
+    # Episode provenance (backward-compatible defaults)
+    supporting_episode_uids: list[str] = Field(default_factory=list)
+    contradicting_episode_uids: list[str] = Field(default_factory=list)
+    formed_at: int = 0
+    last_challenged_at: int | None = None
+    uncertainty: float = 1.0  # High initially, decreases with consistent evidence
 
 
 class BehavioralSignature(BaseModel):
