@@ -138,6 +138,56 @@ MAX_CONVERSATION_CHARS: Final = 100_000
 REFLECTION_EVERY: Final = _env_int("SONALITY_REFLECTION_EVERY", 20)
 REFLECTION_SHIFT_THRESHOLD: Final = 0.1  # cumulative magnitude to trigger early reflection
 
+# --- Database (Neo4j + PostgreSQL) ---
+NEO4J_URL: Final = _env_str("SONALITY_NEO4J_URL", "bolt://localhost:7687")
+NEO4J_USER: Final = _env_str("SONALITY_NEO4J_USER", "neo4j")
+NEO4J_PASSWORD: Final = _env_str("SONALITY_NEO4J_PASSWORD", "sonality_password")
+NEO4J_DATABASE: Final = _env_str("SONALITY_NEO4J_DATABASE", "neo4j")
+
+POSTGRES_URL: Final = _env_str(
+    "SONALITY_POSTGRES_URL",
+    "postgresql://sonality:sonality_password@localhost:5432/sonality",
+)
+PG_POOL_MIN_SIZE: Final = _env_int("SONALITY_PG_POOL_MIN_SIZE", 2)
+PG_POOL_MAX_SIZE: Final = _env_int("SONALITY_PG_POOL_MAX_SIZE", 10)
+
+# --- Embedding ---
+type EmbeddingProvider = Literal["openai", "openrouter"]
+EMBEDDING_PROVIDER: Final[EmbeddingProvider] = _env_str(  # type: ignore[assignment]
+    "SONALITY_EMBEDDING_PROVIDER", "openai"
+)
+EMBEDDING_MODEL: Final = _env_str("SONALITY_EMBEDDING_MODEL", "text-embedding-3-large")
+EMBEDDING_DIMENSIONS: Final = _env_int("SONALITY_EMBEDDING_DIMENSIONS", 4096)
+EMBEDDING_API_KEY: Final = _env_str("SONALITY_EMBEDDING_API_KEY", os.environ.get("OPENAI_API_KEY", ""))
+EMBEDDING_BATCH_SIZE: Final = _env_int("SONALITY_EMBEDDING_BATCH_SIZE", 32)
+EMBEDDING_QUERY_INSTRUCTION: Final = _env_str(
+    "SONALITY_EMBEDDING_QUERY_INSTRUCTION",
+    "Represent this memory retrieval query for finding relevant past conversations:",
+)
+EMBEDDING_DOC_INSTRUCTION: Final = _env_str(
+    "SONALITY_EMBEDDING_DOC_INSTRUCTION",
+    "Represent this conversation memory for semantic retrieval:",
+)
+
+# --- LLM for scoring/assessment tasks (fast, cheap model) ---
+FAST_LLM_MODEL: Final = _env_str("SONALITY_FAST_LLM_MODEL", "claude-haiku-4-5-20251001")
+FAST_LLM_MAX_TOKENS: Final = _env_int("SONALITY_FAST_LLM_MAX_TOKENS", 1024)
+
+# --- STM ---
+STM_BUFFER_CAPACITY: Final = _env_int("SONALITY_STM_BUFFER_CAPACITY", 64000)
+STM_BATCH_THRESHOLD: Final = _env_int("SONALITY_STM_BATCH_THRESHOLD", 3)
+STM_MAX_BATCH_SIZE: Final = _env_int("SONALITY_STM_MAX_BATCH_SIZE", 10)
+STM_POLL_INTERVAL: Final = _env_float("SONALITY_STM_POLL_INTERVAL", 30.0)
+
+# --- Retrieval ---
+RETRIEVAL_MAX_ITERATIONS: Final = _env_int("SONALITY_RETRIEVAL_MAX_ITERATIONS", 3)
+RETRIEVAL_CONFIDENCE_THRESHOLD: Final = _env_float("SONALITY_RETRIEVAL_CONFIDENCE_THRESHOLD", 0.8)
+RETRIEVAL_OVER_FETCH_FACTOR: Final = _env_int("SONALITY_RETRIEVAL_OVER_FETCH_FACTOR", 3)
+MAX_RERANK_CANDIDATES: Final = _env_int("SONALITY_MAX_RERANK_CANDIDATES", 25)
+
+# --- Provenance ---
+MAX_UIDS_PER_BELIEF: Final = _env_int("SONALITY_MAX_UIDS_PER_BELIEF", 20)
+
 
 def anthropic_client_kwargs() -> dict[str, str]:
     """Build Anthropic SDK kwargs from explicit live API config."""

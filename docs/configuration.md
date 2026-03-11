@@ -8,6 +8,8 @@ All configuration is via environment variables (set in `.env`) and compile-time 
 
 Set these in your `.env` file (copy from `.env.example`):
 
+### Core
+
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `SONALITY_API_KEY` | *(required)* | API key for the configured provider endpoint |
@@ -22,11 +24,68 @@ Set these in your `.env` file (copy from `.env.example`):
 | `SONALITY_EPISODIC_RETRIEVAL_COUNT` | `3` | Episodic memories retrieved each turn |
 | `SONALITY_REFLECTION_EVERY` | `20` | Periodic reflection interval (interactions) |
 
+### Database (Neo4j + PostgreSQL)
+
+Required for the new memory architecture. When unavailable, the system falls back to ChromaDB.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SONALITY_NEO4J_URL` | `bolt://localhost:7687` | Neo4j Bolt connection URL |
+| `SONALITY_NEO4J_USER` | `neo4j` | Neo4j username |
+| `SONALITY_NEO4J_PASSWORD` | `sonality_password` | Neo4j password |
+| `SONALITY_NEO4J_DATABASE` | `neo4j` | Neo4j database name |
+| `SONALITY_POSTGRES_URL` | `postgresql://sonality:sonality_password@localhost:5432/sonality` | PostgreSQL connection URL (with pgvector) |
+| `SONALITY_PG_POOL_MIN_SIZE` | `2` | PostgreSQL connection pool minimum size |
+| `SONALITY_PG_POOL_MAX_SIZE` | `10` | PostgreSQL connection pool maximum size |
+
+### Embedding
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SONALITY_EMBEDDING_PROVIDER` | `openai` | Embedding provider (`openai` or `openrouter`) |
+| `SONALITY_EMBEDDING_MODEL` | `text-embedding-3-large` | Embedding model name |
+| `SONALITY_EMBEDDING_DIMENSIONS` | `4096` | Embedding vector dimensions |
+| `SONALITY_EMBEDDING_API_KEY` | `$OPENAI_API_KEY` | API key for embedding provider |
+| `SONALITY_EMBEDDING_BATCH_SIZE` | `32` | Batch size for embedding API calls |
+| `SONALITY_EMBEDDING_QUERY_INSTRUCTION` | *(see config.py)* | Instruction prefix for query embeddings |
+| `SONALITY_EMBEDDING_DOC_INSTRUCTION` | *(see config.py)* | Instruction prefix for document embeddings |
+
+### Fast LLM (Memory Subsystem)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SONALITY_FAST_LLM_MODEL` | `claude-haiku-4-5-20251001` | Fast, cheap model for memory tasks (routing, chunking, forgetting, health) |
+| `SONALITY_FAST_LLM_MAX_TOKENS` | `1024` | Max output tokens for fast LLM calls |
+
+### Short-Term Memory
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SONALITY_STM_BUFFER_CAPACITY` | `64000` | STM buffer character capacity |
+| `SONALITY_STM_BATCH_THRESHOLD` | `3` | Minimum evicted messages before triggering background summarization |
+| `SONALITY_STM_MAX_BATCH_SIZE` | `10` | Maximum messages per summarization batch |
+| `SONALITY_STM_POLL_INTERVAL` | `30.0` | Background summarizer polling interval (seconds) |
+
+### Retrieval
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SONALITY_RETRIEVAL_MAX_ITERATIONS` | `3` | Max iterations for ChainOfQueryAgent refinement |
+| `SONALITY_RETRIEVAL_CONFIDENCE_THRESHOLD` | `0.8` | Confidence threshold to stop iterating in ChainOfQuery |
+| `SONALITY_RETRIEVAL_OVER_FETCH_FACTOR` | `3` | Over-fetch multiplier for initial retrieval before reranking |
+| `SONALITY_MAX_RERANK_CANDIDATES` | `25` | Max candidates for LLM listwise reranking |
+
+### Provenance
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SONALITY_MAX_UIDS_PER_BELIEF` | `20` | Max episode UIDs tracked per belief for provenance |
+
 ---
 
 ## Compile-Time Constants
 
-These are defined in `sonality/config.py` and `sonality/memory/updater.py`. Not configurable via environment.
+These are defined in `sonality/config.py` and `sonality/memory/updater.py`. Not configurable via environment. Note: many constants that were previously compile-time only are now configurable via environment variables (see above).
 
 ### Personality Parameters
 
@@ -165,14 +224,24 @@ Controls how many interactions a belief delta is staged before commit:
 
 ## Data Paths
 
-All runtime data is stored under `data/` (gitignored) by default:
+Local runtime data is stored under `data/` (gitignored). Database state lives in Neo4j and PostgreSQL:
 
 ```
 data/
 ├── sponge.json          # Current personality state
 ├── sponge_history/      # Archived versions (sponge_v0.json, sponge_v1.json, ...)
-├── chromadb/            # Episode vector store (SQLite + embeddings)
+├── chromadb/            # Legacy episode vector store (fallback)
 └── ess_log.jsonl        # Audit trail (ESS events + reflection events)
+
+Neo4j:
+├── EpisodeNode          # Episode graph nodes
+├── DerivativeNode       # Semantic chunk nodes
+└── Edges                # TEMPORAL, THEMATIC, SUPPORTED_BY, CONSOLIDATED_FROM
+
+PostgreSQL:
+├── derivative_embeddings  # pgvector embeddings for derivative chunks
+├── stm_state              # Short-Term Memory buffer + running summary
+└── semantic_features      # Extracted structured features
 ```
 
 ### Reset Commands

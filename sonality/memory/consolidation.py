@@ -1,0 +1,134 @@
+"""LLM-based consolidation engine with three-level hierarchy.
+
+Level 1: Raw episodes (full fidelity)
+Level 2: Segment summaries (consolidated by LLM readiness check)
+Level 3: Topic clusters (cross-segment patterns)
+
+Summaries supplement, not replace, raw episodes (HEMA principle).
+"""
+
+from __future__ import annotations
+
+import logging
+import uuid
+
+from pydantic import BaseModel
+
+from .. import config
+from ..llm.caller import _get_client, _raw_call, llm_call
+from ..llm.prompts import CONSOLIDATION_READINESS_PROMPT
+from .graph import EpisodeNode, MemoryGraph
+
+log = logging.getLogger(__name__)
+
+
+class ConsolidationReadinessResponse(BaseModel):
+    ready_to_consolidate: bool
+    confidence: float = 0.0
+    reasoning: str = ""
+    suggested_summary_focus: str | None = None
+
+
+class ConsolidationEngine:
+    """Three-level hierarchical consolidation with LLM readiness assessment."""
+
+    def __init__(self, graph: MemoryGraph) -> None:
+        self._graph = graph
+
+    async def maybe_consolidate_segment(self, segment_id: str) -> str | None:
+        """Check if a segment is ready for consolidation and summarize if so.
+
+        Returns the summary UID if consolidated, None otherwise.
+        """
+        episodes = await self._graph.get_segment_episodes(segment_id)
+        if len(episodes) < 2:
+            return None
+
+        # LLM readiness check
+        readiness = self._check_readiness(segment_id, episodes)
+        if not readiness.ready_to_consolidate:
+            log.debug(
+                "Segment %s not ready: %s (conf=%.2f)",
+                segment_id, readiness.reasoning, readiness.confidence,
+            )
+            return None
+
+        # Generate summary
+        summary_text = self._generate_summary(episodes, readiness.suggested_summary_focus)
+        if not summary_text:
+            return None
+
+        # Create summary node in graph
+        summary_uid = str(uuid.uuid4())
+        source_uids = [ep.uid for ep in episodes]
+        topics = list({t for ep in episodes for t in ep.topics})
+
+        await self._graph.create_summary(
+            uid=summary_uid,
+            level=2,  # Segment summary
+            content=summary_text,
+            source_uids=source_uids,
+            topics=topics,
+        )
+
+        log.info(
+            "Consolidated segment %s into summary %s (%d episodes -> %d chars)",
+            segment_id, summary_uid[:8], len(episodes), len(summary_text),
+        )
+        return summary_uid
+
+    def _check_readiness(
+        self, segment_id: str, episodes: list[EpisodeNode]
+    ) -> ConsolidationReadinessResponse:
+        """Use LLM to assess if segment is ready for consolidation."""
+        episode_summaries = "\n".join(
+            f"- [{ep.created_at[:10] if ep.created_at else '?'}] {ep.summary or ep.content[:150]}"
+            for ep in episodes
+        )
+        start_time = episodes[0].created_at if episodes else "unknown"
+        end_time = episodes[-1].created_at if episodes else "unknown"
+
+        prompt = CONSOLIDATION_READINESS_PROMPT.format(
+            segment_id=segment_id,
+            episode_count=len(episodes),
+            start_time=start_time,
+            end_time=end_time,
+            episode_summaries=episode_summaries,
+        )
+        result = llm_call(
+            prompt=prompt,
+            response_model=ConsolidationReadinessResponse,
+            fallback=ConsolidationReadinessResponse(ready_to_consolidate=False),
+        )
+        if result.success and result.value:
+            assert isinstance(result.value, ConsolidationReadinessResponse)
+            return result.value
+        return ConsolidationReadinessResponse(ready_to_consolidate=False)
+
+    def _generate_summary(
+        self, episodes: list[EpisodeNode], focus: str | None
+    ) -> str:
+        """Generate a consolidation summary using LLM."""
+        content = "\n\n".join(
+            f"[{ep.created_at[:10] if ep.created_at else '?'}]\n{ep.content[:500]}"
+            for ep in episodes
+        )
+        focus_instruction = f"\n\nFocus on: {focus}" if focus else ""
+
+        prompt = (
+            f"Summarize these conversation episodes into a concise, comprehensive summary.\n"
+            f"Preserve key facts, decisions, opinions, and important context.\n\n"
+            f"Episodes:\n{content}{focus_instruction}\n\n"
+            f"Write the summary:"
+        )
+        try:
+            client = _get_client()
+            return _raw_call(
+                client,
+                prompt=prompt,
+                model=config.FAST_LLM_MODEL,
+                max_tokens=config.FAST_LLM_MAX_TOKENS,
+            ).strip()
+        except Exception:
+            log.exception("Consolidation summary generation failed")
+            return ""
