@@ -6,14 +6,28 @@ This document traces the complete data flow through a single interaction, showin
 
 ```mermaid
 flowchart TD
-    UM([User Message]) --> CA
+    UM([User Message]) --> STM_BUF
+
+    subgraph STM_BUF["0. STM Buffering"]
+        ADD["ShortTermMemory.add_message\nevict oldest if over capacity"]
+        EVICT["Queue evictions for\nbackground LLM summarization"]
+    end
+
+    STM_BUF --> CA
 
     subgraph CA["1. Context Assembly"]
-        RET["EpisodeStore.retrieve_typed\nsemantic(2) + episodic(3)"]
+        ROUTE["QueryRouter.route\nclassify → factual/personal/recent/meta"]
+        SEARCH["Agent search\nChainOfQuery or SplitQuery"]
+        EXPAND["Temporal expansion\nNeo4j graph edges"]
+        RERANK["LLM listwise reranking"]
         TRAITS["_build_structured_traits\ntone, topics, opinions, disagreement rate"]
-        BUILD["build_system_prompt\ncore identity + snapshot + traits + episodes"]
+        BUILD["build_system_prompt\ncore identity + snapshot + STM summary + traits + memories"]
         TRUNC["_truncate_conversation\nkeep under 100k chars"]
     end
+
+    ROUTE --> SEARCH
+    SEARCH --> EXPAND
+    EXPAND --> RERANK
 
     CA --> RG
 
@@ -25,11 +39,17 @@ flowchart TD
     Response --> PP
 
     subgraph PP["3. Post-Processing"]
-        ESS["ESS Classification\nclassify user message only\nscore, topics, direction, novelty"]
-        STORE["Store Episode\nChromaDB with ESS metadata"]
+        BOUNDARY["Event Boundary Detection\nLLM topic/intent segmentation"]
+        DUAL["DualEpisodeStore\nNeo4j graph + pgvector derivatives"]
+        SEMANTIC["SemanticIngestionWorker\nbackground feature extraction"]
+        ESS["ESS Classification\nclassify user message only"]
         TOPIC["Track Topics\nincrement engagement counts"]
         DISAGREE["Detect Disagreement\nposition x direction sign check"]
+        STM_RESP["STM: buffer response\n+ persist to PostgreSQL"]
     end
+
+    BOUNDARY --> DUAL
+    DUAL --> SEMANTIC
 
     PP --> GATE{ESS above 0.3?}
 
@@ -48,46 +68,58 @@ flowchart TD
     RCHECK -->|Not yet| SAVE
 
     subgraph REF["5. Reflection"]
+        CONSOL["ConsolidationEngine\nmerge related episodes"]
+        FORGET["ForgettingEngine\nLLM importance assessment + soft archival"]
         DECAY["Decay Beliefs\npower-law retention"]
         RETRIEVE["Retrieve Recent Episodes\nfiltered by interaction count"]
         CONSOLIDATE["LLM Consolidation\nREFLECTION_PROMPT"]
         VALIDATE["Validate Snapshot\n60 pct retention, 30 char min"]
+        HEALTH["assess_health\nLLM memory health check"]
     end
 
     REF --> SAVE
 
     subgraph SAVE["6. Persistence"]
         JSON["SpongeState.save\narchive previous version"]
+        STM_PERSIST["STM.persist\nPostgreSQL crash recovery"]
         LOG["Append ess_log.jsonl\naudit trail event"]
     end
 ```
 
 ## LLM Calls Per Interaction
 
-Each interaction makes **2–3** LLM API calls:
+Each interaction makes **3–8+** LLM API calls (new architecture) or **2–3** (legacy ChromaDB fallback):
 
 | # | Call | Function | Model | Purpose | Approx. Tokens |
 |---|------|----------|-------|---------|----------------|
-| 1 | Response generation | `client.messages.create` | `config.MODEL` | Main conversational response | ~2000 in / ~500 out |
-| 2 | ESS classification | `classify()` in `ess.py` | `config.ESS_MODEL` | Evidence strength scoring via `tool_use` | ~800 in / ~200 out |
-| 3 | Insight extraction | `extract_insight()` in `memory/updater.py` | `config.ESS_MODEL` | One-sentence personality insight | ~400 in / ~50 out |
-| 4 | Reflection | `client.messages.create` | `config.ESS_MODEL` | Snapshot consolidation | ~1500 in / ~500 out |
+| 1 | Query routing | `QueryRouter.route()` | `config.FAST_LLM_MODEL` | Classify query category | ~200 in / ~50 out |
+| 2 | Retrieval search | `ChainOfQuery` / `SplitQuery` | `config.FAST_LLM_MODEL` | Sub-query generation + confidence assessment | ~400 in / ~100 out |
+| 3 | Reranking | `rerank_episodes()` | `config.FAST_LLM_MODEL` | LLM listwise comparison | ~800 in / ~200 out |
+| 4 | Response generation | `client.messages.create` | `config.MODEL` | Main conversational response | ~2000 in / ~500 out |
+| 5 | ESS classification | `classify()` in `ess.py` | `config.ESS_MODEL` | Evidence strength scoring via `tool_use` | ~800 in / ~200 out |
+| 6 | Boundary detection | `EventBoundaryDetector` | `config.FAST_LLM_MODEL` | Conversation segmentation | ~300 in / ~50 out |
+| 7 | Derivative chunking | `DerivativeChunker` | `config.FAST_LLM_MODEL` | Semantic chunking for embeddings | ~400 in / ~200 out |
+| 8 | Insight extraction | `extract_insight()` | `config.ESS_MODEL` | One-sentence personality insight | ~400 in / ~50 out |
+| 9 | STM summarization | `BackgroundSummarizer` | `config.FAST_LLM_MODEL` | Summarize evicted messages (background) | ~600 in / ~200 out |
+| 10 | Reflection | `client.messages.create` | `config.ESS_MODEL` | Snapshot consolidation | ~1500 in / ~500 out |
+| 11 | Forgetting assessment | `ForgettingEngine` | `config.FAST_LLM_MODEL` | Batch importance scoring (periodic) | ~800 in / ~200 out |
+| 12 | Health assessment | `assess_health()` | `config.FAST_LLM_MODEL` | Memory system health check (periodic) | ~400 in / ~100 out |
 
-Calls 1 and 2 occur on every interaction. Call 3 occurs only when `ess.score > config.ESS_THRESHOLD` (0.3). Call 4 occurs periodically (every 20 interactions) or when cumulative shift magnitude exceeds 0.1.
-
-**Per-interaction cost:** ~$0.005–0.015 depending on the configured model.
+Calls 1–7 occur on every interaction (new architecture). Call 8 occurs only when `ess.score > config.ESS_THRESHOLD`. Call 9 runs asynchronously in the background. Calls 10–12 occur during reflection. Memory subsystem calls use `FAST_LLM_MODEL` (default: claude-haiku) to minimize cost.
 
 ## High-ESS Interaction Trace (ESS > 0.3)
 
 When the user presents a well-reasoned argument (e.g., "According to the Bureau of Labor Statistics, automation has displaced 2.4M manufacturing jobs since 2000, but created 3.1M in tech — the net is positive but the transition cost is real"):
 
-1. **Episode retrieval**: `EpisodeStore.retrieve_typed(user_message, semantic_n=2, episodic_n=3)` merges semantic and episodic memories. Each branch reranks by similarity, ESS score, metadata quality multipliers, and relational topic signals; low-similarity episodes are filtered out.
+1. **STM buffering**: `ShortTermMemory.add_message("user", user_message)` buffers the message; oldest messages are evicted and queued for background LLM summarization.
 
-2. **System prompt assembly**: `build_system_prompt()` produces:
+2. **Memory retrieval**: `QueryRouter.route()` classifies the query. `ChainOfQueryAgent` or `SplitQueryAgent` searches pgvector for matching derivatives. Results are expanded via Neo4j temporal edges and reranked using LLM listwise comparison. Falls back to `EpisodeStore.retrieve_typed()` if new architecture is unavailable.
+
+3. **System prompt assembly**: `build_system_prompt()` produces:
    - `<core_identity>`: full `CORE_IDENTITY` text
-   - `<personality_state>`: `sponge.snapshot`
+   - `<personality_state>`: `sponge.snapshot` + STM running summary
    - `<personality_traits>`: output of `_build_structured_traits()`
-   - `<relevant_memories>`: retrieved episode summaries (if any)
+   - `<relevant_memories>`: reranked episode summaries (if any)
    - `<instructions>`: response guidelines
 
 3. **Response generation**: The LLM returns a substantive reply drawing on personality and memories.
@@ -97,7 +129,7 @@ When the user presents a well-reasoned argument (e.g., "According to the Bureau 
    - `topics=("ai_automation", "labor_markets")`, `opinion_direction=supports`
    - `summary="User cited BLS data on automation job displacement vs creation"`
 
-5. **Episode storage**: `EpisodeStore.store()` persists the interaction with a full `ESSResult` payload plus `interaction_count` and typed memory metadata.
+5. **Boundary detection + Episode storage**: `EventBoundaryDetector` checks if the conversation has crossed a topic/intent boundary. `DualEpisodeStore.store_episode()` creates a Neo4j `EpisodeNode`, generates derivative chunks via LLM (`DerivativeChunker`), embeds them, and stores embeddings in pgvector. `SemanticIngestionWorker` queues background feature extraction. Falls back to `EpisodeStore.store()` (ChromaDB) when unavailable.
 
 6. **Topic tracking**: `_update_topics(ess)` increments `behavioral_signature.topic_engagement["ai_automation"]` and `["labor_markets"]`.
 
@@ -111,9 +143,9 @@ When the user presents a well-reasoned argument (e.g., "According to the Bureau 
 
 9. **Insight extraction**: `extract_insight()` sends `INSIGHT_PROMPT` to the LLM; receives e.g. "Developed nuanced view on automation's labor market effects." Appended to `pending_insights`; `record_shift()` called with magnitude.
 
-10. **Reflection check**: If `since >= REFLECTION_EVERY` or `recent_mag > 0.1`, reflection runs (decay, retrieve, consolidate, validate).
+10. **Reflection check**: If `since >= REFLECTION_EVERY` or `recent_mag > 0.1`, reflection runs: `ConsolidationEngine` merges related episodes, `ForgettingEngine` runs LLM importance assessment and soft-archives dispensable episodes, belief decay, LLM consolidation, snapshot validation, and `assess_health()` for memory health diagnostics.
 
-11. **Persistence**: `SpongeState.save()` archives previous version, writes new JSON. `_log_ess()` appends to `ess_log.jsonl`.
+11. **Persistence**: `SpongeState.save()` archives previous version, writes new JSON. `ShortTermMemory.persist()` writes STM state to PostgreSQL. `_log_ess()` appends to `ess_log.jsonl`.
 
 ## Low-ESS Interaction Trace (ESS ≤ 0.3)
 

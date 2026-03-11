@@ -25,23 +25,30 @@ response = agent.respond("Your message here")
 |-----------|------|-------------|
 | `client` | `Anthropic` | LLM API client |
 | `sponge` | `SpongeState` | Current personality state |
-| `episodes` | `EpisodeStore` | ChromaDB episode storage |
+| `episodes` | `EpisodeStore` | ChromaDB episode storage (legacy fallback) |
 | `conversation` | `list[dict[str, str]]` | Current session conversation history |
 | `last_ess` | `ESSResult | None` | Most recent ESS classification result |
 | `previous_snapshot` | `str | None` | Snapshot before last change (for diffing) |
+| `_new_arch_available` | `bool` | Whether Neo4j/PostgreSQL architecture is active |
+| `_stm` | `ShortTermMemory | None` | Short-Term Memory (new arch) |
+| `_dual_store` | `DualEpisodeStore | None` | Neo4j + pgvector store (new arch) |
+| `_graph` | `MemoryGraph | None` | Neo4j graph interface (new arch) |
+| `_query_router` | `QueryRouter | None` | Query classification router (new arch) |
 
 #### Methods
 
 ##### `respond(user_message: str) -> str`
 
-Process a user message and return the agent's response. Main entry point. Handles: context assembly, response generation, ESS classification, opinion updates, insight extraction, reflection.
+Process a user message and return the agent's response. Main entry point. Handles: STM buffering, retrieval pipeline, context assembly, response generation, ESS classification, opinion updates, insight extraction, reflection.
 
-1. Retrieve relevant episodes from ChromaDB
-2. Build system prompt with `build_system_prompt()`
-3. Append user message to conversation, truncate if needed
-4. Call LLM API (`max_tokens=2048`)
-5. Call `_post_process()` for ESS, updates, reflection
-6. Save sponge state
+1. Buffer user message in STM (evict oldest if over capacity)
+2. Retrieve memories via routing pipeline (or ChromaDB fallback)
+3. Build system prompt with `build_system_prompt()` + STM running summary
+4. Append user message to conversation, truncate if needed
+5. Call LLM API (`max_tokens=2048`)
+6. Call `_post_process()` for boundary detection, dual-store storage, ESS, updates, reflection
+7. Buffer response in STM, persist STM to PostgreSQL
+8. Save sponge state
 
 ##### `_post_process(user_message: str, agent_response: str) -> None`
 
@@ -477,6 +484,187 @@ Environment-based configuration. Loads from `.env` via `dotenv`.
 | `MAX_CONVERSATION_CHARS` | — | 100,000 | Conversation truncation limit |
 | `REFLECTION_EVERY` | `SONALITY_REFLECTION_EVERY` | 20 | Periodic reflection interval |
 | `REFLECTION_SHIFT_THRESHOLD` | — | 0.1 | Cumulative magnitude for early reflection |
+
+### New Architecture Parameters
+
+| Constant | Env Var | Default | Description |
+|----------|---------|---------|-------------|
+| `NEO4J_URL` | `SONALITY_NEO4J_URL` | `bolt://localhost:7687` | Neo4j connection URL |
+| `NEO4J_USER` | `SONALITY_NEO4J_USER` | `neo4j` | Neo4j username |
+| `NEO4J_PASSWORD` | `SONALITY_NEO4J_PASSWORD` | `sonality_password` | Neo4j password |
+| `POSTGRES_URL` | `SONALITY_POSTGRES_URL` | `postgresql://...` | PostgreSQL connection URL |
+| `EMBEDDING_PROVIDER` | `SONALITY_EMBEDDING_PROVIDER` | `openai` | Embedding provider |
+| `EMBEDDING_MODEL` | `SONALITY_EMBEDDING_MODEL` | `text-embedding-3-large` | Embedding model |
+| `EMBEDDING_DIMENSIONS` | `SONALITY_EMBEDDING_DIMENSIONS` | `4096` | Embedding dimensions |
+| `FAST_LLM_MODEL` | `SONALITY_FAST_LLM_MODEL` | `claude-haiku-4-5-20251001` | Fast model for memory tasks |
+| `STM_BUFFER_CAPACITY` | `SONALITY_STM_BUFFER_CAPACITY` | `64000` | STM character capacity |
+| `RETRIEVAL_MAX_ITERATIONS` | `SONALITY_RETRIEVAL_MAX_ITERATIONS` | `3` | Max ChainOfQuery iterations |
+| `MAX_RERANK_CANDIDATES` | `SONALITY_MAX_RERANK_CANDIDATES` | `25` | Max reranking candidates |
+
+---
+
+## `sonality.llm.caller`
+
+Structured LLM call wrapper for memory subsystem tasks.
+
+### `llm_call(prompt, response_model, fallback) -> LLMResult`
+
+```python
+def llm_call(
+    prompt: str,
+    response_model: type[BaseModel],
+    fallback: BaseModel,
+) -> LLMResult
+```
+
+Makes an LLM API call and parses the response into a Pydantic model. Returns `LLMResult(success=True, value=parsed_model)` on success, or `LLMResult(success=False, value=fallback, error=msg)` on failure. Uses `config.FAST_LLM_MODEL` for cost efficiency.
+
+---
+
+## `sonality.memory.stm`
+
+Short-Term Memory with PostgreSQL persistence and LLM summarization.
+
+### `ShortTermMemory`
+
+Bounded message buffer with character-based capacity. Evicted messages are queued for background LLM summarization into a running summary.
+
+#### `add_message(role: str, content: str) -> None`
+
+Add a message to the buffer. Evicts oldest messages when over capacity.
+
+#### `get_recent_context(max_messages: int = 5) -> str`
+
+Format recent messages as a context string.
+
+#### `drain_evictions() -> list[STMMessage]`
+
+Return and clear pending evictions for the background summarizer.
+
+#### `persist(pg_pool) -> None`
+
+Save STM state to PostgreSQL for crash recovery (upsert on `session_id`).
+
+#### `load(pg_pool) -> ShortTermMemory` (classmethod, async)
+
+Load STM state from PostgreSQL. Returns fresh STM if no saved state.
+
+---
+
+## `sonality.memory.graph`
+
+Neo4j graph model for episode and derivative storage.
+
+### `EpisodeNode`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `uid` | `str` | Unique identifier |
+| `content` | `str` | Episode text content |
+| `topics` | `list[str]` | Topic labels |
+| `ess_score` | `float` | Evidence Strength Score |
+| `access_count` | `int` | Number of retrieval accesses |
+| `consolidation_level` | `int` | Consolidation depth (0 = original) |
+
+### `DerivativeNode`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `uid` | `str` | Derivative UID (`{episode_uid}_d{i}`) |
+| `source_episode_uid` | `str` | Parent episode UID |
+| `text` | `str` | Derivative chunk text |
+| `key_concept` | `str` | Key concept label |
+| `sequence_num` | `int` | Position in episode |
+
+### `EdgeType`
+
+`TEMPORAL`, `THEMATIC`, `SUPPORTED_BY`, `CONSOLIDATED_FROM`
+
+### `MemoryGraph`
+
+Graph CRUD operations over Neo4j AsyncDriver.
+
+---
+
+## `sonality.memory.dual_store`
+
+Coordinated episode storage across Neo4j graph and pgvector.
+
+### `DualEpisodeStore`
+
+#### `store_episode(content, topics, ess_score, ...) -> str`
+
+Create episode node, generate derivative chunks via LLM, embed, store in pgvector. Returns the episode UID.
+
+#### `search_derivatives(query_embedding, top_k) -> list[StoredEpisode]`
+
+Search pgvector for matching derivative embeddings and return parent episodes.
+
+#### `archive_derivatives(episode_uid) -> None`
+
+Remove derivative embeddings from pgvector (soft delete for forgetting).
+
+---
+
+## `sonality.memory.retrieval`
+
+Agent-based retrieval pipeline with routing, search, and reranking.
+
+### `QueryRouter`
+
+#### `route(query: str) -> RoutingDecision`
+
+Classify query into `QueryCategory` (FACTUAL, PERSONAL, RECENT, META) with reasoning.
+
+### `ChainOfQueryAgent`
+
+#### `search(query, store, top_k) -> list[StoredEpisode]`
+
+Iterative retrieval: generate search query → search → assess confidence → refine (up to `RETRIEVAL_MAX_ITERATIONS` iterations).
+
+### `SplitQueryAgent`
+
+#### `search(query, store, top_k) -> list[StoredEpisode]`
+
+Decompose query into parallel sub-queries, search each, merge and deduplicate.
+
+### `rerank_episodes(query, episodes, top_k) -> list[StoredEpisode]`
+
+LLM listwise reranking of retrieval results. Considers relevance, recency, and provenance quality.
+
+---
+
+## `sonality.memory.forgetting`
+
+LLM-based importance assessment with soft archival.
+
+### `ForgettingEngine`
+
+#### `assess_and_forget(candidates, snapshot_excerpt) -> ForgettingResult`
+
+Batch LLM assessment of episode importance. Archives low-importance episodes (removed from pgvector, graph node retained for provenance). Returns counts of kept/archived episodes.
+
+---
+
+## `sonality.memory.consolidation`
+
+Episode consolidation during reflection.
+
+### `ConsolidationEngine`
+
+#### `maybe_consolidate_segment(segment_uids) -> int`
+
+Assess related episodes in a segment for consolidation. Merges redundant episodes via LLM. Returns count of merged episodes.
+
+---
+
+## `sonality.memory.health`
+
+LLM-based memory health diagnostics.
+
+### `assess_health(graph, store, snapshot_excerpt) -> HealthReport`
+
+Runs an LLM health assessment on the memory system. Returns a `HealthReport` with overall health score and recommendations.
 
 ---
 

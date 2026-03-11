@@ -34,13 +34,26 @@ make run
 
 This starts an interactive REPL where you can chat with the agent and observe its personality evolving in real-time.
 
-### Docker
+### Docker (ChromaDB-only, legacy mode)
 
 ```bash
 cp .env.example .env
 # Edit .env — set SONALITY_API_KEY and SONALITY_API_VARIANT
 docker compose run --rm sonality
 ```
+
+### Docker Compose (Full architecture with Neo4j + PostgreSQL)
+
+To use the new three-layer memory architecture, you need Neo4j and PostgreSQL running:
+
+```bash
+cp .env.example .env
+# Edit .env — set SONALITY_API_KEY, SONALITY_API_VARIANT, and optionally:
+#   SONALITY_NEO4J_URL, SONALITY_POSTGRES_URL, SONALITY_EMBEDDING_API_KEY
+docker compose up -d  # starts Neo4j + PostgreSQL + Sonality
+```
+
+If Neo4j or PostgreSQL are unavailable, Sonality gracefully falls back to ChromaDB-only mode.
 
 ## REPL Commands
 
@@ -143,19 +156,40 @@ sonality/
 │   ├── __init__.py             Package version
 │   ├── __main__.py             python -m sonality
 │   ├── cli.py                  Terminal REPL
-│   ├── agent.py                Core loop: context → LLM → post-process
+│   ├── agent.py                Core loop: context → LLM → post-process → async bridge
 │   ├── config.py               Environment + defaults
 │   ├── prompts.py              Prompt templates
 │   ├── ess.py                  Evidence Strength Score classifier
+│   ├── llm/                    LLM abstraction layer
+│   │   ├── caller.py           Structured JSON LLM calls with Pydantic validation
+│   │   └── prompts.py          Memory subsystem prompt templates
 │   └── memory/                 Memory subsystem
 │       ├── __init__.py         Re-exports
 │       ├── sponge.py           SpongeState model, persistence
-│       ├── episodes.py         ChromaDB episode storage + retrieval
-│       └── updater.py          Magnitude computation, snapshot validation
+│       ├── episodes.py         ChromaDB episode storage (legacy fallback)
+│       ├── updater.py          Magnitude computation, snapshot validation
+│       ├── stm.py              Short-Term Memory buffer + PostgreSQL persistence
+│       ├── stm_consolidator.py Background LLM summarization
+│       ├── graph.py            Neo4j graph model (episodes, derivatives, edges)
+│       ├── dual_store.py       DualEpisodeStore (Neo4j + pgvector)
+│       ├── derivatives.py      LLM semantic chunking
+│       ├── embedder.py         External embedding provider
+│       ├── db.py               Database connection management
+│       ├── segmentation.py     Event boundary detection
+│       ├── consolidation.py    Episode consolidation engine
+│       ├── forgetting.py       LLM importance assessment + soft archival
+│       ├── health.py           Memory health assessment
+│       ├── belief_provenance.py Belief-episode provenance linking
+│       ├── semantic_features.py Semantic feature extraction
+│       └── retrieval/          Agent-based retrieval pipeline
+│           ├── router.py       Query classification and routing
+│           ├── chain.py        Iterative retrieval refinement
+│           ├── split.py        Parallel sub-query decomposition
+│           └── reranker.py     LLM listwise reranking
 ├── tests/                      Deterministic correctness tests
 └── data/                       Runtime data (gitignored)
     ├── sponge.json             Current personality state
     ├── sponge_history/         Archived versions
-    ├── chromadb/               Episode vector store
+    ├── chromadb/               Legacy episode vector store
     └── ess_log.jsonl           Audit trail
 ```
