@@ -4,45 +4,67 @@ LLM agent with a self-evolving personality via the **Sponge architecture** — a
 
 Strong logical arguments shift the agent's views. Casual chat, social pressure, and bare assertions are filtered out. Established beliefs resist change proportionally to their evidence base. Unreinforced beliefs decay over time. The result: coherent personality evolution, not random drift.
 
+The memory subsystem uses a **three-layer architecture**: Short-Term Memory (bounded buffer with LLM summarization), Long-Term Episodic Memory (Neo4j graph + pgvector derivatives), and Semantic Features (PostgreSQL). An agent-based retrieval pipeline (QueryRouter → ChainOfQuery/SplitQuery → LLM Reranking) replaces simple vector search. The system gracefully falls back to ChromaDB when databases are unavailable.
+
 Architecture decisions grounded in 200+ academic references.
 
 ## How It Works
 
 ```mermaid
 flowchart TD
-    USER["User message"] --> CTX["Context assembly"]
+    USER["User message"] --> STM_IN["STM: buffer message"]
+    STM_IN --> CTX["Context assembly"]
+
+    subgraph RETRIEVAL["Memory retrieval pipeline"]
+        ROUTE["QueryRouter: classify query"]
+        ROUTE -->|factual| COQ["ChainOfQueryAgent"]
+        ROUTE -->|personal| SPLIT["SplitQueryAgent"]
+        ROUTE -->|recent| RECENCY["Recency search"]
+        COQ --> RERANK["LLM listwise reranking"]
+        SPLIT --> RERANK
+        RECENCY --> RERANK
+    end
 
     subgraph PROMPT["System prompt bundle"]
         ID["Core identity (immutable)"]
         SNAP["Personality snapshot (~500 tokens, mutable)"]
         TRAITS["Structured traits and opinions"]
-        MEM["Retrieved episodes (ChromaDB)"]
+        SUMMARY["STM running summary"]
+        MEM["Reranked memories (Neo4j + pgvector)"]
     end
 
-    CTX --> GEN["LLM response generation"]
+    CTX --> RETRIEVAL
+    RETRIEVAL --> GEN["LLM response generation"]
     ID --> GEN
     SNAP --> GEN
     TRAITS --> GEN
+    SUMMARY --> GEN
     MEM --> GEN
     GEN --> RESP["Assistant response"]
     RESP --> POST["Post-processing"]
+    POST --> BOUNDARY["Event boundary detection"]
+    BOUNDARY --> DUAL["DualEpisodeStore (Neo4j graph + pgvector)"]
+    DUAL --> SEMANTIC["Semantic feature extraction"]
     POST --> ESS["ESS classification"]
     ESS -->|ESS > 0.3| UPDATE["Opinion update and insight extraction"]
     ESS -->|ESS <= 0.3| TRACK["Topic tracking only"]
     UPDATE --> REFLECT{"Reflection due?"}
-    TRACK --> SAVE["Persist sponge state"]
-    REFLECT -->|yes| CONSOLIDATE["Consolidate and decay"]
+    TRACK --> SAVE["Persist sponge + STM state"]
+    REFLECT -->|yes| CONSOLIDATE["Consolidate, forget, and assess health"]
     REFLECT -->|no| SAVE
     CONSOLIDATE --> SAVE
 ```
 
-Every interaction runs 2–3 LLM API calls:
+Every interaction runs 2–3+ LLM API calls:
 
-1. **Response generation** — assembles core identity + personality snapshot + structured traits + retrieved episodes into a system prompt, sends to the LLM
-2. **ESS classification** — separate LLM call evaluates the *user's* argument quality (score 0.0–1.0) using structured tool output. Agent's response is excluded to avoid self-judge bias
-3. **Insight extraction** — if ESS > 0.3, extracts a one-sentence personality insight (accumulated, consolidated during reflection)
+1. **STM buffering** — user message is added to Short-Term Memory; oldest messages are evicted and queued for background LLM summarization
+2. **Retrieval** — QueryRouter classifies the query, dispatches to ChainOfQuery or SplitQuery agents, results are reranked via LLM listwise comparison
+3. **Response generation** — assembles core identity + personality snapshot + STM summary + structured traits + reranked memories into a system prompt
+4. **ESS classification** — separate LLM call evaluates the *user's* argument quality (score 0.0–1.0). Agent's response excluded to avoid self-judge bias
+5. **Insight extraction** — if ESS > 0.3, extracts a one-sentence personality insight (accumulated, consolidated during reflection)
+6. **Episode storage** — event boundary detection segments conversations; episodes stored in Neo4j graph with pgvector derivative embeddings
 
-Periodically (every 20 interactions or on significant shifts), the agent **reflects** — decaying unreinforced beliefs, consolidating accumulated insights into the personality narrative, and validating snapshot integrity.
+Periodically (every 20 interactions or on significant shifts), the agent **reflects** — running consolidation, LLM-based forgetting assessment, belief decay, and memory health checks.
 
 ## One Interaction Timeline
 
@@ -50,20 +72,28 @@ Periodically (every 20 interactions or on significant shifts), the agent **refle
 sequenceDiagram
     participant U as User
     participant A as Sonality agent
+    participant STM as Short-Term Memory
+    participant R as Retrieval pipeline
     participant L as Reasoning LLM
     participant E as ESS classifier
+    participant DS as DualEpisodeStore
     participant M as Sponge memory
 
     U->>A: Message
-    A->>L: Generate response from identity + snapshot + memory
+    A->>STM: Buffer message + evict oldest
+    A->>R: Route query → search → rerank
+    R-->>A: Reranked memories
+    A->>L: Generate response from identity + snapshot + STM summary + memories
     L-->>A: Response draft
     A->>E: Classify user evidence quality
     E-->>A: ESS score and labels
+    A->>DS: Store episode (Neo4j graph + pgvector derivatives)
     alt ESS > threshold
         A->>M: Update beliefs and extract insight
     else ESS <= threshold
         A->>M: Track topic engagement only
     end
+    A->>STM: Buffer response + persist to PostgreSQL
     A-->>U: Final response
 ```
 
@@ -151,6 +181,18 @@ Set in `.env` (see `.env.example`):
 | `SONALITY_SEMANTIC_RETRIEVAL_COUNT` | `2` | Semantic memories retrieved per interaction |
 | `SONALITY_EPISODIC_RETRIEVAL_COUNT` | `3` | Episodic memories retrieved per interaction |
 | `SONALITY_LOG_LEVEL` | `INFO` | Logging verbosity |
+| `SONALITY_NEO4J_URL` | `bolt://localhost:7687` | Neo4j connection URL |
+| `SONALITY_NEO4J_USER` | `neo4j` | Neo4j username |
+| `SONALITY_NEO4J_PASSWORD` | `sonality_password` | Neo4j password |
+| `SONALITY_POSTGRES_URL` | `postgresql://...localhost:5432/sonality` | PostgreSQL connection URL |
+| `SONALITY_EMBEDDING_PROVIDER` | `openai` | Embedding provider (`openai` or `openrouter`) |
+| `SONALITY_EMBEDDING_MODEL` | `text-embedding-3-large` | Embedding model name |
+| `SONALITY_EMBEDDING_DIMENSIONS` | `4096` | Embedding vector dimensions |
+| `SONALITY_EMBEDDING_API_KEY` | `$OPENAI_API_KEY` | API key for embedding provider |
+| `SONALITY_FAST_LLM_MODEL` | `claude-haiku-4-5-20251001` | Fast model for scoring/assessment tasks |
+| `SONALITY_STM_BUFFER_CAPACITY` | `64000` | Short-Term Memory character capacity |
+| `SONALITY_RETRIEVAL_MAX_ITERATIONS` | `3` | Max retrieval refinement iterations |
+| `SONALITY_MAX_RERANK_CANDIDATES` | `25` | Max candidates for LLM listwise reranking |
 
 OpenRouter setup uses:
 `SONALITY_API_VARIANT=openrouter`.
@@ -327,15 +369,36 @@ Scenario design is grounded in peer-reviewed work from misinformation correction
 ```
 sonality/
 ├── sonality/                   Python package
-│   ├── agent.py                Core loop: context → LLM → post-process
+│   ├── agent.py                Core loop: context → LLM → post-process → async bridge
 │   ├── cli.py                  Terminal REPL
 │   ├── config.py               Environment + compile-time constants
 │   ├── ess.py                  Evidence Strength Score classifier
 │   ├── prompts.py              All LLM prompt templates
+│   ├── llm/                    LLM abstraction layer
+│   │   ├── caller.py           Structured JSON LLM calls with Pydantic validation
+│   │   └── prompts.py          Prompt templates for memory subsystem LLM tasks
 │   └── memory/
 │       ├── sponge.py           SpongeState model, Bayesian updates, decay
-│       ├── episodes.py         ChromaDB episode storage + ESS-weighted retrieval
-│       └── updater.py          Magnitude computation, snapshot validation, insight extraction
+│       ├── episodes.py         ChromaDB episode storage + ESS-weighted retrieval (legacy)
+│       ├── updater.py          Magnitude computation, snapshot validation, insight extraction
+│       ├── stm.py              Short-Term Memory: bounded buffer + PostgreSQL persistence
+│       ├── stm_consolidator.py Background LLM summarization of evicted STM messages
+│       ├── graph.py            Neo4j graph model: episodes, derivatives, edges
+│       ├── dual_store.py       DualEpisodeStore: Neo4j graph + pgvector derivatives
+│       ├── derivatives.py      LLM semantic chunking for derivative embeddings
+│       ├── embedder.py         External embedding provider (OpenAI/OpenRouter)
+│       ├── db.py               Database connection management (Neo4j + PostgreSQL)
+│       ├── segmentation.py     LLM event boundary detection for conversations
+│       ├── consolidation.py    Consolidation engine for episode merging
+│       ├── forgetting.py       LLM-based importance assessment + soft archival
+│       ├── health.py           LLM memory health assessment
+│       ├── belief_provenance.py Belief-episode provenance linking via Neo4j
+│       ├── semantic_features.py Semantic feature extraction worker
+│       └── retrieval/
+│           ├── router.py       QueryRouter: classify queries by category
+│           ├── chain.py        ChainOfQueryAgent: iterative retrieval refinement
+│           ├── split.py        SplitQueryAgent: parallel sub-query decomposition
+│           └── reranker.py     LLM listwise reranking of retrieval results
 ├── tests/                      Correctness/unit/integration tests
 ├── benches/                    Evaluation/benchmark suites (pytest, opt-in)
 │   ├── scenario_contracts.py   Shared scenario expectation contracts

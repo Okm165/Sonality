@@ -2,7 +2,45 @@
 
 Sonality's memory architecture is a multi-tier hierarchy validated by Stanford Generative Agents (Park et al., 2023), virtual-context memory systems, and ENGRAM (2025). Research consistently shows that flat, unsorted memory degrades into noise — the agent cannot distinguish "I fundamentally value honesty" from "in conversation #47, the user mentioned they like coffee." This document describes each tier, the data shapes at different interaction counts, the rationale for this hierarchy, and how it compares to contemporary systems.
 
-## Multi-Tier Memory Hierarchy
+## Three-Layer Memory Architecture
+
+The new memory system replaces the flat ChromaDB store with a three-layer architecture:
+
+```mermaid
+flowchart TB
+    subgraph STM["Layer 1: Short-Term Memory"]
+        BUF["Bounded message buffer\n(deque, character-based capacity)"]
+        SUM["Running LLM summary\n(background consolidation)"]
+        PG_STM["PostgreSQL persistence\n(crash recovery)"]
+    end
+
+    subgraph LTM["Layer 2: Long-Term Episodic Memory"]
+        NEO["Neo4j Graph\nEpisodeNode + DerivativeNode + edges"]
+        PGV["pgvector\nderivative embeddings (4096-dim)"]
+        PROV["Belief Provenance\nSUPPORTED_BY edges"]
+    end
+
+    subgraph SEM["Layer 3: Semantic Features"]
+        FEAT["PostgreSQL tables\nextracted structured features"]
+    end
+
+    BUF --> SUM
+    SUM --> PG_STM
+    BUF -->|eviction| LTM
+    NEO --> PGV
+    NEO --> PROV
+    LTM --> SEM
+```
+
+| Layer | Storage | Purpose |
+|-------|---------|---------|
+| 1. Short-Term Memory | In-memory deque + PostgreSQL | Bounded conversation buffer with LLM summarization of evicted messages |
+| 2. Long-Term Episodic | Neo4j graph + pgvector | Episode nodes with temporal/provenance edges; sentence-level derivative embeddings |
+| 3. Semantic Features | PostgreSQL tables | Structured features extracted from episodes for retrieval augmentation |
+
+## Multi-Tier Personality Hierarchy
+
+The personality state hierarchy remains alongside the new memory layers:
 
 ```mermaid
 flowchart TB
@@ -28,7 +66,8 @@ flowchart TB
     end
 
     subgraph Tier6["Tier 6: Episodic/Semantic Memory"]
-        EP["ChromaDB: cosine similarity\nESS-weighted reranking\ntop-5 retrieved per interaction"]
+        EP["Neo4j graph + pgvector derivatives\nAgent-routed retrieval pipeline\nLLM listwise reranking"]
+        LEGACY["ChromaDB fallback\nESS-weighted reranking"]
     end
 
     CI --> PS
@@ -38,6 +77,7 @@ flowchart TB
     PS --> PI
     SU --> EP
     PI --> EP
+    EP -.->|fallback| LEGACY
 ```
 
 | Tier | Storage | Always In Context? | Purpose |
@@ -47,7 +87,7 @@ flowchart TB
 | 3. Opinion Vectors + BeliefMeta | `sponge.opinion_vectors`, `sponge.belief_meta` | Summarized in traits | Numerical stance and confidence per topic |
 | 4. Staged Belief Updates | `sponge.staged_opinion_updates` | Summarized in traits | Cooling-period delayed belief commits to reduce reactive flips |
 | 5. Pending Insights | `sponge.pending_insights` | No (reflection-only) | Accumulated per-interaction insights awaiting consolidation |
-| 6. Episodic/Semantic Memory | ChromaDB | Retrieved selectively | Typed vector retrieval of relevant past interactions |
+| 6. Episodic/Semantic Memory | Neo4j + pgvector (ChromaDB fallback) | Retrieved selectively | Agent-routed retrieval with LLM reranking |
 
 ## Tier 1: Core Identity
 
@@ -164,10 +204,31 @@ These are consolidated into the snapshot only during reflection cycles. This acc
 
 ## Tier 6: Episodic/Semantic Memory
 
-ChromaDB stores episode summaries as vector embeddings (default embedding model, cosine similarity). Each episode includes:
+### New Architecture (Neo4j + pgvector)
 
-- **Document**: ESS-generated `summary` (embedded for retrieval)
-- **Metadata**: `ess_score`, `topics`, `memory_type`, `user_message` (truncated), `agent_response` (truncated), `timestamp`, `interaction`
+Episodes are stored as `EpisodeNode` in Neo4j with temporal and provenance edges. Each episode is split into `DerivativeNode` chunks via LLM semantic chunking (`DerivativeChunker`), and each derivative's embedding is stored in pgvector.
+
+**Graph model:**
+
+- `EpisodeNode`: uid, content, topics, ess_score, access_count, consolidation_level, timestamps
+- `DerivativeNode`: uid, text, key_concept, sequence_num, embedding (in pgvector)
+- `EdgeType`: TEMPORAL (consecutive episodes), THEMATIC (shared topics), SUPPORTED_BY (belief provenance), CONSOLIDATED_FROM (merged episodes)
+
+**Storage**: `DualEpisodeStore.store_episode()` creates the graph node, generates derivative chunks via LLM, embeds them, and stores embeddings in pgvector. `EventBoundaryDetector` segments conversations into coherent episodes at topic/intent boundaries.
+
+**Retrieval pipeline**:
+
+1. `QueryRouter` classifies the query → factual / personal / recent / meta
+2. `ChainOfQueryAgent` (factual) or `SplitQueryAgent` (personal) searches pgvector for matching derivatives
+3. Results are expanded via Neo4j temporal edges (neighboring episodes)
+4. `rerank_episodes()` applies LLM listwise comparison for final ranking
+5. Episode utility scores are updated in the graph
+
+**Maintenance**: `ConsolidationEngine` merges related episodes. `ForgettingEngine` runs LLM importance assessment and soft-archives dispensable episodes. `SemanticIngestionWorker` extracts structured features in the background.
+
+### Legacy Fallback (ChromaDB)
+
+ChromaDB stores episode summaries as vector embeddings (default embedding model, cosine similarity). Used as fallback when Neo4j/PostgreSQL are unavailable.
 
 **Retrieval**: `EpisodeStore.retrieve_typed(query, semantic_n=2, episodic_n=3)` runs typed retrieval and merges results in semantic-first order. Each branch reranks with similarity, ESS score, metadata-quality multipliers, and a relational topic bonus.
 
@@ -263,12 +324,15 @@ ChromaDB stores episode summaries as vector embeddings (default embedding model,
 | **Core identity** | Immutable ~200 tok in prompt | Self-editing persona blocks | System 3 meta-layer | Four-network memory |
 | **Personality state** | ~500 tok narrative (Sponge) | Virtual context, persona edits | 80% fewer reasoning steps | 39%→83.6% long-horizon |
 | **Opinion tracking** | dict[str, float] + BeliefMeta | Not explicit | Not explicit | Not explicit |
-| **Episodic memory** | ChromaDB, ESS-weighted | Hierarchical, tool-based | — | — |
-| **Reflection** | Periodic + event-driven | — | — | — |
+| **Short-term memory** | Bounded deque + LLM summary + PostgreSQL | — | — | — |
+| **Episodic memory** | Neo4j graph + pgvector derivatives (ChromaDB fallback) | Hierarchical, tool-based | — | — |
+| **Retrieval** | Agent-routed (QueryRouter → ChainOfQuery/SplitQuery → LLM rerank) | Tool-based retrieval | — | — |
+| **Provenance** | Neo4j SUPPORTED_BY edges linking beliefs to episodes | — | — | — |
+| **Reflection** | Consolidation + forgetting + decay + health assessment | — | — | — |
 | **Versioning** | Every save archives previous | — | — | — |
 | **ESS gating** | Yes (0.0–1.0 threshold) | No | No | No |
 
-Sonality uniquely combines: (1) ESS-gated updates, (2) explicit opinion vectors with Bayesian resistance, (3) accumulate-then-consolidate reflection, and (4) full versioned persistence with rollback.
+Sonality uniquely combines: (1) ESS-gated updates, (2) explicit opinion vectors with Bayesian resistance, (3) three-layer memory with graph+vector hybrid, (4) agent-based retrieval with LLM reranking, (5) LLM-driven forgetting and health assessment, and (6) full versioned persistence with rollback.
 
 ## Versioned Persistence
 

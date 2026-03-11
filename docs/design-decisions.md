@@ -49,14 +49,14 @@ Every architectural choice in Sonality is backed by specific research findings. 
 | **Research** | Deffuant bounded confidence model: initial uncertainty and convergence dynamics. Anchoring bias (arXiv:2511.05766): early probability shifts are resistant to mitigation. |
 | **Alternative** | Treat all interactions equally. Rejected: bounded confidence models and anchoring research show first impressions have outsized influence. |
 
-### 6. ChromaDB Over Knowledge Graph
+### 6. Hybrid Graph+Vector (Neo4j + pgvector) with ChromaDB Fallback
 
 | Aspect | Detail |
 |--------|--------|
-| **Problem** | Need episodic memory for retrieval. Knowledge graphs (e.g., Graphiti, Neo4j) offer temporal coherence but at what cost? |
-| **Solution** | ChromaDB vector store for episode storage. ESS summaries embedded; retrieval with cosine similarity plus quality-aware reranking (ESS score, source/reasoning quality multipliers, relational topic bonus). |
-| **Research** | Mem0 vs Graphiti (arXiv:2601.07978): vector databases significantly outperform graph databases in efficiency. **No statistically significant accuracy difference.** Graphiti generated **1.17M tokens per test case**, **$152 before abort**. |
-| **Alternative** | Temporal knowledge graph (Graphiti). Rejected: cost and latency prohibitive at this scale; no accuracy gain. Documented upgrade path if temporal coherence becomes bottleneck. |
+| **Problem** | Need episodic memory with temporal coherence, provenance tracking, and granular retrieval. Pure vector search lacks relational structure; pure graph search lacks similarity-based retrieval. |
+| **Solution** | Hybrid approach: Neo4j for the episode graph (temporal/thematic/provenance edges, graph traversal for episode expansion) and PostgreSQL+pgvector for sentence-level derivative embeddings. ChromaDB retained as graceful fallback when databases are unavailable. LLM-based semantic chunking (`DerivativeChunker`) splits episodes into self-contained derivatives for granular embedding. |
+| **Research** | RecallM: 4× improvement with hybrid graph+vector over vector-only for belief revision. The derivative model (sentence-level chunks) enables retrieval at finer granularity than whole-episode embedding. Graph edges enable temporal expansion and belief provenance tracking that pure vector search cannot provide. |
+| **Alternative** | ChromaDB-only (previous design). Still available as fallback. Sufficient for prototype scale but lacks temporal coherence and provenance tracking needed for advanced memory operations (consolidation, forgetting, belief provenance). |
 
 ### 7. Insight Accumulation Over Lossy Rewrites
 

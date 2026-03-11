@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
@@ -21,12 +23,29 @@ from .ess import (
 )
 from .memory import (
     AdmissionPolicy,
+    BackgroundSummarizer,
+    ChainOfQueryAgent,
+    ConsolidationEngine,
+    DatabaseConnections,
+    DerivativeChunker,
+    DualEpisodeStore,
     EpisodeStore,
+    EventBoundaryDetector,
+    ExternalEmbedder,
+    ForgettingEngine,
+    MemoryGraph,
     MemoryType,
     ProvenanceQuality,
+    QueryCategory,
+    QueryRouter,
+    SemanticIngestionWorker,
+    ShortTermMemory,
+    SplitQueryAgent,
     SpongeState,
+    assess_health,
     compute_magnitude,
     extract_insight,
+    rerank_episodes,
     validate_snapshot,
 )
 from .openrouter import chat_completion
@@ -205,12 +224,90 @@ class SonalityAgent:
         self.last_ess: ESSResult | None = None
         self.last_usage = ModelUsage()
         self.previous_snapshot: str | None = None
+
+        # New architecture components (optional - graceful fallback to ChromaDB)
+        self._new_arch_available = False
+        self._db: DatabaseConnections | None = None
+        self._graph: MemoryGraph | None = None
+        self._dual_store: DualEpisodeStore | None = None
+        self._stm: ShortTermMemory | None = None
+        self._summarizer: BackgroundSummarizer | None = None
+        self._boundary_detector: EventBoundaryDetector | None = None
+        self._query_router: QueryRouter | None = None
+        self._chain_agent: ChainOfQueryAgent | None = None
+        self._split_agent: SplitQueryAgent | None = None
+        self._consolidation: ConsolidationEngine | None = None
+        self._forgetting: ForgettingEngine | None = None
+        self._semantic_worker: SemanticIngestionWorker | None = None
+
+        # Background event loop for async database operations
+        self._loop = asyncio.new_event_loop()
+        self._loop_thread = threading.Thread(
+            target=self._loop.run_forever, name="agent-async-loop", daemon=True
+        )
+        self._loop_thread.start()
+
+        try:
+            self._run_async(self._init_new_architecture())
+            self._new_arch_available = True
+            log.info("New memory architecture initialized (Neo4j + pgvector)")
+        except Exception:
+            log.warning(
+                "New memory architecture unavailable; falling back to ChromaDB only",
+                exc_info=True,
+            )
+
         log.info(
-            "Agent ready: sponge v%d, %d prior interactions, %d beliefs",
+            "Agent ready: sponge v%d, %d prior interactions, %d beliefs, new_arch=%s",
             self.sponge.version,
             self.sponge.interaction_count,
             len(self.sponge.opinion_vectors),
+            self._new_arch_available,
         )
+
+    def _run_async[T](self, coro: object) -> T:
+        """Run an async coroutine from sync context via the background event loop."""
+        future = asyncio.run_coroutine_threadsafe(coro, self._loop)  # type: ignore[arg-type]
+        return future.result(timeout=30)  # type: ignore[return-value]
+
+    async def _init_new_architecture(self) -> None:
+        """Initialize Neo4j + pgvector + embedding components."""
+        self._db = await DatabaseConnections.create()
+        embedder = ExternalEmbedder()
+        self._graph = MemoryGraph(self._db.neo4j_driver)
+        chunker = DerivativeChunker(embedder)
+        self._dual_store = DualEpisodeStore(
+            self._graph, self._db.pg_pool, chunker, embedder
+        )
+        self._stm = await ShortTermMemory.load(self._db.pg_pool)
+        self._summarizer = BackgroundSummarizer(self._stm)
+        self._summarizer.start()
+        self._boundary_detector = EventBoundaryDetector()
+        self._query_router = QueryRouter()
+        self._chain_agent = ChainOfQueryAgent(self._dual_store, self._graph)
+        self._split_agent = SplitQueryAgent(self._dual_store, self._graph)
+        self._consolidation = ConsolidationEngine(self._graph)
+        self._forgetting = ForgettingEngine(self._graph, self._dual_store)
+        self._semantic_worker = SemanticIngestionWorker(self._db.pg_pool, embedder)
+        self._semantic_worker.start()
+        # Restore last episode UID for temporal linking
+        last_uid = await self._graph.get_last_episode_uid()
+        if last_uid and self._dual_store:
+            self._dual_store._last_episode_uid = last_uid
+
+    def shutdown(self) -> None:
+        """Gracefully shut down background threads and database connections."""
+        if self._summarizer:
+            self._summarizer.stop()
+        if self._semantic_worker:
+            self._semantic_worker.stop()
+        if self._db:
+            try:
+                self._run_async(self._db.close())
+            except Exception:
+                log.exception("Error closing database connections")
+        self._loop.call_soon_threadsafe(self._loop.stop)
+        self._loop_thread.join(timeout=5)
 
     def respond(self, user_message: str) -> str:
         """Run one interaction turn and persist resulting personality state.
@@ -220,18 +317,30 @@ class SonalityAgent:
         log.info("=== Interaction #%d ===", self.sponge.interaction_count + 1)
         log.info("User: %.120s", user_message)
 
-        relevant = self.episodes.retrieve_typed(
-            query=user_message,
-            episodic_n=config.EPISODIC_RETRIEVAL_COUNT,
-            semantic_n=config.SEMANTIC_RETRIEVAL_COUNT,
-        )
+        # Step 2: Add to STM buffer
+        if self._stm:
+            self._stm.add_message("user", user_message)
+
+        # Step 3-4: Retrieve relevant memories
+        relevant = self._retrieve_memories(user_message)
         structured_traits = self._build_structured_traits()
 
+        # Step 5: Build system prompt (with STM running summary if available)
         system_prompt = build_system_prompt(
             sponge_snapshot=self.sponge.snapshot,
             relevant_episodes=relevant,
             structured_traits=structured_traits,
         )
+        # Inject STM running summary between identity and episodes
+        if self._stm and self._stm.running_summary:
+            stm_section = f"\n\n## Recent Context Summary\n{self._stm.running_summary}"
+            # Insert after the snapshot section
+            idx = system_prompt.find("\n## ")
+            if idx > 0:
+                system_prompt = system_prompt[:idx] + stm_section + system_prompt[idx:]
+            else:
+                system_prompt += stm_section
+
         self._log_context_event(
             user_message=user_message,
             relevant_episodes=relevant,
@@ -271,6 +380,10 @@ class SonalityAgent:
             log.warning("Model response contained no text block; using empty reply")
         self.conversation.append({"role": "assistant", "content": assistant_msg})
 
+        # Add assistant response to STM
+        if self._stm:
+            self._stm.add_message("assistant", assistant_msg)
+
         self._post_process(user_message, assistant_msg)
         last_ess = self.last_ess
         self.last_usage = ModelUsage(
@@ -289,6 +402,92 @@ class SonalityAgent:
             }
         )
         return assistant_msg
+
+    def _retrieve_memories(self, user_message: str) -> list[str]:
+        """Retrieve relevant memories using new architecture or ChromaDB fallback."""
+        if not self._new_arch_available:
+            return self.episodes.retrieve_typed(
+                query=user_message,
+                episodic_n=config.EPISODIC_RETRIEVAL_COUNT,
+                semantic_n=config.SEMANTIC_RETRIEVAL_COUNT,
+            )
+
+        try:
+            return self._run_async(self._retrieve_new_arch(user_message))
+        except Exception:
+            log.exception("New retrieval failed; falling back to ChromaDB")
+            return self.episodes.retrieve_typed(
+                query=user_message,
+                episodic_n=config.EPISODIC_RETRIEVAL_COUNT,
+                semantic_n=config.SEMANTIC_RETRIEVAL_COUNT,
+            )
+
+    async def _retrieve_new_arch(self, user_message: str) -> list[str]:
+        """Full retrieval pipeline: route → search → expand → rerank."""
+        assert self._query_router is not None
+        assert self._dual_store is not None
+        assert self._graph is not None
+
+        # Step 3: Route query
+        stm_context = self._stm.get_recent_context() if self._stm else ""
+        decision = self._query_router.route(user_message, context=stm_context)
+
+        if decision.category == QueryCategory.NONE:
+            return []
+
+        # Step 4: Retrieve based on category
+        if decision.category in (
+            QueryCategory.MULTI_ENTITY,
+            QueryCategory.AGGREGATION,
+        ) and self._split_agent:
+            split_result = await self._split_agent.retrieve(
+                user_message, n_per_sub=decision.n_results
+            )
+            episodes = split_result.episodes
+        elif decision.category == QueryCategory.TEMPORAL and self._chain_agent:
+            chain_result = await self._chain_agent.retrieve(
+                user_message, base_n=decision.n_results
+            )
+            episodes = chain_result.episodes
+        else:
+            # Simple/belief query: direct vector search
+            over_fetch = decision.n_results * config.RETRIEVAL_OVER_FETCH_FACTOR
+            results = await self._dual_store.vector_search(
+                user_message, top_k=over_fetch
+            )
+            episode_uids = list({r[1] for r in results})
+            episodes = await self._graph.get_episodes(episode_uids)
+
+        # Step 5: Temporal expansion
+        if decision.needs_temporal_expansion and episodes:
+            expanded_uids: set[str] = set()
+            for ep in episodes[:3]:  # Expand top 3 only
+                neighbors = await self._graph.traverse_temporal_context(ep.uid)
+                for n in neighbors:
+                    expanded_uids.add(n.uid)
+            new_uids = [u for u in expanded_uids if u not in {e.uid for e in episodes}]
+            if new_uids:
+                extra = await self._graph.get_episodes(new_uids)
+                episodes.extend(extra)
+
+        # Step 7: LLM Listwise Rerank
+        if len(episodes) > 1:
+            episodes = rerank_episodes(
+                user_message, episodes, top_k=decision.n_results
+            )
+
+        # Step 8: Update utility scores for accessed episodes
+        for ep in episodes:
+            try:
+                await self._graph.update_utility(ep.uid, delta=0.1)
+            except Exception:
+                log.debug("Utility update failed for %s", ep.uid[:8])
+
+        # Step 10: Format as context strings (matching legacy format)
+        return [
+            f"[{ep.created_at[:10] if ep.created_at else '?'}] {ep.summary or ep.content[:300]}"
+            for ep in episodes
+        ]
 
     def _truncate_conversation(self) -> None:
         """Keep chat history inside a configured character budget.
@@ -316,7 +515,40 @@ class SonalityAgent:
         self.last_ess = ess
         self._log_ess(ess, user_message)
 
+        # Event boundary detection + dual-store storage (new architecture)
+        segment_id: str | None = None
+        if self._new_arch_available and self._boundary_detector:
+            try:
+                boundary = self._boundary_detector.check_boundary(user_message)
+                segment_id = boundary.segment_id
+                if boundary.is_boundary:
+                    log.info(
+                        "Segment boundary: %s (%s)", boundary.label, boundary.boundary_type
+                    )
+            except Exception:
+                log.exception("Boundary detection failed")
+
+        # Store in dual-store (Neo4j + pgvector) with ChromaDB fallback
+        episode_uid: str | None = None
+        if self._new_arch_available:
+            episode_uid = self._store_episode_new_arch(
+                user_message, agent_response, ess, segment_id
+            )
+
         self._store_episode(user_message, agent_response, ess)
+
+        # Queue for semantic feature extraction
+        if episode_uid and self._semantic_worker:
+            content = f"User: {user_message}\nAssistant: {agent_response}"
+            self._semantic_worker.enqueue(episode_uid, content)
+
+        # Persist STM to PostgreSQL
+        if self._stm and self._db:
+            try:
+                self._run_async(self._stm.persist(self._db.pg_pool))
+            except Exception:
+                log.debug("STM persistence failed", exc_info=True)
+
         self.sponge.interaction_count += 1
         committed = self.sponge.apply_due_staged_updates()
         if committed:
@@ -405,6 +637,32 @@ class SonalityAgent:
                 )
         except Exception:
             log.exception("Episode storage failed")
+
+    def _store_episode_new_arch(
+        self,
+        user_message: str,
+        agent_response: str,
+        ess: ESSResult,
+        segment_id: str | None,
+    ) -> str | None:
+        """Store episode in Neo4j + pgvector dual store. Returns episode UID on success."""
+        if not self._dual_store:
+            return None
+        try:
+            stored = self._run_async(
+                self._dual_store.store(
+                    user_message=user_message,
+                    agent_response=agent_response,
+                    summary=ess.summary[:300] if ess.summary else "",
+                    topics=list(ess.topics),
+                    ess_score=ess.score,
+                    segment_id=segment_id,
+                )
+            )
+            return stored.episode_uid
+        except Exception:
+            log.exception("Dual-store episode storage failed")
+            return None
 
     def _update_topics(self, ess: ESSResult) -> None:
         """Increment topic engagement counters from ESS topic labels."""
@@ -799,6 +1057,34 @@ class SonalityAgent:
         if contradictions:
             log.info("Contradiction backlog (%d): %s", len(contradictions), contradictions[:3])
 
+        # Consolidation: check if current segment is ready for summary
+        if self._new_arch_available and self._consolidation and self._boundary_detector:
+            try:
+                seg_id = self._boundary_detector.current_segment_id
+                summary_uid = self._run_async(
+                    self._consolidation.maybe_consolidate_segment(seg_id)
+                )
+                if summary_uid:
+                    log.info("Consolidated segment %s -> summary %s", seg_id, summary_uid[:8])
+            except Exception:
+                log.exception("Consolidation failed during reflection")
+
+        # Forgetting: assess and archive low-importance episodes
+        if self._new_arch_available and self._forgetting and self._graph:
+            try:
+                self._run_async(self._run_forgetting_cycle())
+            except Exception:
+                log.exception("Forgetting cycle failed during reflection")
+
+        # LLM-based health assessment (replaces threshold-based checks)
+        if self._new_arch_available:
+            try:
+                health = assess_health(self.sponge)
+                if health.concerns:
+                    log.warning("Health assessment concerns: %s", health.concerns)
+            except Exception:
+                log.debug("LLM health assessment failed", exc_info=True)
+
         recent_episodes = self.episodes.retrieve(
             "recent personality development and opinion changes",
             n_results=min(config.REFLECTION_EVERY, 10),
@@ -837,6 +1123,39 @@ class SonalityAgent:
             )
         except Exception:
             log.exception("Reflection cycle failed")
+
+    async def _run_forgetting_cycle(self) -> None:
+        """Assess old episodes for potential archival during reflection."""
+        assert self._forgetting is not None
+        assert self._graph is not None
+        # Get oldest non-archived episodes as candidates
+        async with self._graph._driver.session(database=config.NEO4J_DATABASE) as session:
+            result = await session.run(
+                """
+                MATCH (e:Episode)
+                WHERE NOT e.archived AND e.consolidation_level = 1
+                RETURN e ORDER BY e.utility_score ASC, e.created_at ASC
+                LIMIT 20
+                """
+            )
+            from .memory.graph import _record_to_episode
+
+            records = [record async for record in result]
+            candidates = [_record_to_episode(r["e"]) for r in records]
+
+        if len(candidates) < 5:
+            return
+
+        forgetting_result = await self._forgetting.assess_and_forget(
+            candidates, snapshot_excerpt=self.sponge.snapshot[:300]
+        )
+        if forgetting_result.archived > 0:
+            log.info(
+                "Forgetting: assessed=%d, kept=%d, archived=%d",
+                forgetting_result.total_assessed,
+                forgetting_result.kept,
+                forgetting_result.archived,
+            )
 
     def _check_belief_preservation(self, new_snapshot: str) -> None:
         """Warn if reflection dropped high-confidence beliefs from the snapshot.
