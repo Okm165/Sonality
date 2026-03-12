@@ -2,6 +2,10 @@
 
 Each prompt is a string template with named placeholders. All prompts return
 structured JSON validated by corresponding Pydantic models in the caller modules.
+
+JSON format convention: every template shows a concrete filled example, never
+inline enum notation (A | B) which confuses low-quality models. Valid values
+for enum fields are listed separately after the JSON block.
 """
 
 from __future__ import annotations
@@ -24,16 +28,15 @@ Guidelines:
 - Normalize obvious typos or grammar issues for better embedding
 - Maximum 15 chunks for any input
 
-Return JSON:
+Respond with ONLY a JSON object. Example:
 {{
   "chunks": [
-    {{
-      "text": "The normalized, coherent chunk text",
-      "key_concept": "Main idea in 2-4 words",
-      "importance": "high" | "medium" | "low"
-    }}
+    {{"text": "Nuclear power produces 12g CO2/kWh versus 820g for coal.", "key_concept": "nuclear CO2 advantage", "importance": "high"}},
+    {{"text": "France generates 70% of its electricity from nuclear with excellent safety records.", "key_concept": "France nuclear safety", "importance": "medium"}}
   ]
-}}"""
+}}
+
+importance must be high, medium, or low."""
 
 # --- Event Boundary Detection ---
 BOUNDARY_DETECTION_PROMPT: Final = """\
@@ -51,14 +54,14 @@ Consider:
 - Did the user explicitly shift to a different subject?
 - Is this a continuation/elaboration of the current topic?
 
-Return JSON:
-{{
-  "boundary_decision": "BOUNDARY" | "CONTINUE",
-  "confidence": 0.0-1.0,
-  "boundary_type": "topic_shift" | "goal_change" | "explicit_transition" | "none",
-  "reasoning": "Brief explanation of your assessment",
-  "suggested_segment_label": "2-4 word label if boundary, else empty string"
-}}"""
+Respond with ONLY a JSON object. Example for a topic shift:
+{{"boundary_decision": "BOUNDARY", "confidence": 0.9, "boundary_type": "topic_shift", "reasoning": "User switched from programming to cooking recipes.", "suggested_segment_label": "cooking discussion"}}
+
+Example for continuation:
+{{"boundary_decision": "CONTINUE", "confidence": 0.8, "boundary_type": "none", "reasoning": "User is elaborating on the previous topic.", "suggested_segment_label": ""}}
+
+boundary_decision must be BOUNDARY or CONTINUE.
+boundary_type must be: topic_shift, goal_change, explicit_transition, or none."""
 
 # --- Reflection Gate Decision ---
 REFLECTION_GATE_PROMPT: Final = """\
@@ -82,11 +85,10 @@ Choose:
 - PERIODIC: enough elapsed context to do a maintenance reflection
 - EVENT_DRIVEN: significant accumulation (see HARD RULE above)
 
-Return JSON:
-{{
-  "trigger": "SKIP" | "PERIODIC" | "EVENT_DRIVEN",
-  "reasoning": "Why this trigger is appropriate"
-}}"""
+Respond with ONLY a JSON object. Example:
+{{"trigger": "SKIP", "reasoning": "Only 3 interactions since last reflection, below the minimum threshold."}}
+
+trigger must be exactly SKIP, PERIODIC, or EVENT_DRIVEN."""
 
 # --- Query Routing ---
 QUERY_ROUTING_PROMPT: Final = """\
@@ -108,14 +110,13 @@ Also determine:
 - Needs temporal expansion: Should we fetch adjacent episodes for context?
 - Search semantic memory: Should we query belief/profile data?
 
-Return JSON:
-{{
-  "category": "NONE" | "SIMPLE" | "TEMPORAL" | "MULTI_ENTITY" | "AGGREGATION" | "BELIEF_QUERY",
-  "depth": "MINIMAL" | "MODERATE" | "DEEP",
-  "temporal_expansion": "EXPAND" | "NO_EXPAND",
-  "semantic_memory": "SEARCH" | "SKIP",
-  "reasoning": "Brief explanation"
-}}"""
+Respond with ONLY a JSON object. Example:
+{{"category": "TEMPORAL", "depth": "MODERATE", "temporal_expansion": "EXPAND", "semantic_memory": "SKIP", "reasoning": "Query asks about past discussions requiring chronological retrieval."}}
+
+category must be: NONE, SIMPLE, TEMPORAL, MULTI_ENTITY, AGGREGATION, or BELIEF_QUERY.
+depth must be: MINIMAL, MODERATE, or DEEP.
+temporal_expansion must be: EXPAND or NO_EXPAND.
+semantic_memory must be: SEARCH or SKIP."""
 
 # --- Sufficiency Checking (ChainOfQueryAgent) ---
 SUFFICIENCY_PROMPT: Final = """\
@@ -131,13 +132,13 @@ Evaluate:
 2. What's your confidence that this is sufficient?
 3. If insufficient, what refined query might find missing information?
 
-Return JSON:
-{{
-  "sufficiency_decision": "SUFFICIENT" | "INSUFFICIENT",
-  "confidence": 0.0-1.0,
-  "reasoning": "Why sufficient/insufficient",
-  "suggested_refinement": "Alternative query if insufficient, else null"
-}}"""
+Respond with ONLY a JSON object. Example for sufficient context:
+{{"sufficiency_decision": "SUFFICIENT", "confidence": 0.85, "reasoning": "Retrieved context directly addresses all aspects of the query.", "suggested_refinement": null}}
+
+Example for insufficient context:
+{{"sufficiency_decision": "INSUFFICIENT", "confidence": 0.4, "reasoning": "Missing information about the timeline.", "suggested_refinement": "When did the user first mention this topic?"}}
+
+sufficiency_decision must be SUFFICIENT or INSUFFICIENT."""
 
 # --- Query Decomposition (SplitQueryAgent) ---
 DECOMPOSITION_PROMPT: Final = """\
@@ -151,11 +152,10 @@ Guidelines:
 - Maximum 4 sub-queries
 - Each should retrieve distinct information
 
-Return JSON:
-{{
-  "sub_queries": ["...", "..."],
-  "aggregation_strategy": "merge" | "compare" | "timeline"
-}}"""
+Respond with ONLY a JSON object. Example:
+{{"sub_queries": ["What did the user say about nuclear energy?", "What is the agent's position on climate change?"], "aggregation_strategy": "merge"}}
+
+aggregation_strategy must be: merge, compare, or timeline."""
 
 # --- LLM Listwise Reranking ---
 RERANK_PROMPT: Final = """\
@@ -172,11 +172,10 @@ Consider:
 - Temporal relevance (recent context may be more relevant)
 - Cross-document reasoning (does one candidate provide context for another?)
 
-Return ONLY a JSON object:
-{{
-  "ranking": [3, 1, 5, 2, 4],
-  "reasoning": "Brief explanation of ranking logic"
-}}"""
+Respond with ONLY a JSON object. Example (if 3 candidates, ranking by relevance):
+{{"ranking": [3, 1, 2], "reasoning": "Candidate 3 is most directly relevant; candidate 1 provides useful context; candidate 2 is tangential."}}
+
+ranking must list every candidate index exactly once."""
 
 # --- Consolidation Readiness ---
 CONSOLIDATION_READINESS_PROMPT: Final = """\
@@ -195,13 +194,11 @@ Consider:
 - Is there enough substantive content for a meaningful summary?
 - Would consolidating now lose important ongoing context?
 
-Return JSON:
-{{
-  "readiness_decision": "READY" | "NOT_READY",
-  "confidence": 0.0-1.0,
-  "reasoning": "Why ready/not ready",
-  "suggested_summary_focus": "What the summary should emphasize" | null
-}}"""
+Respond with ONLY a JSON object. Example:
+{{"readiness_decision": "READY", "confidence": 0.8, "reasoning": "The topic has reached a natural conclusion with no unresolved threads.", "suggested_summary_focus": "Focus on the key arguments about nuclear energy safety"}}
+
+readiness_decision must be READY or NOT_READY.
+suggested_summary_focus should be null if not ready."""
 
 # --- Consolidation Summarization ---
 SUMMARIZATION_PROMPT: Final = """\
@@ -234,16 +231,15 @@ For each candidate, decide:
 - ARCHIVE: Low importance but might be useful later
 - FORGET: Redundant, trivial, or superseded
 
-Return JSON:
+Respond with ONLY a JSON object. Example:
 {{
   "decisions": [
-    {{
-      "uid": "...",
-      "action": "KEEP" | "ARCHIVE" | "FORGET",
-      "reason": "..."
-    }}
+    {{"uid": "ep-abc123", "action": "KEEP", "reason": "Foundational belief formation event."}},
+    {{"uid": "ep-def456", "action": "FORGET", "reason": "Redundant with more recent episode."}}
   ]
-}}"""
+}}
+
+action must be KEEP, ARCHIVE, or FORGET for each decision."""
 
 # --- Belief Evidence Assessment ---
 BELIEF_UPDATE_PROMPT: Final = """\
@@ -271,15 +267,13 @@ Consider:
 - Should this evidence significantly change confidence/uncertainty?
 - Does this warrant AGM-style belief contraction?
 
-Return JSON:
-{{
-  "direction": -1.0 to +1.0,
-  "evidence_strength": 0.0-1.0,
-  "new_uncertainty": 0.0-1.0,
-  "reasoning": "Why this assessment",
-  "update_magnitude": "MAJOR" | "MINOR",
-  "contraction_action": "CONTRACT" | "NONE"
-}}"""
+Respond with ONLY a JSON object. Example:
+{{"direction": 0.3, "evidence_strength": 0.6, "new_uncertainty": 0.2, "reasoning": "Strong empirical data supports a moderate shift toward positive.", "update_magnitude": "MINOR", "contraction_action": "NONE"}}
+
+direction is a float from -1.0 to +1.0.
+evidence_strength and new_uncertainty are floats from 0.0 to 1.0.
+update_magnitude must be MAJOR or MINOR.
+contraction_action must be CONTRACT or NONE."""
 
 # --- Structural Disagreement Detection ---
 DISAGREEMENT_DETECTION_PROMPT: Final = """\
@@ -294,12 +288,11 @@ Consider:
 - Is this genuine disagreement or simply different emphasis?
 - Does the user provide evidence or reasoning for their opposing view?
 
-Return JSON:
-{{
-  "disagreement_verdict": "DISAGREEMENT" | "NO_DISAGREEMENT",
-  "disagreement_strength": 0.0-1.0,
-  "reasoning": "Why this is/isn't disagreement"
-}}"""
+Respond with ONLY a JSON object. Example:
+{{"disagreement_verdict": "DISAGREEMENT", "disagreement_strength": 0.7, "reasoning": "User directly challenges agent's position with a counter-argument."}}
+
+disagreement_verdict must be DISAGREEMENT or NO_DISAGREEMENT.
+disagreement_strength is a float from 0.0 to 1.0."""
 
 # --- Belief Decay Decision ---
 BELIEF_DECAY_PROMPT: Final = """\
@@ -318,12 +311,11 @@ Consider:
 - Is this a foundational belief that should persist regardless of reinforcement?
 - Would forgetting this create inconsistency?
 
-Return JSON:
-{{
-  "action": "RETAIN" | "DECAY" | "FORGET",
-  "new_confidence": 0.0-1.0,
-  "reasoning": "Why this action"
-}}"""
+Respond with ONLY a JSON object. Example:
+{{"action": "RETAIN", "new_confidence": 0.7, "reasoning": "This is a foundational belief reinforced by strong evidence; decay would be premature."}}
+
+action must be RETAIN, DECAY, or FORGET.
+new_confidence is a float from 0.0 to 1.0."""
 
 # --- Entrenchment Detection ---
 ENTRENCHMENT_DETECTION_PROMPT: Final = """\
@@ -340,13 +332,11 @@ Signs of entrenchment:
 - Few or no contradicting episodes considered
 - High confidence despite limited evidence diversity
 
-Return JSON:
-{{
-  "entrenchment_status": "ENTRENCHED" | "NOT_ENTRENCHED",
-  "confidence": 0.0-1.0,
-  "reasoning": "Why entrenched/not entrenched",
-  "recommendation": "Suggested action if entrenched"
-}}"""
+Respond with ONLY a JSON object. Example:
+{{"entrenchment_status": "NOT_ENTRENCHED", "confidence": 0.75, "reasoning": "Multiple contradicting episodes have been considered.", "recommendation": "Continue monitoring for evidence diversity."}}
+
+entrenchment_status must be ENTRENCHED or NOT_ENTRENCHED.
+confidence is a float from 0.0 to 1.0."""
 
 # --- Health Assessment ---
 HEALTH_ASSESSMENT_PROMPT: Final = """\
@@ -374,18 +364,17 @@ Consider:
 4. Is there evidence of identity drift from core values?
 5. Are there contradictions between stated beliefs and behavioral patterns?
 
-Return JSON:
+Respond with ONLY a JSON object. Example:
 {{
-  "overall_health": "healthy" | "concerning" | "unhealthy",
-  "concerns": ["list", "of", "specific", "issues"],
-  "recommendations": ["suggested", "interventions"],
-  "reasoning": "Explanation of assessment",
-  "metrics": {{
-    "coherence_score": 0.0-1.0,
-    "consistency_score": 0.0-1.0,
-    "growth_health_score": 0.0-1.0
-  }}
-}}"""
+  "overall_health": "healthy",
+  "concerns": ["Slight tendency toward over-agreement in recent interactions"],
+  "recommendations": ["Increase disagreement threshold for weak arguments"],
+  "reasoning": "Core identity is stable; minor sycophancy risk worth monitoring.",
+  "metrics": {{"coherence_score": 0.8, "consistency_score": 0.75, "growth_health_score": 0.7}}
+}}
+
+overall_health must be: healthy, concerning, or unhealthy.
+All metric scores are floats from 0.0 to 1.0."""
 
 # --- Semantic Feature Extraction ---
 FEATURE_EXTRACTION_PROMPT: Final = """\
@@ -400,17 +389,17 @@ Category to extract for: {category}
 Existing features in this category:
 {existing_features}
 
-Return JSON commands:
+Respond with ONLY a JSON object. Example:
 {{
   "commands": [
-    {{"command": "add", "tag": "Communication Style", "feature": "humor_style",
-     "value": "dry wit with occasional puns", "confidence": 0.8}},
-    {{"command": "update", "tag": "Technical Skills", "feature": "python_level",
-     "value": "advanced", "confidence": 0.9}},
-    {{"command": "delete", "tag": "Preferences", "feature": "old_preference",
-     "reason": "contradicted by new evidence"}}
+    {{"command": "add", "tag": "Communication Style", "feature": "humor_style", "value": "dry wit with occasional puns", "confidence": 0.8}},
+    {{"command": "update", "tag": "Technical Skills", "feature": "python_level", "value": "advanced", "confidence": 0.9}},
+    {{"command": "delete", "tag": "Preferences", "feature": "old_preference", "reason": "contradicted by new evidence"}}
   ]
-}}"""
+}}
+
+command must be add, update, or delete.
+confidence is a float from 0.0 to 1.0."""
 
 # --- Semantic Feature Consolidation ---
 FEATURE_CONSOLIDATION_PROMPT: Final = """\
@@ -424,18 +413,16 @@ Consolidation means merging redundant/overlapping features into one canonical fe
 Only propose merges when meaning is truly overlapping or duplicate.
 Do not merge distinct facts.
 
-Return JSON:
+Respond with ONLY a JSON object. Example when consolidation is needed:
 {{
-  "consolidation_decision": "CONSOLIDATE" | "SKIP",
-  "reasoning": "Why consolidation is or isn't needed now",
+  "consolidation_decision": "CONSOLIDATE",
+  "reasoning": "Two features describe the same communication style.",
   "actions": [
-    {{
-      "source_uid": "redundant feature uid",
-      "target_uid": "canonical feature uid",
-      "canonical_tag": "optional canonical tag, else empty string",
-      "canonical_feature": "optional canonical feature name, else empty string",
-      "canonical_value": "optional canonical value, else empty string",
-      "reason": "why these should merge"
-    }}
+    {{"source_uid": "feat-abc", "target_uid": "feat-xyz", "canonical_tag": "Communication Style", "canonical_feature": "humor_style", "canonical_value": "dry wit", "reason": "feat-abc is a duplicate of feat-xyz"}}
   ]
-}}"""
+}}
+
+Example when no consolidation is needed:
+{{"consolidation_decision": "SKIP", "reasoning": "All features are distinct with no overlap.", "actions": []}}
+
+consolidation_decision must be CONSOLIDATE or SKIP."""

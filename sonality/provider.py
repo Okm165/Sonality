@@ -18,6 +18,32 @@ _EMPTY_MAPPING: dict[str, object] = {}
 _THINKING_ANSWER_MARKERS = ("Final Output:", "Output:", "Answer:", "Final Answer:", "Response:")
 
 
+def _normalize_schema_notation(text: str) -> str:
+    """Coerce common model schema-template patterns into valid JSON.
+
+    Some models (especially quantized variants) output schema notation like
+      "field": "OPTION_A" | "OPTION_B" | "OPTION_C"
+      "field": float
+      "field": string
+      "field": 0.0-1.0
+    instead of filling in actual values.  We normalize these to the first
+    concrete option or a sensible default so downstream parsing succeeds.
+    """
+    # "X" | "Y" | "Z"  →  "X"  (keep first enum option)
+    text = re.sub(r'"([^"]+)"\s*(?:\|\s*"[^"]*"\s*)+', r'"\1"', text)
+    # bare type names as values  →  sensible defaults
+    text = re.sub(r':\s*\bfloat\b', ': 0.5', text)
+    text = re.sub(r':\s*\bint\b', ': 0', text)
+    text = re.sub(r':\s*\bbool\b', ': false', text)
+    text = re.sub(r':\s*\bstring\b', ': ""', text)
+    text = re.sub(r':\s*\bnull\b\s*(?=[,}])', ': null', text)
+    # range notation  "0.0-1.0"  or  "-1.0 to +1.0"  →  "0.5"
+    text = re.sub(r'"[-+]?\d+\.?\d*\s*(?:to|-)\s*[-+]?\d+\.?\d*"', '"0.5"', text)
+    # bare range as value  :  0.0-1.0  →  : 0.5
+    text = re.sub(r':\s*[-+]?\d+\.?\d*\s*(?:to|-)\s*[-+]?\d+\.?\d*(?=[,}\s])', ': 0.5', text)
+    return text
+
+
 def extract_last_json_object(text: str) -> dict[str, object] | None:
     """Find the last valid JSON object in text, scanning left-to-right with raw_decode.
 
@@ -25,27 +51,40 @@ def extract_last_json_object(text: str) -> dict[str, object] | None:
     return where it ends. Scanning all '{' positions and keeping the last successful
     parse means a model self-correction ("actually: {...}") produces the corrected value.
     Handles markdown fences, trailing prose, nested braces, and multiple JSON blocks.
+    Also normalizes common schema-template patterns output by quantized thinking models.
     """
     stripped = text.strip()
-    # Strip markdown code fences first, then remove invalid JSON + prefixes on numbers
+    # Strip markdown code fences
     cleaned = stripped.replace("```json", "").replace("```", "").strip()
     # +0.42 and +1 are not valid JSON; strip leading + from numeric literals
     cleaned = re.sub(r":\s*\+(\d)", r": \1", cleaned)
+
     decoder = json.JSONDecoder()
-    last_good: dict[str, object] | None = None
-    i = 0
-    while i < len(cleaned):
-        if cleaned[i] != "{":
-            i += 1
-            continue
-        try:
-            obj, end = decoder.raw_decode(cleaned, i)
-            if isinstance(obj, dict):
-                last_good = obj
-            i = end
-        except json.JSONDecodeError:
-            i += 1
-    return last_good
+
+    def _try_parse(source: str) -> dict[str, object] | None:
+        last_good: dict[str, object] | None = None
+        i = 0
+        while i < len(source):
+            if source[i] != "{":
+                i += 1
+                continue
+            try:
+                obj, end = decoder.raw_decode(source, i)
+                if isinstance(obj, dict):
+                    last_good = obj
+                i = end
+            except json.JSONDecodeError:
+                i += 1
+        return last_good
+
+    result = _try_parse(cleaned)
+    if result is not None:
+        return result
+    # Second pass: normalize schema-template notation and retry
+    normalized = _normalize_schema_notation(cleaned)
+    if normalized != cleaned:
+        result = _try_parse(normalized)
+    return result
 
 
 def _extract_answer_from_reasoning(reasoning: str) -> str:
@@ -263,7 +302,7 @@ def embed(
     dimensions: int = 0,
 ) -> list[list[float]]:
     payload: dict[str, object] = {"model": model, "input": texts}
-    if dimensions > 0:
+    if dimensions > 0 and config.EMBEDDING_SEND_DIMENSIONS:
         payload["dimensions"] = dimensions
     api_key = config.EMBEDDING_API_KEY or config.API_KEY
     raw = _post_json("/embeddings", payload, config.EMBEDDING_BASE_URL, api_key)

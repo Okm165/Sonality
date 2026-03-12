@@ -18,8 +18,10 @@ _MAX_RETRIES: Final = 2
 _BACKOFF_BASE: Final = 1.5
 _JSON_SYSTEM_PROMPT: Final = (
     "You are a structured data extractor. "
-    "Return ONLY a valid JSON object matching the schema in the prompt. "
-    "No prose, no explanation, no markdown fences — just the JSON object."
+    "Think through the task if needed, then end your response with ONLY a valid JSON object. "
+    "The JSON object must be the very last thing you output. "
+    "Do NOT use pipe characters (|), schema type annotations, or placeholder text as values — fill in actual values only. "
+    "No markdown fences around the final JSON."
 )
 _JSON_REPAIR_PROMPT: Final = (
     "The following JSON is malformed or does not match the required schema.\n"

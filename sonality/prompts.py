@@ -120,11 +120,15 @@ User: {user_message}
 Agent: {agent_response}
 Evidence strength: {ess_score}
 
-Return JSON:
-{{
-  "insight_decision": "EXTRACT" | "SKIP",
-  "insight_text": "One concise sentence when EXTRACT, empty string when SKIP"
-}}"""
+The final thing you output must be a JSON object with these two fields filled in with actual values:
+- insight_decision: write EXTRACT if you found an identity-forming insight, or SKIP if not
+- insight_text: write the one-sentence insight when EXTRACT, or an empty string when SKIP
+
+Example output when insight found:
+{{"insight_decision": "EXTRACT", "insight_text": "Prefers concrete data over general principles when evaluating claims"}}
+
+Example output when nothing notable:
+{{"insight_decision": "SKIP", "insight_text": ""}}"""
 
 
 REFLECTION_PROMPT = """\
