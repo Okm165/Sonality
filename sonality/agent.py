@@ -629,9 +629,15 @@ class SonalityAgent:
         if not episode_uid:
             log.warning("Dual-store write failed; skipping post-processing belief update")
 
-        # Queue for semantic feature extraction
+        # Queue for semantic feature extraction (include ESS context so the worker
+        # can distinguish low-evidence chit-chat from belief-shaping exchanges)
         if episode_uid:
-            content = f"User: {user_message}\nAssistant: {agent_response}"
+            ess_line = (
+                f"ESS: {ess.score:.2f} ({ess.reasoning_type}) | "
+                f"direction={ess.opinion_direction} | "
+                f"topics={list(ess.topics)}"
+            )
+            content = f"User: {user_message}\nAssistant: {agent_response}\n{ess_line}"
             self._semantic_worker.enqueue(episode_uid, content)
 
         # Persist STM to PostgreSQL
@@ -1153,7 +1159,9 @@ class SonalityAgent:
             max_tokens=config.SPONGE_MAX_TOKENS,
         )
 
-    def _apply_reflection_snapshot(self, pre_snapshot: str, reflected_snapshot: str) -> None:
+    def _apply_reflection_snapshot(
+        self, pre_snapshot: str, reflected_snapshot: str, opinions_before: dict[str, float]
+    ) -> None:
         """Validate and commit reflected snapshot text when it changed."""
         if not reflected_snapshot or reflected_snapshot == pre_snapshot:
             log.info("Reflection produced no changes")
@@ -1162,7 +1170,7 @@ class SonalityAgent:
             log.warning("Reflection output rejected by validation")
             return
 
-        self._check_belief_preservation(reflected_snapshot)
+        self._check_belief_preservation(opinions_before)
         self.sponge.snapshot = reflected_snapshot
         self.sponge.version += 1
         self.sponge.record_shift(
@@ -1317,6 +1325,7 @@ class SonalityAgent:
             gate.trigger_label,
         )
 
+        opinions_before_reflection = dict(self.sponge.opinion_vectors)
         dropped = self._decay_beliefs_with_llm()
         if dropped:
             log.info("Decay removed %d stale beliefs: %s", len(dropped), dropped)
@@ -1369,7 +1378,7 @@ class SonalityAgent:
                 disable_thinking=True,
             )
             reflected_snapshot = completion.text.strip()
-            self._apply_reflection_snapshot(pre_snapshot, reflected_snapshot)
+            self._apply_reflection_snapshot(pre_snapshot, reflected_snapshot, opinions_before_reflection)
             self._finalize_reflection_cycle(
                 dropped=dropped,
                 entrenched=entrenched,
@@ -1427,17 +1436,18 @@ class SonalityAgent:
                 forgetting_result.archived,
             )
 
-    def _check_belief_preservation(self, new_snapshot: str) -> None:
-        """Warn if reflection dropped high-confidence beliefs from the snapshot.
+    def _check_belief_preservation(self, opinions_before: dict[str, float]) -> None:
+        """Warn if reflection dropped high-magnitude beliefs from opinion_vectors.
 
-        Constitutional AI Character Training (Nov 2025): losing a trait from
-        the narrative = losing it from behavior. PERSIST (2025): monitor for
-        personality erosion across reflections.
+        Checks actual vector entries, not snapshot text.  Snapshot is a narrative
+        and will not mention every tracked topic verbatim.  The real danger is a
+        belief being evicted from opinion_vectors entirely, which is what we watch.
         """
-        strong = [t for t, m in self.sponge.belief_meta.items() if m.confidence > 0.5]
-        missing = [t for t in strong if t.lower().replace("_", " ") not in new_snapshot.lower()]
-        if missing:
-            log.warning("HEALTH: reflection dropped strong beliefs: %s", missing)
+        strong_before = {t for t, v in opinions_before.items() if abs(v) > 0.15}
+        strong_after = set(self.sponge.opinion_vectors)
+        dropped = strong_before - strong_after
+        if dropped:
+            log.warning("HEALTH: reflection evicted strong beliefs from vectors: %s", dropped)
 
     def _log_interaction_summary(self, ess: ESSResult) -> None:
         """Structured per-interaction summary for monitoring personality evolution."""

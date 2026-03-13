@@ -61,6 +61,8 @@ Conditionally (when ESS reliability gates pass):
 - Synchronous LLM calls inside async coroutines use `asyncio.to_thread` to keep event loops unblocked.
 - **Per-reasoning-type magnitude caps** (aligned with AGM minimal change principle): empirical_data ≤ 0.20, expert_opinion ≤ 0.14, logical_argument ≤ 0.10, anecdotal ≤ 0.06, social_pressure ≤ 0.02 per update. Prevents a single high-ESS turn from jumping opinion vectors by 0.8+.
 - **Semantic feature tag validation**: each category has a fixed set of valid tags (e.g. `personality` → Communication Style, Values, Behavioral Traits, Temperament, Cognitive Style). LLM is told these in the extraction prompt, preventing cross-category tag contamination.
+- **Contradiction-only feature deletion**: semantic features are never deleted due to topic shifts. The extraction prompt mandates a non-empty contradiction evidence quote in the `reason` field; the runtime guard skips any DELETE command with `reason=""`. This prevents personality erosion when users switch topics (e.g. from climate policy to cooking). Research-backed: FadeMem (2025), MemGPT, and PersonaAgent all show that topic silence ≠ trait contradiction.
+- **Hybrid BM25+vector retrieval**: derivative search uses RRF (Reciprocal Rank Fusion) of dense vector cosine similarity and sparse PostgreSQL full-text search (`tsvector` GIN index). This improves recall on exact-term queries (specific study names, statistics) where pure semantic search underperforms. Formula: `RRF(d) = Σ 1/(60 + rank_r(d))`, fusing vector and FTS ranked lists.
 
 Periodically (every ~20 interactions): **reflection** — consolidates accumulated insights into the personality narrative, decays unreinforced beliefs, validates snapshot integrity.
 
@@ -226,6 +228,10 @@ uv run sonality --model "anthropic/claude-sonnet-4" --ess-model "anthropic/claud
 **Forgetting engine with recency signals** — episode forgetting candidates are evaluated with access count, last-accessed timestamp, and ESS score. High-ESS, frequently-accessed episodes are protected from archival; unaccessed trivial episodes are preferred for hard-delete. Aligned with FadeMem (2025) differential decay and A-MAC (2025) five-factor admission metrics.
 
 **Interaction timing telemetry** — every `respond()` call logs LLM wall time and total post-processing time, enabling per-interaction throughput analysis without profiler overhead.
+
+**Contradiction-only feature deletion guard** — semantic features resist accidental deletion when users change topics. Both the extraction prompt and a runtime guard enforce that DELETE commands require an explicit contradiction quote. Topic silence (e.g. asking about cooking while climate features exist) never triggers deletion. This prevents the "personality erosion" problem observed in MemGPT-style systems where over-deletion by LLMs is a known failure mode.
+
+**Belief preservation monitoring** — reflection captures `opinion_vectors` before the decay step and checks for unexpected evictions after the snapshot rewrite. Only beliefs that completely disappear from `opinion_vectors` (not just from the narrative text) trigger a WARNING, eliminating false positives from the snapshot's narrative-not-enumeration design.
 
 ## Development
 

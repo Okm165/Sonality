@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS derivatives (
 CREATE INDEX IF NOT EXISTS idx_derivatives_episode ON derivatives (episode_uid);
 CREATE INDEX IF NOT EXISTS idx_derivatives_archived ON derivatives (archived) WHERE NOT archived;
 CREATE INDEX IF NOT EXISTS idx_derivatives_embedding ON derivatives USING hnsw (embedding vector_cosine_ops);
+CREATE INDEX IF NOT EXISTS idx_derivatives_fts ON derivatives USING GIN (to_tsvector('english', text || ' ' || key_concept)) WHERE NOT archived;
 
 -- Semantic features (personality, preferences, knowledge, relationships)
 CREATE TABLE IF NOT EXISTS semantic_features (

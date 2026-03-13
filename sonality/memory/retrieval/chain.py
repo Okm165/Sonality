@@ -65,8 +65,8 @@ class ChainOfQueryAgent:
         best_confidence = 0.0
 
         for iteration in range(1, self._max_iterations + 1):
-            # Vector search
-            results = await self._store.vector_search(current_query, top_k=base_n)
+            # Hybrid search: RRF(vector, full-text) for better recall on exact terms
+            results = await self._store.hybrid_search(current_query, top_k=base_n)
             new_episode_uids = [r[1] for r in results if r[1] not in all_episode_uids]
 
             if new_episode_uids:

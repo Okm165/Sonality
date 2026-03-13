@@ -389,11 +389,18 @@ Valid tags for this category (ONLY use these, no other tags allowed): {tags}
 Existing features in this category:
 {existing_features}
 
+DELETION RULES (strictly enforced):
+- NEVER issue a delete command unless the current episode EXPLICITLY contradicts an existing feature.
+- A topic shift does NOT justify deletion. If the episode is about cooking, do NOT delete climate or policy features.
+- Silence or absence is NOT a contradiction. Only direct contradiction is.
+- If deleting, you MUST fill the "reason" field with the exact phrase from the episode that contradicts the feature.
+
 Your response must be ONLY this JSON object with actual values filled in (no {{"..."}}, no placeholders):
 {{
   "commands": [
-    {{"command": "add", "tag": "Communication Style", "feature": "humor_style", "value": "dry wit with occasional puns", "confidence": 0.8}},
-    {{"command": "update", "tag": "Technical Skills", "feature": "python_level", "value": "advanced", "confidence": 0.9}}
+    {{"command": "add", "tag": "Communication Style", "feature": "humor_style", "value": "dry wit with occasional puns", "confidence": 0.8, "reason": ""}},
+    {{"command": "update", "tag": "Technical Skills", "feature": "python_level", "value": "advanced", "confidence": 0.9, "reason": ""}},
+    {{"command": "delete", "tag": "Values", "feature": "old_trait", "value": "", "confidence": 0.9, "reason": "Agent explicitly said 'I no longer believe X'"}}
   ]
 }}
 If no features should be added/updated/deleted, return: {{"commands": []}}

@@ -747,3 +747,51 @@ class TestS7ExtendedEvolution:
         assert len(found) >= 2, (
             f"Memory recall response missing expected keywords (found {found}): {last_response[:200]!r}"
         )
+
+    def test_feature_persistence_across_topic_shift(self, agent20: Any) -> None:
+        """Climate features must survive the French cooking topic shift (S7 interaction #14).
+
+        Verifies the DELETE guard: empty-reason deletes are skipped even when the
+        LLM switches topic, so accumulated personality traits persist.
+        """
+        time.sleep(3)  # allow background semantic worker to finish
+
+        with psycopg.connect(config.POSTGRES_URL) as conn:
+            all_features = conn.execute(
+                "SELECT category, tag, feature_name FROM semantic_features"
+            ).fetchall()
+
+        climate_features = [
+            f"{cat}/{tag}/{feat}"
+            for cat, tag, feat in all_features
+            if any(kw in feat.lower() or kw in tag.lower() for kw in
+                   ["skeptic", "climate", "analyt", "empiric", "economic", "pragmat"])
+        ]
+        print(f"\n  total features: {len(all_features)}")
+        print(f"  climate/analytical features: {len(climate_features)}")
+        for f in climate_features[:10]:
+            print(f"    {f}")
+
+        assert len(climate_features) >= 1, (
+            "All climate/analytical features were deleted after topic shift to cooking — "
+            "DELETE guard may not be working"
+        )
+
+    def test_no_unjustified_feature_deletes(self, agent20: Any) -> None:
+        """Feature count must not collapse dramatically after topic shifts.
+
+        A mass-delete event (e.g. 10 deletes in one interaction) indicates the
+        LLM is purging on topic shift rather than explicit contradiction.
+        """
+        time.sleep(2)
+
+        with psycopg.connect(config.POSTGRES_URL) as conn:
+            count = conn.execute(
+                "SELECT COUNT(*) FROM semantic_features"
+            ).fetchone()[0]
+
+        print(f"\n  total semantic features in DB: {count}")
+        # After 16 interactions of rich climate debate, we must have substantial features
+        assert count >= 15, (
+            f"Only {count} semantic features survived — excessive deletion may have occurred"
+        )

@@ -177,6 +177,70 @@ class DualEpisodeStore:
             parsed.append((str(row[0]), str(row[1]), distance))
         return parsed
 
+    async def hybrid_search(
+        self,
+        query: str,
+        *,
+        top_k: int = 20,
+        rrf_k: int = 60,
+    ) -> list[tuple[str, str, float]]:
+        """Hybrid search: RRF fusion of vector cosine + PostgreSQL full-text (tsvector).
+
+        Combines dense vector similarity with sparse BM25-approximate text matching
+        via Reciprocal Rank Fusion (RRF). Improves recall on exact-term queries
+        (e.g. "IRENA 2023 solar cost") where pure vector search can miss.
+
+        Returns (uid, episode_uid, rrf_score) sorted by rrf_score descending.
+        """
+        query_embedding = self._embedder.embed_query(query)
+        candidate_n = top_k * 3  # fetch wider pool, RRF narrows it
+
+        async with self._pg_pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute("SET hnsw.iterative_scan = 'relaxed_order'")
+            await cur.execute("SET hnsw.ef_search = 150")
+
+            # Vector leg
+            await cur.execute(
+                """
+                SELECT uid, episode_uid
+                FROM derivatives
+                WHERE NOT archived
+                ORDER BY embedding <=> %s::vector
+                LIMIT %s
+                """,
+                (query_embedding, candidate_n),
+            )
+            vec_rows = [(str(r[0]), str(r[1])) for r in await cur.fetchall()]
+
+            # Full-text leg (ts_rank approximates BM25 on standard Postgres)
+            await cur.execute(
+                """
+                SELECT uid, episode_uid
+                FROM derivatives
+                WHERE NOT archived
+                  AND plainto_tsquery('english', %s) @@ to_tsvector('english', text || ' ' || key_concept)
+                ORDER BY ts_rank_cd(
+                    to_tsvector('english', text || ' ' || key_concept),
+                    plainto_tsquery('english', %s)
+                ) DESC
+                LIMIT %s
+                """,
+                (query, query, candidate_n),
+            )
+            fts_rows = [(str(r[0]), str(r[1])) for r in await cur.fetchall()]
+
+        # RRF fusion
+        scores: dict[str, tuple[str, float]] = {}  # uid → (episode_uid, rrf_score)
+        for rank, (uid, ep_uid) in enumerate(vec_rows, start=1):
+            prev = scores.get(uid, (ep_uid, 0.0))
+            scores[uid] = (ep_uid, prev[1] + 1.0 / (rrf_k + rank))
+        for rank, (uid, ep_uid) in enumerate(fts_rows, start=1):
+            prev = scores.get(uid, (ep_uid, 0.0))
+            scores[uid] = (ep_uid, prev[1] + 1.0 / (rrf_k + rank))
+
+        sorted_results = sorted(scores.items(), key=lambda x: -x[1][1])
+        return [(uid, ep_uid, rrf_score) for uid, (ep_uid, rrf_score) in sorted_results[:top_k]]
+
     async def archive_derivatives(self, episode_uid: str) -> None:
         """Mark derivatives as archived in pgvector (soft delete)."""
         async with self._pg_pool.connection() as conn, conn.cursor() as cur:

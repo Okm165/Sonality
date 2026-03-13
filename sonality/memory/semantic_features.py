@@ -221,6 +221,16 @@ class SemanticIngestionWorker:
                     cmd.confidence,
                 )
             elif cmd.command is FeatureCommandType.DELETE:
+                # Require a non-empty reason (explicit contradiction evidence).
+                # Topic shifts produce reason="" which we skip to prevent personality erosion.
+                if not cmd.reason.strip():
+                    log.debug(
+                        "Feature DELETE skipped (no contradiction evidence): %s/%s/%s",
+                        category,
+                        cmd.tag,
+                        cmd.feature,
+                    )
+                    continue
                 log.info(
                     "Feature DELETE: %s/%s/%s reason=%s",
                     category,
