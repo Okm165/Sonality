@@ -56,7 +56,7 @@ Conditionally (when ESS reliability gates pass):
 10. **STM segment consolidation** — background worker periodically summarizes and consolidates episode segments
 
 **Key implementation details:**
-- All structured JSON calls use `chat_template_kwargs: {"enable_thinking": false}` to suppress chain-of-thought in thinking models (Qwen3, Mistral-3.1, etc.), ensuring the JSON lands directly in `content` without exhausting the token budget on reasoning. This eliminated ~80% of previous JSON parse failures.
+- **All** LLM calls (both JSON extraction and plain text generation) use `chat_template_kwargs: {"enable_thinking": false}` via `disable_thinking=True`. Without this, Qwen3.5 and similar thinking models burn their entire `max_tokens` budget (~4096 tokens, ~100 seconds) on chain-of-thought reasoning before producing output — making the system unusably slow. Applied to: main conversation response, reflection snapshot, STM summarization, consolidation summaries, ESS classification, all JSON extraction calls.
 - A `threading.Semaphore(1)` serializes all LLM HTTP calls to prevent overwhelming single-threaded local inference servers.
 - Synchronous LLM calls inside async coroutines use `asyncio.to_thread` to keep event loops unblocked.
 
@@ -198,7 +198,7 @@ Set in `.env` (see `.env.example`):
 
 If live runs fail, use `make preflight-live-probe` to validate endpoint/model/policy access with a tiny real request before launching long benchmarks.
 
-**Thinking model support:** For models with chain-of-thought reasoning (Qwen3, Mistral-3.1, DeepSeek-R1, etc.), the system automatically disables thinking for structured JSON calls via `chat_template_kwargs: {"enable_thinking": false}`. This ensures JSON output lands in `content` directly rather than being buried in `reasoning_content` after exhausting the token budget on chain-of-thought. No configuration needed — this is applied transparently by the `llm_call` wrapper.
+**Thinking model support:** For models with chain-of-thought reasoning (Qwen3, Mistral-3.1, DeepSeek-R1, etc.), the system disables thinking for **all** LLM calls via `chat_template_kwargs: {"enable_thinking": false}`. Without this, thinking models exhaust their entire `max_tokens` budget (~4096 tokens, ~100 seconds) on internal chain-of-thought before producing any output — making each interaction take 5-8 minutes instead of 30-60 seconds. Applied to every `chat_completion` call site in the codebase. No configuration needed.
 
 Runtime model overrides (no `.env` edit required):
 

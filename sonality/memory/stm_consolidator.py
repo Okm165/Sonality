@@ -76,6 +76,7 @@ class BackgroundSummarizer(threading.Thread):
                 model=config.FAST_LLM_MODEL,
                 max_tokens=config.FAST_LLM_MAX_TOKENS,
                 messages=({"role": "user", "content": prompt},),
+                disable_thinking=True,
             )
             return completion.text.strip()
         except Exception:
@@ -101,6 +102,7 @@ class BackgroundSummarizer(threading.Thread):
                 model=config.FAST_LLM_MODEL,
                 max_tokens=config.FAST_LLM_MAX_TOKENS,
                 messages=({"role": "user", "content": prompt},),
+                disable_thinking=True,
             )
             return completion.text.strip()
         except Exception:

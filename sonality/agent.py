@@ -373,6 +373,7 @@ class SonalityAgent:
                 {"role": "system", "content": system_prompt},
                 *self.conversation,
             ),
+            disable_thinking=True,
         )
         response_input_tokens = completion.input_tokens
         response_output_tokens = completion.output_tokens
@@ -1328,6 +1329,7 @@ class SonalityAgent:
                 model=self.ess_model,
                 max_tokens=config.FAST_LLM_MAX_TOKENS,
                 messages=({"role": "user", "content": prompt},),
+                disable_thinking=True,
             )
             reflected_snapshot = completion.text.strip()
             self._apply_reflection_snapshot(pre_snapshot, reflected_snapshot)

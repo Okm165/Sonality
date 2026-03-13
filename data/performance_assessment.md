@@ -213,6 +213,43 @@ ESS correctly:
 
 ---
 
+---
+
+## Session 3 Fixes (2026-03-13)
+
+### Root Cause: `disable_thinking=True` Missing from Non-JSON Calls
+
+The most critical finding of Session 3: the `disable_thinking=True` flag was only applied to **JSON extraction calls** (`llm_call()` → `caller.py`), but NOT to plain text generation calls (main conversation response, STM summarization, consolidation summaries, reflection snapshot). The Qwen3.5-35B thinking model burns its entire `max_tokens=4096` budget on chain-of-thought reasoning for every call without this flag — taking ~100 seconds per call instead of ~3 seconds.
+
+**Impact:** With ~3-5 non-JSON LLM calls per interaction, each interaction could take 5-8 minutes instead of 30-60 seconds, and with the global `threading.Semaphore(1)` serializing calls, background threads (STM, semantic worker) competing for the semaphore made the system unusably slow.
+
+**Fix:** Added `disable_thinking=True` to all remaining `chat_completion` call sites:
+- `agent.py:369` — main conversation response
+- `agent.py:1328` — reflection snapshot generation
+- `consolidation.py:153` — segment consolidation summaries
+- `stm_consolidator.py:75,100` — STM batch summaries and merges
+
+All LLM calls now disable thinking. The `_extract_answer_from_reasoning` fallback in `provider.py` is retained for robustness but no longer needed in practice.
+
+### Test Assertion Fixes
+
+**Episode count mismatch resolved:** The `test_db_episode_count_matches_interactions` assertion (`abs(episodes - interactions) <= 2`) failed because the forgetting cycle ran at interaction #9 and correctly hard-deleted 3 low-quality episodes. The assertion was updated to:
+- Hard constraint: `neo4j_episodes <= interactions` (can't have more than stored)
+- Soft constraint: `neo4j_episodes >= interactions // 2` (forgetting shouldn't be over-aggressive)
+
+**DB reset fixture added:** A `session`-scoped autouse fixture `reset_databases` now clears both Neo4j and PostgreSQL at the start of every test session, preventing state leakage from parallel or interrupted runs.
+
+### Forgetting Cycle Behavior (Healthy)
+
+From the 2242 log run:
+- 9 interactions → 9 episodes stored
+- Reflection fired at interaction #9 (LLM gate decided PERIODIC)
+- Forgetting cycle: 9 assessed, 4 kept active, 2 archived, 3 hard-deleted
+- Deleted episodes were correctly identified as low-quality/redundant (emotional dispute, repetitive statistics, public-consensus assertion without depth)
+- This is **expected and correct behavior** — the agent actively prunes its own memory
+
+---
+
 ## Remaining Concerns
 
 ### 1. `BeliefUpdateResponse` partial template copy (Minor)
@@ -243,9 +280,12 @@ The Sonality dual-store memory architecture is sound and all behavioral invarian
 **With a better model** (Claude Sonnet 4.5, GPT-4.1, or GPT-4.1-mini), all components would run in seconds instead of minutes, and multi-turn personality dynamics would be observable in real time.
 
 **Recommended next steps:**
-1. Add Ollama back to `docker-compose.yml` for reliable embedding service management
-2. Run `tests/test_agent_health.py` for comprehensive behavioral suite (requires clean DB)
-3. Run `tests/test_live_graduated.py -m live` for infrastructure regression checks
-4. With 20+ interactions, validate belief commit to `opinion_vectors` after reflection fires
-5. Consider using a separate smaller ESS model to reduce self-judge coupling
-6. Run the teaching benchmark suite (`make bench-teaching-pulse`) to measure ESS calibration across 60 scenario packs
+1. Restart the test suite after the `disable_thinking=True` global fix — expected ~5-7 minutes total vs 18+ minutes before, with all 16 tests passing
+2. Add Ollama back to `docker-compose.yml` for reliable embedding service management
+3. With 20+ interactions, validate belief commit to `opinion_vectors` after reflection fires
+4. Consider using a separate smaller ESS model to reduce self-judge coupling
+5. Run the teaching benchmark suite (`make bench-teaching-pulse`) to measure ESS calibration across 60 scenario packs
+
+**Expected test run time after Session 3 fixes:**
+- ~7 LLM calls per interaction × ~5s per call × 9 interactions = ~315 seconds (~5 minutes)
+- vs. prior: ~7 LLM calls × ~100s per call × 9 interactions = ~6,300 seconds (~105 minutes) theoretical worst-case

@@ -494,6 +494,7 @@ def _run_classification_attempts(
                 ),
                 tools=(PROVIDER_ESS_TOOL,),
                 tool_choice=PROVIDER_ESS_TOOL_CHOICE,
+                disable_thinking=True,
             )
             total_input_tokens += completion.input_tokens
             total_output_tokens += completion.output_tokens
