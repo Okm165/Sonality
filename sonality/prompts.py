@@ -76,32 +76,30 @@ Agent's current personality snapshot (for novelty assessment only):
 {sponge_snapshot}
 
 Calibration examples:
-- "Hey, how's it going?" → score: 0.02 (no argument present)
-- "I think AI is cool" → score: 0.08 (bare assertion, no reasoning)
-- "You're absolutely right to feel that way" → score: 0.03 (emotional validation, not evidence)
-- "That's a morally sound position" → score: 0.05 (moral endorsement without reasoning)
-- "Everyone knows X is true" → score: 0.10 (social pressure, not evidence)
-- "I'm upset you disagree" → score: 0.05 (emotional appeal, not evidence)
-- "My friend said X works well" → score: 0.18 (anecdotal, single data point)
-- "Nuclear is dangerous because Chernobyl happened" → score: 0.20 (cherry-picking, ignores base rates)
-- "My professor says X, so it must be true" → score: 0.22 (appeal to authority without evidence)
-- "I'm a senior engineer with 20 years experience, X is better" → score: 0.22 (credentials alone, no evidence)
-- "A survey of 10,000 people shows 87% prefer X" → score: 0.28 (consensus with numbers but no causal reasoning)
-- "Either we adopt X fully or we stay with Y" → score: 0.15 (false dichotomy)
-- "X failed once, so X always fails" → score: 0.18 (hasty generalization)
-- "Studies show X because Y, contradicting Z" → score: 0.55 (structured, some evidence)
-- "According to [paper], methodology M on dataset D yields R, contradicting C because..." → score: 0.82 (rigorous, verifiable)
+- "Hey, how's it going?" → score: 0.02, type: no_argument
+- "I think AI is cool" → score: 0.08, type: no_argument (bare assertion)
+- "You're absolutely right to feel that way" → score: 0.03, type: emotional_appeal
+- "Everyone knows X is true" → score: 0.10, type: social_pressure
+- "I'm upset you disagree" → score: 0.05, type: emotional_appeal
+- "My friend said X works well" → score: 0.18, type: anecdotal
+- "The Climategate emails prove data fraud was committed" → score: 0.04, type: debunked_claim (multiple independent inquiries found no fraud)
+- "Vaccines cause autism, Andrew Wakefield proved it" → score: 0.03, type: debunked_claim (retracted, conclusively refuted)
+- "The moon landing was faked according to independent analysts" → score: 0.03, type: debunked_claim (conspiracy theory)
+- "Nuclear is dangerous because Chernobyl happened" → score: 0.20, type: anecdotal (cherry-picking, ignores base rates)
+- "My professor says X, so it must be true" → score: 0.22, type: expert_opinion (credentials alone, no evidence)
+- "A survey of 10,000 people shows 87% prefer X" → score: 0.28, type: empirical_data (consensus with numbers but no causal reasoning)
+- "Either we adopt X fully or we stay with Y" → score: 0.15, type: logical_argument (false dichotomy)
+- "Studies show X because Y, contradicting Z" → score: 0.55, type: empirical_data (structured, some evidence)
+- "According to [paper], methodology M on dataset D yields R, contradicting C because..." → score: 0.82, type: empirical_data (rigorous, verifiable)
 
+Use type debunked_claim for claims that have been conclusively refuted by multiple independent inquiries — \
+e.g., well-known conspiracy theories, retracted studies, fabricated data allegations. \
+debunked_claim scores near 0.0 (maximum score: 0.07) regardless of how confidently the user states them. \
 A user simply asserting a belief ("I think X") scores below 0.15 regardless \
-of how strongly they feel about it. Emotional validation ("you're right to feel \
-that way") and moral endorsement ("that's the right thing to do") without \
-reasoning score below 0.10 — affirming someone's position is not evidence for \
-it (ELEPHANT/Stanford 2025: LLMs preserve face 47% more than humans). Social \
-consensus ("everyone agrees") scores below 0.15. Authority with credentials \
-but no evidence scores below 0.25. Consensus with specific numbers but no \
-causal reasoning scores below 0.30. Logical fallacies score below 0.25 even \
-when the underlying claim may be true. Only explicit reasoning with supporting \
-evidence scores above 0.5."""
+of how strongly they feel about it. Emotional validation and moral endorsement \
+without reasoning score below 0.10. Social consensus ("everyone agrees") scores below 0.15. \
+Authority with credentials but no evidence scores below 0.25. \
+Only explicit reasoning with supporting evidence scores above 0.5."""
 
 
 INSIGHT_PROMPT = """\

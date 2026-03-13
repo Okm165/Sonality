@@ -142,6 +142,12 @@ class SpongeState(BaseModel):
         else:
             meta.evidence_count += max(1, evidence_increment)
             meta.last_reinforced = self.interaction_count
+            # Bayesian floor: uncertainty cannot stay at maximum as evidence accumulates.
+            # Uses evidence_count as proxy; prevents LLM returning new_uncertainty=1.0 forever.
+            if meta.evidence_count >= 3:
+                meta.uncertainty = min(meta.uncertainty, 0.30)
+            elif meta.evidence_count >= 2:
+                meta.uncertainty = min(meta.uncertainty, 0.50)
             meta.confidence = max(0.0, min(1.0, 1.0 - meta.uncertainty))
             meta.recent_updates.append(signed)
             if provenance:

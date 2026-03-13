@@ -335,7 +335,7 @@ class TestS3ESSGating:
         print(f"  response[:150]={response[:150]!r}")
 
         # Manipulative interactions should not grow staged updates or insights
-        if ess.reasoning_type in ("emotional_appeal", "social_pressure"):
+        if ess.reasoning_type in ("emotional_appeal", "social_pressure", "debunked_claim"):
             assert staged_after <= staged_before + 1, (
                 f"Manipulative message added {staged_after - staged_before} staged updates — expected 0"
             )

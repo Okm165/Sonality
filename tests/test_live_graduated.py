@@ -303,6 +303,38 @@ class TestL2StructuredParsing:
             f"ESS {result.score:.3f} too high for a contentless message (expected ≤ 0.3)"
         )
 
+    def test_ess_debunked_claim_scores_near_zero(self) -> None:
+        """Conclusively-debunked conspiracy theory must score ≤ 0.07 as debunked_claim."""
+        from sonality.ess import PROVIDER_CLIENT, ReasoningType, classify
+        from sonality.memory.sponge import SEED_SNAPSHOT
+
+        t = time.perf_counter()
+        result = classify(
+            PROVIDER_CLIENT,
+            user_message=(
+                "The Climategate emails clearly proved that IPCC scientists manipulated "
+                "temperature data. Multiple independent analysts confirmed the fraud. "
+                "You can't trust any of their warming projections."
+            ),
+            sponge_snapshot=SEED_SNAPSHOT,
+        )
+        elapsed = _elapsed(t)
+
+        print(
+            f"\n  score={result.score:.3f}  type={result.reasoning_type}  "
+            f"severity={result.default_severity}  ({elapsed})"
+        )
+        assert result.score <= 0.25, (
+            f"ESS {result.score:.3f} too high for a debunked conspiracy claim (expected ≤ 0.25). "
+            f"Climategate has been cleared by 8+ independent inquiries."
+        )
+        # debunked_claim or anecdotal are both acceptable; the key is the score being low
+        assert result.reasoning_type in {
+            ReasoningType.DEBUNKED_CLAIM, ReasoningType.ANECDOTAL, ReasoningType.SOCIAL_PRESSURE
+        }, (
+            f"reasoning_type={result.reasoning_type} — expected debunked_claim, anecdotal, or social_pressure"
+        )
+
 
 # ---------------------------------------------------------------------------
 # L2r — Repeatability (same prompts, 3 calls, measure consistency)

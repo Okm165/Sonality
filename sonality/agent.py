@@ -85,6 +85,7 @@ REASONING_TYPE_MAX_MAG: Final[dict[str, float]] = {
     "expert_opinion": 0.14,
     "logical_argument": 0.10,
     "anecdotal": 0.06,
+    "debunked_claim": 0.0,  # Conclusively-refuted claims never move beliefs
     "emotional_appeal": 0.03,
     "social_pressure": 0.02,
     "no_argument": 0.0,
@@ -648,9 +649,12 @@ class SonalityAgent:
 
         self.sponge.interaction_count += 1
 
-        # Manipulative interactions (social pressure, emotional appeals) should not
-        # mutate the personality state — defer staged commits and skip insight extraction.
-        manipulative = ess.reasoning_type in {"social_pressure", "emotional_appeal"}
+        # Manipulative/invalid interactions should not mutate personality state.
+        # debunked_claim: conclusively refuted claims must never update beliefs.
+        # social_pressure / emotional_appeal: coercive but no evidential content.
+        manipulative = ess.reasoning_type in {
+            "social_pressure", "emotional_appeal", "debunked_claim"
+        }
         if manipulative:
             log.info(
                 "Manipulative interaction (%s, score=%.3f): freezing sponge mutation",

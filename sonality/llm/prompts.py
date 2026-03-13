@@ -259,8 +259,15 @@ Consider:
 - Should this evidence significantly change confidence/uncertainty?
 - Does this warrant AGM-style belief contraction?
 
+Uncertainty calibration (IMPORTANT — do NOT leave uncertainty high when evidence accumulates):
+- First evidence on a topic: new_uncertainty 0.6–0.9 (high, new territory)
+- 2+ supporting episodes with no contradictions: new_uncertainty ≤ 0.5 (confidence is building)
+- 3+ supporting episodes with no contradictions: new_uncertainty ≤ 0.3 (well-supported belief)
+- Contradicting evidence: increase uncertainty (higher new_uncertainty)
+- Mixed evidence (some support, some contradict): new_uncertainty 0.4–0.7
+
 Output ONLY a JSON object (fill in YOUR values — do NOT copy this example):
-{{"direction": 0.3, "evidence_strength": 0.6, "new_uncertainty": 0.2, "reasoning": "Peer-reviewed RCT evidence warrants a modest positive shift.", "update_magnitude": "MINOR", "contraction_action": "NONE"}}
+{{"direction": 0.3, "evidence_strength": 0.6, "new_uncertainty": 0.35, "reasoning": "Peer-reviewed RCT evidence warrants a modest positive shift; second supporting episode reduces uncertainty.", "update_magnitude": "MINOR", "contraction_action": "NONE"}}
 
 direction: float -1.0 to +1.0 (negative = contradicts belief, positive = supports).
 evidence_strength and new_uncertainty: floats 0.0 to 1.0.
@@ -349,19 +356,22 @@ Behavioral Metrics:
 - Belief count: {belief_count}
 - High-confidence beliefs: {high_conf_count}
 
-Consider:
-1. Is the agent showing signs of sycophancy (agreeing too readily)?
-2. Is the snapshot coherent and substantive?
-3. Are beliefs developing healthily or becoming ossified?
-4. Is there evidence of identity drift from core values?
-5. Are there contradictions between stated beliefs and behavioral patterns?
+Consider ONLY these high-signal health markers:
+1. Sycophancy: disagreement_rate < 0.05 with more than 5 interactions is a concern.
+2. Snapshot coherence: snapshot shorter than 200 characters after 5+ interactions is a concern.
+3. Belief ossification: any topic with confidence > 0.95 AND evidence_count == 1 is suspicious.
+4. Identity drift: snapshot directly contradicts earlier core values stated explicitly.
+5. Confidence contradiction: a belief in the snapshot described as "core" or "primary" must have confidence > 0.10; values 0.05–0.20 are normal for beliefs under 5 interactions.
+
+Do NOT flag: low confidence on newly-formed beliefs (< 3 supporting episodes); low confidence on topics with mixed evidence (contradicting_count > 0); minor wording variations between snapshot and beliefs.
+Concerns list should be EMPTY for "healthy" unless there is a clear, specific, quantifiable problem.
 
 Respond with ONLY a JSON object. Example:
 {{
   "overall_health": "healthy",
-  "concerns": ["Slight tendency toward over-agreement in recent interactions"],
-  "recommendations": ["Increase disagreement threshold for weak arguments"],
-  "reasoning": "Core identity is stable; minor sycophancy risk worth monitoring.",
+  "concerns": [],
+  "recommendations": [],
+  "reasoning": "Core identity is stable with appropriate disagreement rate.",
   "metrics": {{"coherence_score": 0.8, "consistency_score": 0.75, "growth_health_score": 0.7}}
 }}
 
@@ -371,7 +381,7 @@ All metric scores are floats from 0.0 to 1.0."""
 # Valid tags per category — restricts LLM from cross-pollinating category names.
 FEATURE_TAGS: Final[dict[str, str]] = {
     "personality": "Communication Style, Values, Behavioral Traits, Temperament, Cognitive Style",
-    "preferences": "Interests, Aversions, Decision Framework, Domains, Styles",
+    "preferences": "Interests, Aversions, Decision Framework, Domains, Styles, Preferences",
     "knowledge": "Domain, Technical Skills, Scientific Fields, Academic Topics, Methodology",
     "relationships": "Interpersonal Style, Social Dynamics, Collaborative Patterns, Stance",
 }

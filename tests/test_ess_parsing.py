@@ -148,6 +148,25 @@ def test_classify_retries_on_malformed_required_fields() -> None:
     assert result.default_severity == "none"
 
 
+def test_classify_debunked_claim_aliases_resolve() -> None:
+    """debunked, misinformation, conspiracy all map to debunked_claim."""
+    for alias in ("debunked", "misinformation", "conspiracy", "debunked_claim"):
+        payload = {
+            "score": "0.04",
+            "reasoning_type": alias,
+            "source_reliability": "unverified_claim",
+            "internal_consistency": True,
+            "novelty": "0.1",
+            "topics": ["climate", "conspiracy"],
+            "summary": "Debunked conspiracy theory.",
+            "opinion_direction": "opposes",
+        }
+        result = classify(cast(_ClientProtocol, _FakeClient(payload)), "message", "snapshot")
+        assert result.reasoning_type == ReasoningType.DEBUNKED_CLAIM, (
+            f"alias={alias!r} did not resolve to debunked_claim, got {result.reasoning_type!r}"
+        )
+
+
 def test_classify_marks_missing_when_required_field_absent_after_retries() -> None:
     """Test that classify marks missing when required field absent after retries."""
     payload = {

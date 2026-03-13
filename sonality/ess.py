@@ -31,6 +31,7 @@ class ReasoningType(StrEnum):
     EMPIRICAL_DATA = "empirical_data"
     EXPERT_OPINION = "expert_opinion"
     ANECDOTAL = "anecdotal"
+    DEBUNKED_CLAIM = "debunked_claim"
     SOCIAL_PRESSURE = "social_pressure"
     EMOTIONAL_APPEAL = "emotional_appeal"
     NO_ARGUMENT = "no_argument"
@@ -67,6 +68,9 @@ REASONING_TYPE_ALIASES: Final[dict[str, ReasoningType]] = {
     "empirical": ReasoningType.EMPIRICAL_DATA,
     "data": ReasoningType.EMPIRICAL_DATA,
     "expert": ReasoningType.EXPERT_OPINION,
+    "debunked": ReasoningType.DEBUNKED_CLAIM,
+    "misinformation": ReasoningType.DEBUNKED_CLAIM,
+    "conspiracy": ReasoningType.DEBUNKED_CLAIM,
     "social": ReasoningType.SOCIAL_PRESSURE,
     "pressure": ReasoningType.SOCIAL_PRESSURE,
     "emotional": ReasoningType.EMOTIONAL_APPEAL,
