@@ -65,6 +65,7 @@ class ExtractionResponse(BaseModel):
 
 class KnowledgeConsolidation(BaseModel):
     """LLM consolidation output used during reflection."""
+
     contradictions: list[dict[str, str]] = Field(default_factory=list)
     merges: list[dict[str, object]] = Field(default_factory=list)
     opinion_candidates: list[dict[str, str]] = Field(default_factory=list)
@@ -75,8 +76,10 @@ class KnowledgeConsolidation(BaseModel):
 # Stage 0: Sliding window with LLM context summaries (SLIDE-inspired)
 # ---------------------------------------------------------------------------
 
+
 class _WindowSummary(BaseModel):
     """Plain-text summary for inter-window context propagation."""
+
     summary: str = ""
 
 
@@ -146,6 +149,7 @@ def _extract_propositions(text: str, preceding_context: str = "") -> list[Extrac
 # Embedding utilities
 # ---------------------------------------------------------------------------
 
+
 def _cosine_similarity(a: list[float], b: list[float]) -> float:
     dot = sum(x * y for x, y in zip(a, b, strict=True))
     norm_a = math.sqrt(sum(x * x for x in a))
@@ -185,6 +189,7 @@ async def _load_existing_knowledge_embeddings(
 # ---------------------------------------------------------------------------
 # Stage 4: Two-pass deduplication (intra-batch + against existing store)
 # ---------------------------------------------------------------------------
+
 
 def _deduplicate_intrabatch(
     propositions: list[ExtractedProposition],
@@ -231,7 +236,9 @@ async def _deduplicate_against_existing(
                 matched_existing_text = existing_text
                 break
         if matched_existing_text:
-            await _boost_existing_confidence(pg_pool, matched_existing_text, prop.confidence, episode_uid)
+            await _boost_existing_confidence(
+                pg_pool, matched_existing_text, prop.confidence, episode_uid
+            )
             log.debug("Evidence boost for existing: '%s'", matched_existing_text[:60])
         else:
             kept.append((prop, emb))
@@ -315,14 +322,22 @@ async def _persist_proposition(
                     )
                 )
             """,
-            (uid, tag, feature_name, prop.text, [episode_uid],
-             max(0.0, min(1.0, prop.confidence)), embedding),
+            (
+                uid,
+                tag,
+                feature_name,
+                prop.text,
+                [episode_uid],
+                max(0.0, min(1.0, prop.confidence)),
+                embedding,
+            ),
         )
 
 
 # ---------------------------------------------------------------------------
 # Main pipeline
 # ---------------------------------------------------------------------------
+
 
 async def extract_and_store_knowledge(
     text: str,
@@ -358,7 +373,9 @@ async def extract_and_store_knowledge(
         props = _extract_propositions(window_text, preceding_context)
         log.debug(
             "Window %d/%d: %d propositions extracted (types: %s)",
-            i + 1, len(windows), len(props),
+            i + 1,
+            len(windows),
+            len(props),
             ", ".join(f"{p.type}:{p.confidence:.2f}" for p in props),
         )
         all_propositions.extend(props)
@@ -375,7 +392,9 @@ async def extract_and_store_knowledge(
     existing = await _load_existing_knowledge_embeddings(pg_pool)
     log.debug("Existing knowledge entries for dedup: %d", len(existing))
     kept = await _deduplicate_against_existing(batch, existing, pg_pool, episode_uid)
-    log.debug("After existing dedup: %d kept, %d evidence-boosted", len(kept), len(batch) - len(kept))
+    log.debug(
+        "After existing dedup: %d kept, %d evidence-boosted", len(kept), len(batch) - len(kept)
+    )
 
     stored = 0
     for prop, emb in kept:
@@ -407,7 +426,10 @@ async def extract_and_store_knowledge(
     evidence_boosted = len(batch) - len(kept)
     log.info(
         "Knowledge extraction: %d extracted, %d intra-dedup, %d evidence-boosted, %d new stored",
-        len(all_propositions), intra_dedup, evidence_boosted, stored,
+        len(all_propositions),
+        intra_dedup,
+        evidence_boosted,
+        stored,
     )
     return stored
 
@@ -415,6 +437,7 @@ async def extract_and_store_knowledge(
 # ---------------------------------------------------------------------------
 # Consolidation (called during reflection)
 # ---------------------------------------------------------------------------
+
 
 async def consolidate_knowledge(
     pg_pool: AsyncConnectionPool,
@@ -455,8 +478,7 @@ async def consolidate_knowledge(
         return None
 
     propositions_text = "\n".join(
-        f"- [{row[1]}] {row[2]} (confidence={row[3]:.2f})"
-        for row in rows
+        f"- [{row[1]}] {row[2]} (confidence={row[3]:.2f})" for row in rows
     )
 
     result = llm_call(
@@ -478,9 +500,7 @@ async def consolidate_knowledge(
         if uid:
             try:
                 async with pg_pool.connection() as conn, conn.cursor() as cur:
-                    await cur.execute(
-                        "DELETE FROM semantic_features WHERE uid = %s", (uid,)
-                    )
+                    await cur.execute("DELETE FROM semantic_features WHERE uid = %s", (uid,))
                 log.info("Consolidation: pruned weak proposition '%s'", weak_text[:60])
             except Exception:
                 log.debug("Failed to prune weak proposition", exc_info=True)
@@ -529,9 +549,7 @@ async def consolidate_knowledge(
         if uid:
             try:
                 async with pg_pool.connection() as conn, conn.cursor() as cur:
-                    await cur.execute(
-                        "DELETE FROM semantic_features WHERE uid = %s", (uid,)
-                    )
+                    await cur.execute("DELETE FROM semantic_features WHERE uid = %s", (uid,))
                 log.info("Contradiction resolved: pruned '%s'", loser[:60])
             except Exception:
                 log.debug("Failed to resolve contradiction", exc_info=True)
@@ -548,6 +566,7 @@ async def consolidate_knowledge(
 # ---------------------------------------------------------------------------
 # Reflection: prune stale/low-quality knowledge from pgvector
 # ---------------------------------------------------------------------------
+
 
 async def prune_stale_knowledge(
     pg_pool: AsyncConnectionPool,
@@ -581,6 +600,7 @@ async def prune_stale_knowledge(
 # ---------------------------------------------------------------------------
 # Knowledge retrieval for response context injection
 # ---------------------------------------------------------------------------
+
 
 async def retrieve_relevant_knowledge(
     query: str,

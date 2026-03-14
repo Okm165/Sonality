@@ -39,39 +39,39 @@ def _normalize_schema_notation(text: str) -> str:
     concrete option or a sensible default so downstream parsing succeeds.
     """
     # Bare ellipsis between delimiters  →  remove (handles {}, {key:val,...}, [...])
-    text = re.sub(r',\s*\.\.\.\s*(?=[}\]])', '', text)   # trailing ", ..."
-    text = re.sub(r'(?<=[{,\[])\s*\.\.\.\s*(?=[,}\]])', '', text)  # inner "..."
+    text = re.sub(r",\s*\.\.\.\s*(?=[}\]])", "", text)  # trailing ", ..."
+    text = re.sub(r"(?<=[{,\[])\s*\.\.\.\s*(?=[,}\]])", "", text)  # inner "..."
     # Standalone "..." value in a string  →  ""
     text = re.sub(r':\s*"\.\.\."', ': ""', text)
     # Quoted ellipsis as a JSON key placeholder  {"..."}  {"...", ...}  →  strip it
-    text = re.sub(r'\{\s*"\.\.\."(?:\s*,)?\s*', '{', text)
+    text = re.sub(r'\{\s*"\.\.\."(?:\s*,)?\s*', "{", text)
     # Array placeholder  [...]  →  []
-    text = re.sub(r'\[\s*\.\.\.\s*\]', '[]', text)
+    text = re.sub(r"\[\s*\.\.\.\s*\]", "[]", text)
     # Angle-bracket placeholders  <float>  <string>  <int>  →  sensible defaults
-    text = re.sub(r':\s*<float>', ': 0.5', text)
-    text = re.sub(r':\s*<string>', ': ""', text)
-    text = re.sub(r':\s*<int>', ': 0', text)
+    text = re.sub(r":\s*<float>", ": 0.5", text)
+    text = re.sub(r":\s*<string>", ': ""', text)
+    text = re.sub(r":\s*<int>", ": 0", text)
     # "X" | "Y" | "Z"  →  "X"  (keep first enum option)
     text = re.sub(r'"([^"]+)"\s*(?:\|\s*"[^"]*"\s*)+', r'"\1"', text)
     # Unquoted pipe-separated options: RETAIN | DECAY | FORGET → "RETAIN"
     # (matches after colon, before comma/brace)
-    text = re.sub(r':\s*([A-Z_]+)\s*(?:\|\s*[A-Z_]+\s*)+(?=[,}\s])', r': "\1"', text)
+    text = re.sub(r":\s*([A-Z_]+)\s*(?:\|\s*[A-Z_]+\s*)+(?=[,}\s])", r': "\1"', text)
     # "X" or "Y" or "Z"  →  "X"  (same pattern with English "or")
     text = re.sub(r'"([^"]+)"\s*(?:or\s+"[^"]*"\s*)+', r'"\1"', text)
     # "option1/option2/..."  →  "option1"  (slash-separated alternatives in strings)
     text = re.sub(r'"([^"/]+)(?:/[^"/]+)+"', r'"\1"', text)
     # bare type names as values  →  sensible defaults
-    text = re.sub(r':\s*\bfloat\b', ': 0.5', text)
-    text = re.sub(r':\s*\bint\b', ': 0', text)
-    text = re.sub(r':\s*\bbool\b', ': false', text)
-    text = re.sub(r':\s*\bstring\b', ': ""', text)
-    text = re.sub(r':\s*\bnull\b\s*(?=[,}])', ': null', text)
+    text = re.sub(r":\s*\bfloat\b", ": 0.5", text)
+    text = re.sub(r":\s*\bint\b", ": 0", text)
+    text = re.sub(r":\s*\bbool\b", ": false", text)
+    text = re.sub(r":\s*\bstring\b", ': ""', text)
+    text = re.sub(r":\s*\bnull\b\s*(?=[,}])", ": null", text)
     # range notation  "0.0-1.0"  or  "-1.0 to +1.0"  →  "0.5"
     text = re.sub(r'"[-+]?\d+\.?\d*\s*(?:to|-)\s*[-+]?\d+\.?\d*"', '"0.5"', text)
     # bare range as value  :  0.0-1.0  →  : 0.5
-    text = re.sub(r':\s*[-+]?\d+\.?\d*\s*(?:to|-)\s*[-+]?\d+\.?\d*(?=[,}\s])', ': 0.5', text)
+    text = re.sub(r":\s*[-+]?\d+\.?\d*\s*(?:to|-)\s*[-+]?\d+\.?\d*(?=[,}\s])", ": 0.5", text)
     # trailing ellipsis after a digit  0.3...  →  0.3  (template placeholder in numbers)
-    text = re.sub(r'(\d)\.\.\.', r'\1', text)
+    text = re.sub(r"(\d)\.\.\.", r"\1", text)
     return text
 
 

@@ -80,7 +80,8 @@ async def dump_memory_snapshot(
         meta = sponge.belief_meta.get(topic)
         log.debug(
             "SNAP_BELIEF topic=%s | pos=%+.3f | conf=%.2f | ev=%d | support=%d | contra=%d",
-            topic, pos,
+            topic,
+            pos,
             meta.confidence if meta else 0.0,
             meta.evidence_count if meta else 0,
             len(meta.supporting_episode_uids) if meta else 0,
@@ -89,7 +90,9 @@ async def dump_memory_snapshot(
     for s in sponge.staged_opinion_updates[:10]:
         log.debug(
             "SNAP_STAGED topic=%s | mag=%+.3f | due=%d | prov=%.40s",
-            s.topic, s.signed_magnitude, s.due_interaction,
+            s.topic,
+            s.signed_magnitude,
+            s.due_interaction,
             s.provenance.replace("\n", " "),
         )
 
@@ -99,12 +102,21 @@ async def dump_memory_snapshot(
             "WHERE category = 'knowledge' ORDER BY confidence DESC LIMIT 20"
         )
         for tag, value, conf in await cur.fetchall():
-            log.debug("SNAP_KNOWLEDGE [%s] conf=%.2f | %.100s", tag, float(conf), str(value).replace("\n", " "))
+            log.debug(
+                "SNAP_KNOWLEDGE [%s] conf=%.2f | %.100s",
+                tag,
+                float(conf),
+                str(value).replace("\n", " "),
+            )
         await cur.execute("SELECT COUNT(*) FROM semantic_features WHERE category = 'knowledge'")
-        total_knowledge = (await cur.fetchone())[0]
+        row = await cur.fetchone()
+        total_knowledge = row[0] if row else 0
         await cur.execute("SELECT COUNT(*) FROM derivatives WHERE NOT archived")
-        active_derivs = (await cur.fetchone())[0]
-        log.debug("SNAP_PG total_knowledge=%d | active_derivatives=%d", total_knowledge, active_derivs)
+        row = await cur.fetchone()
+        active_derivs = row[0] if row else 0
+        log.debug(
+            "SNAP_PG total_knowledge=%d | active_derivatives=%d", total_knowledge, active_derivs
+        )
 
     result = await neo4j_session.run("MATCH (b:Belief) RETURN b.topic AS topic ORDER BY b.topic")
     log.debug("SNAP_GRAPH beliefs=%s", [r["topic"] async for r in result])

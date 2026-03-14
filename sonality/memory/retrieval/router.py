@@ -107,7 +107,9 @@ class QueryRouter:
             )
             return decision
 
-        log.warning("Query routing fallback: result.success=%s error=%s", result.success, result.error)
+        log.warning(
+            "Query routing fallback: result.success=%s error=%s", result.success, result.error
+        )
         return RoutingDecision(
             category=QueryCategory.SIMPLE,
             depth=RetrievalDepth.MODERATE,

@@ -137,7 +137,11 @@ def llm_call[T: BaseModel](
             last_error = f"JSON parse error: {exc}"
             log.warning(
                 "llm_call attempt %d/%d schema=%s: %s | raw=%.200r",
-                attempt, max_retries, schema_name, last_error, raw_text,
+                attempt,
+                max_retries,
+                schema_name,
+                last_error,
+                raw_text,
             )
             # Log full raw text at debug level for forensic analysis
             log.debug("llm_call full raw (schema=%s): %s", schema_name, raw_text)
@@ -146,7 +150,11 @@ def llm_call[T: BaseModel](
             last_error = f"Schema validation: {exc}"
             log.warning(
                 "llm_call attempt %d/%d schema=%s validation failed: %s | raw=%.80r",
-                attempt, max_retries, schema_name, exc, raw_text,
+                attempt,
+                max_retries,
+                schema_name,
+                exc,
+                raw_text,
             )
             # Try repair on validation error
             try:
@@ -179,18 +187,39 @@ def llm_call[T: BaseModel](
                 wait = _BACKOFF_BASE**attempt
                 log.warning(
                     "LLM provider error on attempt %d/%d schema=%s: %s; retrying in %.1fs",
-                    attempt, max_retries, schema_name, exc, wait,
+                    attempt,
+                    max_retries,
+                    schema_name,
+                    exc,
+                    wait,
                 )
                 time.sleep(wait)
                 continue
-            log.warning("LLM provider error on attempt %d/%d schema=%s: %s", attempt, max_retries, schema_name, exc)
+            log.warning(
+                "LLM provider error on attempt %d/%d schema=%s: %s",
+                attempt,
+                max_retries,
+                schema_name,
+                exc,
+            )
 
         except Exception as exc:
             last_error = f"Unexpected: {exc}"
-            log.error("Unexpected llm_call error attempt %d/%d schema=%s: %s", attempt, max_retries, schema_name, exc)
+            log.error(
+                "Unexpected llm_call error attempt %d/%d schema=%s: %s",
+                attempt,
+                max_retries,
+                schema_name,
+                exc,
+            )
             break  # Don't retry on unexpected errors
 
-    log.error("llm_call exhausted %d retries schema=%s. Last error: %s", max_retries, schema_name, last_error)
+    log.error(
+        "llm_call exhausted %d retries schema=%s. Last error: %s",
+        max_retries,
+        schema_name,
+        last_error,
+    )
     return LLMCallResult(
         value=fallback,
         success=False,

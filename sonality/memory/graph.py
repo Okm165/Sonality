@@ -84,7 +84,10 @@ class MemoryGraph:
         """Store episode + derivatives + graph links in one write transaction."""
         log.debug(
             "GRAPH_TRACE store_episode: uid=%s topics=%s ess=%.2f derivs=%d prev=%s",
-            episode.uid[:8], topics[:3], episode.ess_score, len(derivatives),
+            episode.uid[:8],
+            topics[:3],
+            episode.ess_score,
+            len(derivatives),
             prev_episode_uid[:8] if prev_episode_uid else "none",
         )
         async with self._driver.session(database=_DB) as session:
@@ -258,7 +261,11 @@ class MemoryGraph:
         """Create one belief provenance edge for an episode."""
         log.debug(
             "GRAPH_TRACE link_belief: ep=%s topic=%s edge=%s str=%.2f | %s",
-            episode_uid[:8], topic, edge_type.value, strength, reasoning[:60].replace('\n', ' '),
+            episode_uid[:8],
+            topic,
+            edge_type.value,
+            strength,
+            reasoning[:60].replace("\n", " "),
         )
         async with self._driver.session(database=_DB) as session:
             await session.execute_write(

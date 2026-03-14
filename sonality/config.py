@@ -64,7 +64,9 @@ EMBEDDING_MODEL: Final = _env_str("SONALITY_EMBEDDING_MODEL", "nomic-embed-text"
 EMBEDDING_DIMENSIONS: Final = _env_int("SONALITY_EMBEDDING_DIMENSIONS", 768)
 EMBEDDING_BATCH_SIZE: Final = _env_int("SONALITY_EMBEDDING_BATCH_SIZE", 32)
 # Set to false for Ollama models that don't accept a dimensions truncation parameter
-EMBEDDING_SEND_DIMENSIONS: Final = _env_str("SONALITY_EMBEDDING_SEND_DIMENSIONS", "true").lower() not in ("false", "0", "no")
+EMBEDDING_SEND_DIMENSIONS: Final = _env_str(
+    "SONALITY_EMBEDDING_SEND_DIMENSIONS", "true"
+).lower() not in ("false", "0", "no")
 EMBEDDING_QUERY_INSTRUCTION: Final = _env_str(
     "SONALITY_EMBEDDING_QUERY_INSTRUCTION",
     "Represent this memory retrieval query for finding relevant past conversations:",

@@ -18,11 +18,14 @@ log = logging.getLogger(__name__)
 # the reflection health check to verify snapshot stays within reasonable bounds.
 SNAPSHOT_CHAR_LIMIT: Final = config.SPONGE_MAX_TOKENS * 4
 
-_INSIGHT_PLACEHOLDERS: frozenset[str] = frozenset({
-    "one sentence describing the reasoning pattern",
-    "your insight here",
-    "insert insight here",
-})
+_INSIGHT_PLACEHOLDERS: frozenset[str] = frozenset(
+    {
+        "one sentence describing the reasoning pattern",
+        "your insight here",
+        "insert insight here",
+    }
+)
+
 
 class InsightDecision(StrEnum):
     EXTRACT = "EXTRACT"

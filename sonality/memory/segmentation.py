@@ -89,7 +89,9 @@ class EventBoundaryDetector:
             fallback=BoundaryDetectionResponse(),
         )
         if not result.success:
-            log.warning("Boundary detection parse failed (using CONTINUE fallback): %s", result.error)
+            log.warning(
+                "Boundary detection parse failed (using CONTINUE fallback): %s", result.error
+            )
         self._recent_messages.append(message)
         response = result.value
         if response.boundary_decision is BoundaryDecision.BOUNDARY:

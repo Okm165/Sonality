@@ -85,6 +85,7 @@ def write_postgres_init_script(path: Path | None = None) -> Path:
     """Write PostgreSQL init script to the specified path (or default location)."""
     if path is None:
         from . import config
+
         path = config.PROJECT_ROOT / "scripts" / "init_postgres.sql"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(POSTGRES_SCHEMA_SQL.strip() + "\n")
@@ -95,6 +96,7 @@ def write_neo4j_init_script(path: Path | None = None) -> Path:
     """Write Neo4j init script (Cypher) to the specified path (or default location)."""
     if path is None:
         from . import config
+
         path = config.PROJECT_ROOT / "scripts" / "init_neo4j.cypher"
     path.parent.mkdir(parents=True, exist_ok=True)
     header = (
