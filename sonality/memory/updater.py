@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import logging
 from enum import StrEnum
+from typing import Final
+
 from pydantic import BaseModel
 
 from .. import config
@@ -10,6 +12,11 @@ from ..llm.caller import llm_call
 from ..prompts import INSIGHT_PROMPT
 
 log = logging.getLogger(__name__)
+
+# Approximate character budget for the personality snapshot.
+# Derived from SPONGE_MAX_TOKENS at ~4 chars/token; used by tests and
+# the reflection health check to verify snapshot stays within reasonable bounds.
+SNAPSHOT_CHAR_LIMIT: Final = config.SPONGE_MAX_TOKENS * 4
 
 _INSIGHT_PLACEHOLDERS: frozenset[str] = frozenset({
     "one sentence describing the reasoning pattern",
