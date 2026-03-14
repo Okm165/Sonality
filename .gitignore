@@ -17,12 +17,7 @@ env/
 uv.lock
 
 # Runtime data
-data/sponge.json
-data/sponge_history/
-data/chromadb/
-data/teaching_bench/
-data/*.log
-data/*.jsonl
+data/
 logs/
 
 # Environment
