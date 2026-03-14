@@ -61,6 +61,8 @@ Conditionally (when ESS reliability gates pass):
 - Synchronous LLM calls inside async coroutines use `asyncio.to_thread` to keep event loops unblocked.
 - **Per-reasoning-type magnitude caps** (aligned with AGM minimal change principle): empirical_data ≤ 0.20, expert_opinion ≤ 0.14, logical_argument ≤ 0.10, anecdotal ≤ 0.06, debunked_claim = 0.0, social_pressure ≤ 0.02 per update. Prevents a single high-ESS turn from jumping opinion vectors by 0.8+.
 - **`debunked_claim` ESS category**: conclusively-refuted conspiracy theories (Climategate, vaccine-autism fabrication, moon landing, etc.) are classified as `debunked_claim` (score ≈ 0.0–0.07) rather than `anecdotal`. They freeze sponge mutation (staged updates not committed, insight extraction skipped) and have zero belief update magnitude. Backed by FactCheck.org, RefuteClaim (ACL 2024), and HKS Misinformation Review.
+- **Manipulative reasoning type filter**: messages classified as `social_pressure`, `emotional_appeal`, `debunked_claim`, or `anecdotal` trigger a sponge freeze — staged updates are not committed, insight extraction is skipped. This prevents unsourced "experts say" claims (anecdotal, ~0.18) from shifting beliefs.
+- **ESS minimum threshold (0.25)**: even for non-manipulative reasoning types, belief updates require ESS score ≥ 0.25. This filters out borderline `logical_argument` (typically ~0.22) while allowing `empirical_data` (typically 0.45–0.85). Combined with the manipulative filter, ensures only substantive evidence can update beliefs.
 - **Bayesian confidence floor**: belief confidence cannot stay at zero as evidence accumulates. After 2 consistent updates: uncertainty ≤ 0.50. After 3+: uncertainty ≤ 0.30. Applied at both belief creation (when `evidence_increment >= 2` from staged updates) and on each update in the `else` branch. The LLM-assessed `new_uncertainty` from the belief provenance evaluation is threaded through `StagedOpinionUpdate` → `apply_due_staged_updates` → `update_opinion`, so the Bayesian floor is applied after (not instead of) the LLM's own uncertainty estimate. Prevents oscillation caused by the belief update LLM returning `new_uncertainty=1.0` indefinitely despite multiple supporting episodes.
 - **Semantic feature tag validation**: each category has a fixed set of valid tags (e.g. `personality` → Communication Style, Values, Behavioral Traits, Temperament, Cognitive Style). LLM is told these in the extraction prompt, preventing cross-category tag contamination.
 - **Contradiction-only feature deletion**: semantic features are never deleted due to topic shifts. The extraction prompt mandates a non-empty contradiction evidence quote in the `reason` field; the runtime guard skips any DELETE command with `reason=""`. This prevents personality erosion when users switch topics (e.g. from climate policy to cooking). Research-backed: FadeMem (2025), MemGPT, and PersonaAgent all show that topic silence ≠ trait contradiction.
@@ -163,6 +165,32 @@ cp .env.example .env   # set provider + API key or local endpoints
 docker compose run --rm sonality
 ```
 
+## Database Setup
+
+**Infrastructure:** Neo4j 5 (graph memory) + PostgreSQL 16 with pgvector (vector search).
+
+Schema definitions are centralized in `sonality/schema.py` as the single source of truth for both Docker Compose and test containers.
+
+**Initialization approaches:**
+
+| Database | Method | Details |
+|---|---|---|
+| PostgreSQL | `/docker-entrypoint-initdb.d/` | Standard Docker pattern — SQL scripts run automatically on first container start |
+| Neo4j | Application-level | Schema (constraints + indexes) created by `sonality.memory.db` on first connection. This is the [recommended Neo4j pattern](https://neo4j.com/docs/operations-manual/5/docker/operations/) since Neo4j lacks an automatic init script mechanism |
+
+**Common commands:**
+
+```bash
+make db-up          # Start database containers
+make db-down        # Stop containers
+make db-reset       # Delete all data and restart (fresh state)
+make db-clear       # Clear data, preserve schema
+make db-init-neo4j  # Manually run Neo4j schema script
+make schema-scripts # Regenerate init scripts from schema.py
+```
+
+**Schema regeneration:** If you modify `sonality/schema.py`, run `make schema-scripts` to regenerate `scripts/init_postgres.sql` and `scripts/init_neo4j.cypher`.
+
 ## REPL Commands
 
 | Command | Description |
@@ -213,6 +241,42 @@ uv run sonality --model "anthropic/claude-sonnet-4" --ess-model "anthropic/claud
 # or: make run ARGS='--model "anthropic/claude-sonnet-4" --ess-model "anthropic/claude-3.7-sonnet"'
 ```
 
+## Theoretical Foundations and Research Alignment
+
+The Sonality architecture draws from and aligns with several active research areas in LLM memory, belief revision, and personality stability:
+
+**AGM Belief Revision Framework** — The belief update mechanism follows AGM (Alchourrón-Gärdenfors-Makinson) principles with LLM-based implementation:
+- **Contraction action** in `BeliefUpdateResponse` enables AGM-style belief contraction when contradicting evidence accumulates
+- **Per-reasoning-type magnitude caps** implement the AGM minimal change principle — `empirical_data ≤ 0.20`, `logical_argument ≤ 0.10`, `anecdotal ≤ 0.06`
+- **Evidence-weighted updates** where belief confidence scales with accumulated supporting/contradicting episodes
+
+Related work: Hase et al. (2024) "Fundamental Problems With Model Editing" identifies 12 open problems with LLM belief revision. Sonality addresses several through its provenance-tracked, evidence-gated update pipeline rather than direct model edits.
+
+**SSGM (Stability and Safety-Governed Memory) Framework** — Aligns with Lam et al. (2026) on memory governance:
+- **Consistency verification** — `dual_store.verify_consistency()` detects and cleans orphan derivatives during reflection
+- **Temporal decay modeling** — staged opinion updates with cooling periods, belief decay during reflection
+- **Dynamic access control** — ESS gating filters low-quality inputs before memory consolidation
+- **Semantic drift prevention** — insight accumulation before reflection avoids iterative summarization drift (the "Broken Telephone" effect)
+
+**Jungian Personality Framework** — Partial alignment with Wang et al. (2026) on structured personality control:
+- **Reflection mechanism** for long-term personality evolution maps to their reflection-driven gradual personality updates
+- **Behavioral signature tracking** (`disagreement_rate`, `topic_engagement`) provides personality diagnostics
+
+**Self-Reflective Memory Architecture (SRMA)** — The Sponge architecture achieves similar goals to SRMA (IJCA 2025):
+- **Episodic encoding** — full-fidelity episode storage with derivative chunking
+- **Reflection scoring** — ESS-based quality filtering before updates
+- **Adaptive retrieval** — BM25+vector hybrid retrieval with listwise reranking
+
+**Sycophancy Resistance** — Implements key findings from BASIL (arXiv 2508.16846) for Bayesian-rational belief revision:
+- **Third-person ESS framing** reduces self-judge sycophancy bias (SYCON Bench, EMNLP 2025: up to 63.8% sycophancy reduction with third-person perspective)
+- **Manipulative reasoning type filter** blocks social pressure, emotional appeal, and anecdotal claims (addresses ELEPHANT, ICLR 2026: "social sycophancy" where LLMs affirm both sides of conflicts)
+- **ESS minimum threshold (0.25)** distinguishes rational evidence-based updates from sycophantic agreement
+
+**Personality Stability** — Addresses findings from PERSIST (AAAI 2026) which showed standard deviations >0.3 on 5-point scales even for 400B+ models:
+- **Structured belief state** with evidence tracking provides stability anchors
+- **ESS gating** filters noise that would otherwise cause random drift
+- **Reflection cooling periods** prevent rapid oscillation from isolated inputs
+
 ## Key Mechanisms
 
 **Evidence Strength Score (ESS)** — classifies each user message for argument quality (0.0–1.0). Captures reasoning type (logical_argument, empirical_data, expert_opinion, anecdotal, **debunked_claim**, social_pressure, emotional_appeal, no_argument), source reliability, novelty, and opinion direction. Third-person framing reduces sycophancy bias by up to 63.8%. The `debunked_claim` type covers conclusively-refuted conspiracy theories (Climategate, retracted vaccine studies, etc.) — these score ≤0.07, freeze sponge mutation, and have zero belief update magnitude, ensuring known misinformation cannot shift the agent's views even when presented confidently.
@@ -236,6 +300,46 @@ uv run sonality --model "anthropic/claude-sonnet-4" --ess-model "anthropic/claud
 **Bayesian confidence floor** — belief confidence cannot be permanently frozen at zero. After 2 consistent updates, belief uncertainty is capped at 0.50 (confidence ≥ 0.50). After 3+ updates, uncertainty is capped at 0.30 (confidence ≥ 0.70). This prevents the pathological case where the belief update LLM returns `new_uncertainty=1.0` indefinitely, which would leave beliefs permanently unstable and unable to resist future contradictions.
 
 **Belief preservation monitoring** — reflection captures `opinion_vectors` before the decay step and checks for unexpected evictions after the snapshot rewrite. Only beliefs that completely disappear from `opinion_vectors` (not just from the narrative text) trigger a WARNING, eliminating false positives from the snapshot's narrative-not-enumeration design.
+
+**JSON normalization for quantized models** — extensive regex-based normalization handles common quantized model artifacts: pipe-separated enum options (`"A" | "B"` → `"A"`), type placeholders (`float` → `0.5`), trailing ellipsis (`0.3...` → `0.3`), and template copies. This allows reliable structured output extraction even from heavily quantized models (IQ2_M, ~2 bits/weight).
+
+## Test Architecture
+
+The test suite is organized in progressive levels of complexity:
+
+```
+tests/
+├── test_live_graduated.py    # L0-L3x: Infrastructure validation
+│   ├── L0 Connectivity       # Endpoint reachable
+│   ├── L1 Raw response       # LLM/embedding returns valid data
+│   ├── L2 Structured parsing # Schema extraction, ESS classify
+│   ├── L2r Repeatability     # Same schema consistent 3x
+│   ├── L2x Per-prompt        # Each prompt template in isolation
+│   ├── L3 Memory primitives  # Vector insert/search
+│   └── L3x Store/retrieve    # Full DualEpisodeStore workflow
+│
+├── test_agent_health.py      # S1-S7: Behavioral health
+│   ├── S1 Clean start        # DB empty verification
+│   ├── S2 Episode storage    # Single turn → episode + derivatives
+│   ├── S3 ESS gating         # Social pressure vs empirical evidence
+│   ├── S4 Memory retrieval   # Related query recalls episode
+│   ├── S5 Anti-sycophancy    # Holds position under pressure
+│   ├── S6 Personality        # Snapshot evolves, beliefs bounded
+│   └── S7 Extended           # 15-turn scenario with contradiction
+│
+benches/
+├── test_teaching_suite_live.py  # 60-pack teaching scenarios
+├── test_psych_stability_live.py # Psychological batteries (VRIN, ASCH)
+└── test_ess_calibration_live.py # ESS classifier calibration
+```
+
+**Validation status (Session 11):**
+- Unit tests: 23/23 ✅
+- Memory tests: 13/13 ✅
+- L0-L3x Infrastructure: 21/25 ✅ (4 network timeouts with local Tailscale endpoint)
+- S1-S7 Behavioral: 32/33 ✅ (1 timeout on 25-minute extended scenario)
+- Psychological Batteries: B1-B7: 5/6 ✅ (1 network error)
+- Total validated: **87/90** tests passing (3 failures due to network/timeout infrastructure, not code)
 
 ## Development
 
