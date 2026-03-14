@@ -101,9 +101,11 @@ MIN_ESS_FOR_LOGICAL_INSIGHT: Final[float] = 0.25
 
 # Reasoning types whose coherent structure justifies belief updates at a lower
 # (not zero) score threshold than empirical evidence.
-_SCORE_EXEMPT_REASONING: Final = frozenset({
-    ReasoningType.LOGICAL_ARGUMENT,
-})
+_SCORE_EXEMPT_REASONING: Final = frozenset(
+    {
+        ReasoningType.LOGICAL_ARGUMENT,
+    }
+)
 
 
 class ReflectionTrigger(StrEnum):
@@ -310,7 +312,7 @@ class SonalityAgent:
         # Restore last episode UID for temporal linking
         last_uid = await graph.get_last_episode_uid()
         if last_uid:
-            dual_store.set_last_episode_uid(last_uid)
+            dual_store._last_episode_uid = last_uid
         return RuntimeComponents(
             db=db,
             embedder=embedder,
@@ -385,11 +387,15 @@ class SonalityAgent:
         if self._stm.running_summary:
             stm_section = f"\n\n## Recent Context Summary\n{self._stm.running_summary}"
             idx = next(
-                (i for marker in (
-                    "\n## Personality Traits",
-                    "\n## Relevant Past Conversations",
-                    "\n## Instructions",
-                ) if (i := system_prompt.find(marker)) > 0),
+                (
+                    i
+                    for marker in (
+                        "\n## Personality Traits",
+                        "\n## Relevant Past Conversations",
+                        "\n## Instructions",
+                    )
+                    if (i := system_prompt.find(marker)) > 0
+                ),
                 -1,
             )
             system_prompt = (
@@ -662,7 +668,10 @@ class SonalityAgent:
         # social_pressure / emotional_appeal: coercive but no evidential content.
         # anecdotal: unsourced "experts say" / "studies show" without actual evidence.
         manipulative = ess.reasoning_type in {
-            "social_pressure", "emotional_appeal", "debunked_claim", "anecdotal"
+            "social_pressure",
+            "emotional_appeal",
+            "debunked_claim",
+            "anecdotal",
         }
         if manipulative:
             log.info(
@@ -683,7 +692,10 @@ class SonalityAgent:
         # - either a logical argument (score-exempt) or ESS score above the threshold.
         if episode_uid:
             self._extract_knowledge(
-                user_message, agent_response, ess, episode_uid,
+                user_message,
+                agent_response,
+                ess,
+                episode_uid,
                 stage_opinions=(
                     not manipulative
                     and (
@@ -780,9 +792,8 @@ class SonalityAgent:
         if not raw_topics:
             return raw_topics
 
-        existing = (
-            set(self.sponge.opinion_vectors)
-            | set(self.sponge.behavioral_signature.topic_engagement)
+        existing = set(self.sponge.opinion_vectors) | set(
+            self.sponge.behavioral_signature.topic_engagement
         )
 
         result: list[str] = []
@@ -1000,15 +1011,27 @@ class SonalityAgent:
         )
 
     # Reasoning types the LLM classifies as non-substantive (no personality updates).
-    _NO_UPDATE_REASONING: Final = frozenset({
-        ReasoningType.NO_ARGUMENT,
-        ReasoningType.SOCIAL_PRESSURE,
-        ReasoningType.EMOTIONAL_APPEAL,
-        ReasoningType.DEBUNKED_CLAIM,
-    })
+    _NO_UPDATE_REASONING: Final = frozenset(
+        {
+            ReasoningType.NO_ARGUMENT,
+            ReasoningType.SOCIAL_PRESSURE,
+            ReasoningType.EMOTIONAL_APPEAL,
+            ReasoningType.DEBUNKED_CLAIM,
+        }
+    )
+
+    @staticmethod
+    def _ess_reliable(ess: ESSResult) -> bool:
+        return ess.default_severity not in {"missing", "exception"} and not any(
+            f in CRITICAL_ESS_DEFAULT_FIELDS for f in ess.defaulted_fields
+        )
 
     def _ess_allows_update(
-        self, ess: ESSResult, *, update_kind: str, require_topics: bool = False,
+        self,
+        ess: ESSResult,
+        *,
+        update_kind: str,
+        require_topics: bool = False,
     ) -> bool:
         """Return whether ESS permits a personality update path.
 
@@ -1020,25 +1043,28 @@ class SonalityAgent:
         if require_topics and not ess.topics:
             return False
         if ess.reasoning_type in self._NO_UPDATE_REASONING:
-            log.info("Skipping %s: reasoning_type=%s is non-substantive", update_kind, ess.reasoning_type)
+            log.info(
+                "Skipping %s: reasoning_type=%s is non-substantive", update_kind, ess.reasoning_type
+            )
             return False
         if ess.score < MIN_ESS_FOR_EMPIRICAL_UPDATE:
             log.info(
                 "Skipping %s: score=%.3f below min %.2f (type=%s)",
-                update_kind, ess.score, MIN_ESS_FOR_EMPIRICAL_UPDATE, ess.reasoning_type,
+                update_kind,
+                ess.score,
+                MIN_ESS_FOR_EMPIRICAL_UPDATE,
+                ess.reasoning_type,
             )
             return False
-        reliable = (
-            ess.default_severity not in {"missing", "exception"}
-            and not any(field in CRITICAL_ESS_DEFAULT_FIELDS for field in ess.defaulted_fields)
-        )
-        if reliable:
-            return True
-        log.info(
-            "Skipping %s due to ESS fallback defaults (severity=%s fields=%s)",
-            update_kind, ess.default_severity, ess.defaulted_fields,
-        )
-        return False
+        if not self._ess_reliable(ess):
+            log.info(
+                "Skipping %s due to ESS fallback defaults (severity=%s fields=%s)",
+                update_kind,
+                ess.default_severity,
+                ess.defaulted_fields,
+            )
+            return False
+        return True
 
     def _ess_allows_insight_update(self, ess: ESSResult) -> bool:
         """Like _ess_allows_update but with a lower threshold for logical arguments.
@@ -1058,19 +1084,19 @@ class SonalityAgent:
         if ess.score < min_score:
             log.info(
                 "Skipping insight: score=%.3f below min %.2f (type=%s)",
-                ess.score, min_score, ess.reasoning_type,
+                ess.score,
+                min_score,
+                ess.reasoning_type,
             )
             return False
-        reliable = (
-            ess.default_severity not in {"missing", "exception"}
-            and not any(field in CRITICAL_ESS_DEFAULT_FIELDS for field in ess.defaulted_fields)
-        )
-        if not reliable:
+        if not self._ess_reliable(ess):
             log.info(
                 "Skipping insight due to ESS fallback defaults (severity=%s fields=%s)",
-                ess.default_severity, ess.defaulted_fields,
+                ess.default_severity,
+                ess.defaulted_fields,
             )
-        return reliable
+            return False
+        return True
 
     def _stage_topic_opinion_update(
         self,
@@ -1113,7 +1139,9 @@ class SonalityAgent:
         episode_uid: str,
     ) -> None:
         """Use LLM-based evidence assessment with episode provenance links."""
-        if not self._ess_allows_update(ess, update_kind="provenance opinion update", require_topics=True):
+        if not self._ess_allows_update(
+            ess, update_kind="provenance opinion update", require_topics=True
+        ):
             return
         # Use only the user's message so the LLM assesses the USER's claim, not
         # the agent's rebuttal. The agent's response may debunk the claim but that
@@ -1145,12 +1173,17 @@ class SonalityAgent:
 
             old_pos = self.sponge.opinion_vectors.get(topic, 0.0)
             meta = self.sponge.belief_meta.get(topic)
-            confidence = (meta.confidence if meta else 0.0) + (abs(old_pos) if old_pos * direction < 0 else 0.0)
+            confidence = (meta.confidence if meta else 0.0) + (
+                abs(old_pos) if old_pos * direction < 0 else 0.0
+            )
             raw_mag = max(0.0, min(1.0, update.evidence_strength)) / (confidence + 1.0)
             effective_mag = min(raw_mag, MAX_SINGLE_UPDATE_MAGNITUDE)
             log.debug(
                 "Belief magnitude %s: raw=%.3f effective=%.3f (type=%s)",
-                topic, raw_mag, effective_mag, ess.reasoning_type,
+                topic,
+                raw_mag,
+                effective_mag,
+                ess.reasoning_type,
             )
             self._stage_topic_opinion_update(
                 topic=topic,
@@ -1274,7 +1307,8 @@ class SonalityAgent:
         if window_interactions >= config.REFLECTION_EVERY:
             log.info(
                 "Periodic reflection: window=%d >= cadence=%d",
-                window_interactions, config.REFLECTION_EVERY,
+                window_interactions,
+                config.REFLECTION_EVERY,
             )
             return ReflectionGate(
                 trigger=ReflectionTrigger.PERIODIC,
@@ -1373,9 +1407,13 @@ class SonalityAgent:
         char_limit = config.SPONGE_MAX_TOKENS * 4
         if len(reflected_snapshot) > char_limit:
             reflected_snapshot = reflected_snapshot[:char_limit]
-            log.debug("Reflection snapshot truncated to %d chars (limit %d)", char_limit, char_limit)
+            log.debug(
+                "Reflection snapshot truncated to %d chars (limit %d)", char_limit, char_limit
+            )
         if len(reflected_snapshot) < 30:
-            log.warning("Reflection output rejected: snapshot too short (%d chars)", len(reflected_snapshot))
+            log.warning(
+                "Reflection output rejected: snapshot too short (%d chars)", len(reflected_snapshot)
+            )
             return
 
         self._check_belief_preservation(opinions_before)
@@ -1544,7 +1582,9 @@ class SonalityAgent:
             if result and (result.contradictions or result.merges):
                 log.info(
                     "Knowledge consolidation: %d contradictions, %d merges, %d opinion candidates",
-                    len(result.contradictions), len(result.merges), len(result.opinion_candidates),
+                    len(result.contradictions),
+                    len(result.merges),
+                    len(result.opinion_candidates),
                 )
         except Exception:
             log.exception("Knowledge consolidation failed")
@@ -1595,7 +1635,8 @@ class SonalityAgent:
             recent_episodes = (
                 self._run_async(
                     self._graph.list_recent_episode_context(min(config.REFLECTION_EVERY, 10))
-                ) or []
+                )
+                or []
             )
         except Exception:
             log.debug("Reflection episode retrieval failed", exc_info=True)
@@ -1615,7 +1656,9 @@ class SonalityAgent:
                 messages=({"role": "user", "content": prompt},),
             )
             reflected_snapshot = completion.text.strip()
-            self._apply_reflection_snapshot(pre_snapshot, reflected_snapshot, opinions_before_reflection)
+            self._apply_reflection_snapshot(
+                pre_snapshot, reflected_snapshot, opinions_before_reflection
+            )
             self._finalize_reflection_cycle(
                 dropped=dropped,
                 entrenched=entrenched,
@@ -1631,13 +1674,18 @@ class SonalityAgent:
     def _dump_snapshot(self, label: str) -> None:
         """Dump full DB state to debug log for manual inspection."""
         try:
+
             async def _snap() -> None:
                 async with self._db.neo4j_driver.session(
                     database=config.NEO4J_DATABASE
                 ) as neo_sess:
                     await dump_memory_snapshot(
-                        self._db.pg_pool, neo_sess, self.sponge, label=label,
+                        self._db.pg_pool,
+                        neo_sess,
+                        self.sponge,
+                        label=label,
                     )
+
             self._run_async(_snap())
         except Exception:
             log.debug("Memory snapshot (%s) failed", label, exc_info=True)

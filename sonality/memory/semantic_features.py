@@ -25,6 +25,7 @@ from ..llm.caller import llm_call
 from ..llm.prompts import FEATURE_CONSOLIDATION_PROMPT, FEATURE_EXTRACTION_PROMPT, FEATURE_TAGS
 from .embedder import ExternalEmbedder
 
+_T = TypeVar("_T")
 log = logging.getLogger(__name__)
 
 SEMANTIC_CATEGORIES: list[str] = ["personality", "preferences", "knowledge", "relationships"]
@@ -161,6 +162,11 @@ class SemanticIngestionWorker:
             await self._pg_pool.close()
             self._pg_pool = None
 
+    @property
+    def _pool(self) -> AsyncConnectionPool:
+        assert self._pg_pool is not None, "pool not open — call start() first"
+        return self._pg_pool
+
     def start(self) -> None:
         """Start the background processing thread and its dedicated event loop."""
         if not self._thread.is_alive():
@@ -274,8 +280,17 @@ class SemanticIngestionWorker:
                 )
             else:
                 continue
+            embedding: list[float] = []
+            if cmd.command in {FeatureCommandType.ADD, FeatureCommandType.UPDATE}:
+                try:
+                    embedding = self._embedder.embed_query(cmd.value or cmd.feature)
+                except Exception:
+                    log.warning(
+                        "Embedding failed for %s/%s/%s; skipping", category, cmd.tag, cmd.feature
+                    )
+                    continue
             try:
-                self._run_async(self._persist_command_async(episode_uid, category, cmd))
+                self._run_async(self._persist_command_async(episode_uid, category, cmd, embedding))
             except Exception:
                 log.exception(
                     "Feature persistence failed for episode=%s %s/%s/%s",
@@ -377,7 +392,7 @@ class SemanticIngestionWorker:
         limit: int,
     ) -> list[SemanticFeatureRow]:
         """Load semantic feature rows for one category."""
-        async with self._pg_pool.connection() as conn, conn.cursor() as cur:
+        async with self._pool.connection() as conn, conn.cursor() as cur:
             await cur.execute(
                 """
                 SELECT uid, tag, feature_name, value, confidence, episode_citations
@@ -399,7 +414,7 @@ class SemanticIngestionWorker:
         target_uid: str,
     ) -> dict[str, SemanticFeatureRow]:
         """Load exactly two candidate feature rows for a merge action."""
-        async with self._pg_pool.connection() as conn, conn.cursor() as cur:
+        async with self._pool.connection() as conn, conn.cursor() as cur:
             await cur.execute(
                 """
                 SELECT uid, tag, feature_name, value, confidence, episode_citations
@@ -434,7 +449,7 @@ class SemanticIngestionWorker:
         canonical_value = action.canonical_value.strip() or target.value
         confidence = max(source.confidence, target.confidence)
         citations = list(dict.fromkeys(target.citations + source.citations))
-        async with self._pg_pool.connection() as conn, conn.cursor() as cur:
+        async with self._pool.connection() as conn, conn.cursor() as cur:
             await cur.execute(
                 """
                 UPDATE semantic_features
@@ -468,19 +483,17 @@ class SemanticIngestionWorker:
             )
 
     async def _persist_command_async(
-        self, episode_uid: str, category: str, cmd: FeatureCommand
+        self, episode_uid: str, category: str, cmd: FeatureCommand, embedding: list[float]
     ) -> None:
-        """Persist feature command to PostgreSQL."""
+        """Persist feature command to PostgreSQL with a pre-computed embedding.
+
+        The embedding is computed synchronously in the worker thread before this
+        coroutine is submitted, keeping async paths free for DB I/O only.
+        """
         seed = f"semantic:{category}:{cmd.tag.strip().lower()}:{cmd.feature.strip().lower()}"
         feature_uid = str(uuid.uuid5(uuid.NAMESPACE_URL, seed))
-        embedding: list[float] = []
-        if cmd.command in {FeatureCommandType.ADD, FeatureCommandType.UPDATE}:
-            # Run synchronous HTTP embedding in a thread so the event loop stays free
-            embedding = await asyncio.to_thread(
-                self._embedder.embed_query, cmd.value or cmd.feature
-            )
 
-        async with self._pg_pool.connection() as conn, conn.cursor() as cur:
+        async with self._pool.connection() as conn, conn.cursor() as cur:
             if cmd.command in {FeatureCommandType.ADD, FeatureCommandType.UPDATE}:
                 await cur.execute(
                     """
