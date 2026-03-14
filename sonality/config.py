@@ -39,7 +39,6 @@ SPONGE_MAX_TOKENS: Final = 500
 EPISODIC_RETRIEVAL_COUNT: Final = _env_int("SONALITY_EPISODIC_RETRIEVAL_COUNT", 3)
 SEMANTIC_RETRIEVAL_COUNT: Final = _env_int("SONALITY_SEMANTIC_RETRIEVAL_COUNT", 2)
 
-BOOTSTRAP_DAMPENING_UNTIL: Final = _env_int("SONALITY_BOOTSTRAP_DAMPENING_UNTIL", 10)
 OPINION_COOLING_PERIOD: Final = _env_int("SONALITY_OPINION_COOLING_PERIOD", 3)
 
 MAX_CONVERSATION_CHARS: Final = 100_000
@@ -53,7 +52,7 @@ NEO4J_DATABASE: Final = _env_str("SONALITY_NEO4J_DATABASE", "neo4j")
 
 POSTGRES_URL: Final = _env_str(
     "SONALITY_POSTGRES_URL",
-    "postgresql://sonality:sonality_password@localhost:5432/sonality",
+    "postgresql://sonality:sonality_password@localhost:5433/sonality",
 )
 PG_POOL_MIN_SIZE: Final = _env_int("SONALITY_PG_POOL_MIN_SIZE", 2)
 PG_POOL_MAX_SIZE: Final = _env_int("SONALITY_PG_POOL_MAX_SIZE", 10)
@@ -101,7 +100,4 @@ def missing_live_api_config() -> tuple[str, ...]:
 
     API key is optional for local OpenAI-compatible servers (for example, Ollama).
     """
-    missing: list[str] = []
-    if not BASE_URL.strip():
-        missing.append("SONALITY_BASE_URL")
-    return tuple(missing)
+    return ("SONALITY_BASE_URL",) if not BASE_URL.strip() else ()

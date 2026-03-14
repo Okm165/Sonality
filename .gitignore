@@ -23,6 +23,7 @@ data/chromadb/
 data/teaching_bench/
 data/*.log
 data/*.jsonl
+logs/
 
 # Environment
 .env
