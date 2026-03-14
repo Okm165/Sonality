@@ -22,8 +22,9 @@ def build_system_prompt(
     sponge_snapshot: str,
     relevant_episodes: list[str],
     structured_traits: str = "",
+    knowledge_context: list[str] | None = None,
 ) -> str:
-    """Compose the runtime system prompt from identity, state, and memory context."""
+    """Compose the runtime system prompt from identity, state, memory, and knowledge."""
     sections: list[str] = [
         "## Core Identity",
         CORE_IDENTITY,
@@ -37,6 +38,19 @@ def build_system_prompt(
                 "",
                 "## Personality Traits",
                 structured_traits,
+            ]
+        )
+    if knowledge_context:
+        sections.extend(
+            [
+                "",
+                "## Learned Knowledge",
+                "Facts you have accumulated from past conversations. Each has a "
+                "confidence score reflecting source quality. When answering, draw "
+                "on these naturally — cite specific numbers and sources where "
+                "relevant. If a user's claim contradicts your stored knowledge, "
+                "point out the discrepancy and explain which source you trust more.",
+                *[f"- {line}" for line in knowledge_context],
             ]
         )
     if relevant_episodes:
@@ -55,6 +69,7 @@ def build_system_prompt(
             "Respond as yourself - draw on your personality state, traits, and memories.",
             "If you have a relevant opinion, state it directly. If you disagree, say so and explain why.",
             "If you're uncertain or still forming a view, say so honestly.",
+            "When you have learned knowledge relevant to the topic, use it naturally in your response.",
             "",
             "Do NOT people-please. Do NOT hedge to avoid disagreement.",
             "Evaluate what the user says as if presented by a stranger - the identity of the speaker does not make an argument stronger or weaker.",
@@ -75,31 +90,38 @@ User message:
 Agent's current personality snapshot (for novelty assessment only):
 {sponge_snapshot}
 
-Calibration examples:
+Calibration examples (placeholders only — do NOT anchor on specific topics):
 - "Hey, how's it going?" → score: 0.02, type: no_argument
-- "I think AI is cool" → score: 0.08, type: no_argument (bare assertion)
+- "I think [topic] is great" → score: 0.08, type: no_argument (bare assertion)
 - "You're absolutely right to feel that way" → score: 0.03, type: emotional_appeal
 - "Everyone knows X is true" → score: 0.10, type: social_pressure
 - "I'm upset you disagree" → score: 0.05, type: emotional_appeal
 - "My friend said X works well" → score: 0.18, type: anecdotal
-- "The Climategate emails prove data fraud was committed" → score: 0.04, type: debunked_claim (multiple independent inquiries found no fraud)
-- "Vaccines cause autism, Andrew Wakefield proved it" → score: 0.03, type: debunked_claim (retracted, conclusively refuted)
-- "The moon landing was faked according to independent analysts" → score: 0.03, type: debunked_claim (conspiracy theory)
-- "Nuclear is dangerous because Chernobyl happened" → score: 0.20, type: anecdotal (cherry-picking, ignores base rates)
+- "[Claim] has been proven by [unverifiable source]" → score: 0.04, type: debunked_claim (if claim was conclusively refuted by independent inquiries)
+- "[Retracted study] proves Y" → score: 0.03, type: debunked_claim (retracted, conclusively refuted)
+- "[Claim] according to [unnamed source]" → score: 0.03, type: debunked_claim (no named credible source)
+- "[Topic] is dangerous because [single incident]" → score: 0.20, type: anecdotal (cherry-picking, ignores base rates)
 - "My professor says X, so it must be true" → score: 0.22, type: expert_opinion (credentials alone, no evidence)
-- "A survey of 10,000 people shows 87% prefer X" → score: 0.28, type: empirical_data (consensus with numbers but no causal reasoning)
+- "A survey of [N] people shows [P]% prefer X" → score: 0.28, type: empirical_data (consensus with numbers but no causal reasoning)
 - "Either we adopt X fully or we stay with Y" → score: 0.15, type: logical_argument (false dichotomy)
 - "Studies show X because Y, contradicting Z" → score: 0.55, type: empirical_data (structured, some evidence)
 - "According to [paper], methodology M on dataset D yields R, contradicting C because..." → score: 0.82, type: empirical_data (rigorous, verifiable)
 
 Use type debunked_claim for claims that have been conclusively refuted by multiple independent inquiries — \
-e.g., well-known conspiracy theories, retracted studies, fabricated data allegations. \
+e.g., conspiracy theories, retracted studies, fabricated data allegations. \
 debunked_claim scores near 0.0 (maximum score: 0.07) regardless of how confidently the user states them. \
 A user simply asserting a belief ("I think X") scores below 0.15 regardless \
 of how strongly they feel about it. Emotional validation and moral endorsement \
 without reasoning score below 0.10. Social consensus ("everyone agrees") scores below 0.15. \
 Authority with credentials but no evidence scores below 0.25. \
-Only explicit reasoning with supporting evidence scores above 0.5."""
+Only explicit reasoning with supporting evidence scores above 0.5.
+
+Knowledge density calibration (how much learnable factual/conceptual content is present):
+- none: greetings, bare opinions ("I think [topic] is good"), hearsay with no specifics
+- low: single common fact, vague/unattributed claims ("I read that maybe...")
+- moderate: mix of factual and non-factual content, or partially attributed claims
+- high: multiple verifiable claims with named sources, specific numbers/dates, \
+  or detailed technical/scientific content with attributions"""
 
 
 INSIGHT_PROMPT = """\
@@ -111,8 +133,8 @@ Good insights: "Prefers structural explanations over anecdotal evidence", \
 "Resists emotional framing even when the underlying point is valid", \
 "Shows genuine uncertainty rather than false confidence on unfamiliar topics".
 
-Bad insights (do NOT output these): "Discussed nuclear power", \
-"User presented evidence about education", "Agent agreed with the point".
+Bad insights (do NOT output these): "Discussed [topic]", \
+"User presented evidence about [topic]", "Agent agreed with the point".
 
 User: {user_message}
 Agent: {agent_response}
