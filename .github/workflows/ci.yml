@@ -37,7 +37,7 @@ jobs:
         run: uv run mypy sonality
 
       - name: Run unit tests
-        run: uv run pytest tests -q
+        run: uv run pytest tests -m "not live" -q
 
       - name: Run non-live benchmark tests
         run: uv run pytest benches -m "bench and not live" -q

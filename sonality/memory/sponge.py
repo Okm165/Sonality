@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import logging
-import math
 import shutil
 from collections import defaultdict
 from datetime import UTC, datetime
@@ -27,16 +26,15 @@ SEED_SNAPSHOT: Final = (
 MAX_RECENT_SHIFTS: Final = 10
 
 
-MAX_UPDATE_HISTORY: Final = 8
-
-
 class BeliefMeta(BaseModel):
     """Confidence and provenance for a tracked belief.
 
-    Confidence grows logarithmically with evidence, making established beliefs
-    resist change. (Bayesian belief updating — Oravecz et al. 2016; ABBEL 2025)
-    recent_updates tracks signed magnitudes for Martingale entrenchment detection
-    (NeurIPS 2025, arXiv:2512.02914).
+    Confidence follows model-assessed uncertainty rather than evidence-count
+    formulas. recent_updates tracks signed magnitudes for diagnostics.
+
+    Episode provenance fields (A-MEM Zettelkasten model) link beliefs to their
+    supporting/contradicting episodes for traceability. All new fields have
+    defaults so existing sponge.json files load without error.
     """
 
     confidence: float = 0.0
@@ -44,6 +42,13 @@ class BeliefMeta(BaseModel):
     last_reinforced: int = 0
     provenance: str = ""
     recent_updates: list[float] = Field(default_factory=list)
+
+    # Episode provenance (backward-compatible defaults)
+    supporting_episode_uids: list[str] = Field(default_factory=list)
+    contradicting_episode_uids: list[str] = Field(default_factory=list)
+    formed_at: int = 0
+    last_challenged_at: int = -1
+    uncertainty: float = 1.0  # High initially, decreases with consistent evidence
 
 
 class BehavioralSignature(BaseModel):
@@ -70,6 +75,7 @@ class StagedOpinionUpdate(BaseModel):
     staged_at: int
     due_interaction: int
     provenance: str = ""
+    new_uncertainty: float = -1.0  # LLM-assessed uncertainty; -1.0 = not set
 
 
 class SpongeState(BaseModel):
@@ -111,13 +117,14 @@ class SpongeState(BaseModel):
         magnitude: float,
         provenance: str = "",
         evidence_increment: int = 1,
+        new_uncertainty: float = -1.0,
     ) -> None:
         """Apply a bounded signed opinion update and refresh belief metadata.
 
         Assumes `direction` is sign-like (negative/opposing, positive/supporting)
-        and `magnitude` is non-negative. Belief confidence is derived only from
-        evidence count to keep update dynamics interpretable and auditable.
+        and `magnitude` is non-negative.
         """
+        topic = topic.strip().lower()
         old = self.opinion_vectors.get(topic, 0.0)
         new = max(-1.0, min(1.0, old + direction * magnitude))
         self.opinion_vectors[topic] = new
@@ -126,21 +133,34 @@ class SpongeState(BaseModel):
         signed = direction * magnitude
         if meta is None:
             evidence_count = max(1, evidence_increment)
-            initial_conf = min(1.0, math.log2(evidence_count + 1) / math.log2(20))
+            initial_uncertainty = 0.80  # 1.0 - initial_conf (0.2)
+            # Bayesian floor at creation: multiple staged updates reduce uncertainty immediately.
+            if evidence_count >= 3:
+                initial_uncertainty = min(initial_uncertainty, 0.30)
+            elif evidence_count >= 2:
+                initial_uncertainty = min(initial_uncertainty, 0.50)
             self.belief_meta[topic] = BeliefMeta(
-                confidence=initial_conf,
+                confidence=max(0.0, min(1.0, 1.0 - initial_uncertainty)),
                 evidence_count=evidence_count,
                 last_reinforced=self.interaction_count,
                 provenance=provenance,
                 recent_updates=[signed],
+                uncertainty=initial_uncertainty,
             )
         else:
             meta.evidence_count += max(1, evidence_increment)
             meta.last_reinforced = self.interaction_count
-            meta.confidence = min(1.0, math.log2(meta.evidence_count + 1) / math.log2(20))
+            # Apply LLM-assessed uncertainty if provided (from belief provenance assessment).
+            if 0.0 <= new_uncertainty <= 1.0:
+                meta.uncertainty = new_uncertainty
+            # Bayesian floor: uncertainty cannot stay at maximum as evidence accumulates.
+            # Uses evidence_count as proxy; prevents LLM returning new_uncertainty=1.0 forever.
+            if meta.evidence_count >= 3:
+                meta.uncertainty = min(meta.uncertainty, 0.30)
+            elif meta.evidence_count >= 2:
+                meta.uncertainty = min(meta.uncertainty, 0.50)
+            meta.confidence = max(0.0, min(1.0, 1.0 - meta.uncertainty))
             meta.recent_updates.append(signed)
-            if len(meta.recent_updates) > MAX_UPDATE_HISTORY:
-                meta.recent_updates = meta.recent_updates[-MAX_UPDATE_HISTORY:]
             if provenance:
                 meta.provenance = provenance
 
@@ -154,6 +174,20 @@ class SpongeState(BaseModel):
             self.belief_meta[topic].confidence,
             self.belief_meta[topic].evidence_count,
         )
+        # Detailed belief trace for memory health analysis
+        meta = self.belief_meta[topic]
+        log.debug(
+            "BELIEF_TRACE topic=%s | pos=%.3f | conf=%.2f | uncert=%.2f | "
+            "ev=%d | support=%d | contra=%d | updates=%s",
+            topic,
+            new,
+            meta.confidence,
+            meta.uncertainty,
+            meta.evidence_count,
+            len(meta.supporting_episode_uids),
+            len(meta.contradicting_episode_uids),
+            meta.recent_updates[-3:],
+        )
 
     def stage_opinion_update(
         self,
@@ -162,12 +196,16 @@ class SpongeState(BaseModel):
         magnitude: float,
         cooling_period: int,
         provenance: str = "",
+        new_uncertainty: float = -1.0,
     ) -> int:
         """Queue an opinion update and return the interaction when it matures.
 
         Staging isolates immediate model response from durable worldview changes;
         updates are committed only after `cooling_period` interactions.
+        new_uncertainty carries the LLM-assessed uncertainty for this evidence;
+        -1.0 means not set (no LLM assessment available).
         """
+        topic = topic.strip().lower()
         signed = direction * magnitude
         if abs(signed) < 1e-9:
             return self.interaction_count
@@ -179,7 +217,15 @@ class SpongeState(BaseModel):
                 staged_at=self.interaction_count,
                 due_interaction=due,
                 provenance=provenance,
+                new_uncertainty=new_uncertainty,
             )
+        )
+        log.debug(
+            "STAGED_UPDATE topic=%s | mag=%+.3f | due=%d | prov=%.40s",
+            topic,
+            signed,
+            due,
+            provenance.replace("\n", " "),
         )
         return due
 
@@ -214,66 +260,27 @@ class SpongeState(BaseModel):
             if abs(net) < 1e-4:
                 continue
             direction = 1.0 if net > 0 else -1.0
-            magnitude = abs(net)
+            magnitude = min(abs(net), 0.25)
             evidence_increment = len(updates)
             provenance = updates[-1].provenance
+            # Apply the LLM-assessed uncertainty from the most recent staged update.
+            # Uses the minimum uncertainty (most confident) among consistent-direction updates.
+            valid_uncertainties = [
+                u.new_uncertainty
+                for u in updates
+                if u.new_uncertainty >= 0.0
+                and (u.signed_magnitude * net >= 0)  # same direction as net
+            ]
             self.update_opinion(
                 topic=topic,
                 direction=direction,
                 magnitude=magnitude,
                 provenance=provenance,
                 evidence_increment=evidence_increment,
+                new_uncertainty=min(valid_uncertainties) if valid_uncertainties else -1.0,
             )
             applied.append(f"{topic}:{net:+.4f} ({evidence_increment} staged)")
         return applied
-
-    def decay_beliefs(self, decay_rate: float = 0.15, min_confidence: float = 0.05) -> list[str]:
-        """Power-law decay for unreinforced beliefs. Returns dropped topic names.
-
-        R(t) = (1 + gap)^(-β) with a reinforcement floor so well-evidenced
-        beliefs persist. (Ebbinghaus forgetting curve; FadeMem 2025; SAGE 2024)
-        """
-        dropped: list[str] = []
-        for topic in list(self.belief_meta):
-            meta = self.belief_meta[topic]
-            gap = self.interaction_count - meta.last_reinforced
-            if gap < 5:
-                continue
-            retention = (1 + gap) ** (-decay_rate)
-            # Keep only well-reinforced beliefs sticky; single-hit beliefs should
-            # be able to decay out naturally.
-            floor = min(0.6, max(0.0, (meta.evidence_count - 1) * 0.04))
-            new_conf = max(floor, meta.confidence * retention)
-            if new_conf < min_confidence:
-                dropped.append(topic)
-                del self.belief_meta[topic]
-                del self.opinion_vectors[topic]
-                log.info("Belief '%s' decayed below threshold, removed", topic)
-            else:
-                meta.confidence = new_conf
-        return dropped
-
-    def detect_entrenched_beliefs(self, min_updates: int = 4) -> list[str]:
-        """Detect beliefs where updates are predictable from current position.
-
-        Martingale property (NeurIPS 2025, arXiv:2512.02914): under rational
-        updating, future belief changes should be unpredictable from current
-        belief. When >75% of recent updates agree with the sign of the current
-        position, the belief is entrenching rather than truth-seeking.
-        """
-        entrenched: list[str] = []
-        for topic, meta in self.belief_meta.items():
-            if len(meta.recent_updates) < min_updates:
-                continue
-            pos = self.opinion_vectors.get(topic, 0.0)
-            if abs(pos) < 0.2:
-                continue
-            pos_sign = 1.0 if pos > 0 else -1.0
-            agreeing = sum(1 for u in meta.recent_updates if u * pos_sign > 0)
-            ratio = agreeing / len(meta.recent_updates)
-            if ratio > 0.75:
-                entrenched.append(topic)
-        return entrenched
 
     def record_shift(self, description: str, magnitude: float) -> None:
         """Append a bounded history entry describing a personality change."""
@@ -292,22 +299,19 @@ class SpongeState(BaseModel):
         engagement = self.behavioral_signature.topic_engagement
         engagement[topic] = engagement.get(topic, 0) + 1
 
-    def _update_disagreement_rate(self, disagreement_value: float) -> None:
-        """Update running disagreement mean with one observation in [0, 1].
-
-        Assumes `interaction_count` advances monotonically at turn boundaries.
-        """
-        n = self.interaction_count or 1
-        old_rate = self.behavioral_signature.disagreement_rate
-        self.behavioral_signature.disagreement_rate = (old_rate * (n - 1) + disagreement_value) / n
-
     def note_disagreement(self) -> None:
         """Record that the latest interaction structurally disagreed."""
-        self._update_disagreement_rate(1.0)
+        n = self.interaction_count or 1
+        self.behavioral_signature.disagreement_rate = (
+            self.behavioral_signature.disagreement_rate * (n - 1) + 1.0
+        ) / n
 
     def note_agreement(self) -> None:
         """Record that the latest interaction did not structurally disagree."""
-        self._update_disagreement_rate(0.0)
+        n = self.interaction_count or 1
+        self.behavioral_signature.disagreement_rate = (
+            self.behavioral_signature.disagreement_rate * (n - 1)
+        ) / n
 
     def save(self, path: Path, history_dir: Path) -> None:
         """Atomically persist state and archive the previous version.

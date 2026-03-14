@@ -7,7 +7,7 @@ interactions, and monitor whether personality evolution remains coherent and evi
 
 1. Install and configure:
    - Follow [Getting Started](getting-started.md).
-   - Set `SONALITY_API_KEY` and `SONALITY_API_VARIANT` in `.env`.
+   - Set `SONALITY_BASE_URL`, `SONALITY_API_KEY`, and model IDs in `.env`.
 2. Start a fresh run:
    - `make run` for local REPL usage.
    - Optionally `make reset` before a new training cycle.

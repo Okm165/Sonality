@@ -19,7 +19,7 @@ Without reflection, agents accumulated raw memories but could not form coherent 
 Reflection fires under two conditions (dual trigger):
 
 1. **Periodic**: `interaction_count - last_reflection_at >= REFLECTION_EVERY` (default: 20)
-2. **Event-driven**: cumulative shift magnitude since last reflection > `REFLECTION_SHIFT_THRESHOLD` (default: 0.1)
+2. **Event-driven**: positive recent shift activity with pending insights or staged updates
 
 !!! warning "Cooldown"
     Reflection will **not** fire if fewer than `REFLECTION_EVERY // 2` interactions have occurred since the last reflection. At the default `REFLECTION_EVERY=20`, this means a minimum 10-interaction cooldown. The cooldown is checked *first* — neither periodic nor event-driven triggers can override it. This prevents thrashing when a burst of high-ESS interactions occurs in quick succession.
@@ -42,18 +42,13 @@ flowchart TD
 
 ### Step 1: Decay Beliefs
 
-Before consolidation, unreinforced beliefs lose confidence (power-law, Ebbinghaus-inspired):
-
-- \(R(t) = (1 + \text{gap})^{-\beta}\) with β = 0.15
-- Reinforcement floor: `min(0.6, max(0.0, (evidence_count - 1) × 0.04))`
-- Beliefs below 0.05 confidence are dropped entirely
-- Only runs on beliefs with `gap ≥ 5`
+Before consolidation, stale beliefs are evaluated by `BELIEF_DECAY_PROMPT` and marked as `RETAIN`, `DECAY`, or `FORGET` with conservative fallback behavior.
 
 See [Opinion Dynamics](opinion-dynamics.md) for the full decay formula.
 
 ### Step 2: Retrieve Episodes
 
-Recent episodes from ChromaDB, filtered by `interaction >= last_reflection_at`. Up to `min(REFLECTION_EVERY, 10)` results.
+Recent non-archived episodes are loaded from Neo4j graph context (`list_recent_episode_context`), capped at `min(REFLECTION_EVERY, 10)` results.
 
 ### Step 3: Assemble Context
 

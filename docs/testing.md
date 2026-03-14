@@ -32,11 +32,10 @@ Run in this order from fastest to most expensive:
 Before any live benchmark:
 
 ```bash
+SONALITY_BASE_URL=http://localhost:11434/v1   # example: Ollama OpenAI-compatible endpoint
 SONALITY_API_KEY=...
-SONALITY_API_VARIANT=openrouter
-# optional
-SONALITY_MODEL=anthropic/claude-sonnet-4-20250514
-SONALITY_ESS_MODEL=anthropic/claude-sonnet-4-20250514
+SONALITY_MODEL=qwen2.5:14b-instruct
+SONALITY_ESS_MODEL=qwen2.5:14b-instruct
 ```
 
 Validate config:
@@ -45,7 +44,7 @@ Validate config:
 make preflight-live
 ```
 
-If `SONALITY_API_VARIANT` is missing, runtime should be treated as misconfigured.
+If `SONALITY_BASE_URL` is missing, runtime should be treated as misconfigured.
 
 ## What the Non-Live Suite Must Guarantee
 

@@ -21,9 +21,9 @@ Without countermeasures, sycophancy is a self-amplifying cycle. Here is each ste
 |------|-------------|------------------------|---------------|
 | 1. User states opinion X | User says "I believe strongly that Y is true" | — | — |
 | 2. The model generates agreeing response | RLHF "agreement is good" heuristic activates (58% baseline) | **Layer 1** (Core Identity): instructs "do NOT default to agreeing" | RLHF bias is strong; core identity reduces but doesn't eliminate |
-| 3. Agreement stored as episode | Episode summary + metadata saved to ChromaDB | **Layer 6** (Memory Framing): episodes wrapped with "evaluate on merit, not familiarity" | The episode still exists; framing helps but stored agreement biases future retrievals |
+| 3. Agreement stored as episode | Episode and derivatives saved to Neo4j + pgvector | **Layer 6** (Memory Framing): episodes wrapped with "evaluate on merit, not familiarity" | The episode still exists; framing helps but stored agreement biases future retrievals |
 | 4. ESS classifies user message | Classifier evaluates argument quality | **Layer 2** (ESS Decoupling): agent's response excluded from classification. **Layer 3** (Third-Person Framing): evaluates as neutral observer | Score reflects argument quality, not the agent's agreement. But user's argument structure is unchanged |
-| 5. If ESS above threshold, opinion updates | Magnitude computed and staged | **Layer 4** (Bayesian Resistance): established beliefs resist. **Layer 5** (Bootstrap Dampening): early interactions halved. **Layer 6** (Cooling Commit): staged deltas commit after delay | Single high-ESS interaction is bounded, and short social-pressure bursts are damped |
+| 5. If classifier output is reliable, opinion updates may run | LLM provenance assessment computes bounded staged deltas | **Layer 4** (Bayesian Resistance): established beliefs resist. **Layer 5** (Bootstrap Dampening): early interactions halved. **Layer 6** (Cooling Commit): staged deltas commit after delay | Single interaction impact is bounded, and short social-pressure bursts are damped |
 | 6. Snapshot updated incorporating agreement | Next interaction retrieves snapshot biased toward X | **Layer 8** (Disagreement Detection): if user argues against agent, disagreement is tracked | If no subsequent user opposes X, the shift persists unchallenged |
 
 The net effect with all layers active: sycophancy is reduced from ~58% baseline to a substantially lower rate, but not eliminated. The 78.5% sycophancy rate under first-person framing (SycEval) is resistant to all known prompting interventions. The goal is reduction, not elimination.
@@ -91,10 +91,9 @@ This is a practical anti-reactivity layer inspired by BASIL-style distinction be
 When retrieved episodes are injected into the system prompt, they are wrapped with:
 
 ```
-<relevant_memories>
+## Relevant Past Conversations
 Past context (evaluate on merit, not familiarity):
 - [episode summaries]
-</relevant_memories>
 ```
 
 The phrase "evaluate on merit, not familiarity" directly addresses PersistBench's finding that 97% sycophancy failure occurs when memory-based personality is stored without anti-sycophancy framing.

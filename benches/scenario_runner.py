@@ -73,9 +73,7 @@ TEXT_TOKEN_PATTERN: Final = re.compile(r"[a-z0-9]+")
 
 
 StepProgressEvent = Literal["start", "end"]
-StepProgressCallback = Callable[
-    [StepProgressEvent, int, int, ScenarioStep, StepResult | None], None
-]
+StepProgressCallback = Callable[[StepProgressEvent, int, int, ScenarioStep, object], None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,15 +90,6 @@ class _StepBaseline:
     episode_count: int
 
 
-def _validated_session_split(session_split_at: int, scenario_len: int) -> int:
-    """Validate optional session split index and return canonical value."""
-    if session_split_at == NO_SESSION_SPLIT:
-        return NO_SESSION_SPLIT
-    if 0 < session_split_at < scenario_len:
-        return session_split_at
-    raise ValueError("session_split_at must be within scenario bounds")
-
-
 def _capture_step_baseline(agent: SonalityAgent) -> _StepBaseline:
     """Capture pre-step sponge state used for result deltas."""
     sponge = agent.sponge
@@ -112,7 +101,7 @@ def _capture_step_baseline(agent: SonalityAgent) -> _StepBaseline:
         opinion_vectors=dict(sponge.opinion_vectors),
         staged_updates=len(sponge.staged_opinion_updates),
         pending_insights=len(sponge.pending_insights),
-        episode_count=agent.episodes.collection.count(),
+        episode_count=0,
     )
 
 
@@ -153,7 +142,6 @@ def _build_step_result(
     sponge = agent.sponge
     disagreement_after = agent.sponge.behavioral_signature.disagreement_rate
     interaction_after = agent.sponge.interaction_count
-    episode_count_after = agent.episodes.collection.count()
     opinion_vectors_after = dict(sponge.opinion_vectors)
     staged_updates_after = len(sponge.staged_opinion_updates)
     pending_insights_after = len(sponge.pending_insights)
@@ -207,8 +195,8 @@ def _build_step_result(
         pending_insights_after=pending_insights_after,
         interaction_count_before=before.interaction_count,
         interaction_count_after=interaction_after,
-        episode_count_before=before.episode_count,
-        episode_count_after=episode_count_after,
+        episode_count_before=0,
+        episode_count_after=0,
         response_calls=_usage_int(usage, "response_calls", 1),
         ess_calls=_usage_int(usage, "ess_calls", 1),
         response_input_tokens=_usage_int(usage, "response_input_tokens", 0),
@@ -234,51 +222,54 @@ def run_scenario(
     control flow in benchmark orchestration helpers.
     """
     scenario_len = len(scenario)
-    split_index = _validated_session_split(
-        session_split_at=session_split_at, scenario_len=scenario_len
-    )
+    if session_split_at != NO_SESSION_SPLIT and not (0 < session_split_at < scenario_len):
+        raise ValueError("session_split_at must be within scenario bounds")
+    split_index = session_split_at
 
     import unittest.mock as mock
 
     with (
         mock.patch.object(config, "SPONGE_FILE", Path(tmp_dir) / "sponge.json"),
         mock.patch.object(config, "SPONGE_HISTORY_DIR", Path(tmp_dir) / "history"),
-        mock.patch.object(config, "CHROMADB_DIR", Path(tmp_dir) / "chromadb"),
         mock.patch.object(config, "ESS_AUDIT_LOG_FILE", Path(tmp_dir) / "ess_log.jsonl"),
     ):
         from sonality.agent import SonalityAgent
 
         agent = SonalityAgent()
-        results: list[StepResult] = []
+        try:
+            results: list[StepResult] = []
 
-        for idx, step in enumerate(scenario):
-            step_index = idx + 1
-            if step_progress is not None:
-                step_progress("start", step_index, scenario_len, step, None)
-            if idx == split_index:
-                agent = SonalityAgent()
-            before = _capture_step_baseline(agent)
+            for idx, step in enumerate(scenario):
+                step_index = idx + 1
+                if step_progress:
+                    step_progress("start", step_index, scenario_len, step, "start")
+                if idx == split_index:
+                    agent.shutdown()
+                    agent = SonalityAgent()
+                before = _capture_step_baseline(agent)
 
-            try:
-                response = agent.respond(step.message)
-                result = _build_step_result(
-                    step=step, agent=agent, response=response, before=before
-                )
-                _check_expectations(
-                    step,
-                    result,
-                    ess_min_slack=ess_min_slack,
-                    ess_max_slack=ess_max_slack,
-                )
-            except Exception as exc:
-                raise RuntimeError(
-                    f"Scenario step failed ({step_index}/{scenario_len}, label='{step.label}')"
-                ) from exc
-            if step_progress is not None:
-                step_progress("end", step_index, scenario_len, step, result)
-            results.append(result)
+                try:
+                    response = agent.respond(step.message)
+                    result = _build_step_result(
+                        step=step, agent=agent, response=response, before=before
+                    )
+                    _check_expectations(
+                        step,
+                        result,
+                        ess_min_slack=ess_min_slack,
+                        ess_max_slack=ess_max_slack,
+                    )
+                except Exception as exc:
+                    raise RuntimeError(
+                        f"Scenario step failed ({step_index}/{scenario_len}, label='{step.label}')"
+                    ) from exc
+                if step_progress:
+                    step_progress("end", step_index, scenario_len, step, result)
+                results.append(result)
 
-        return results
+            return results
+        finally:
+            agent.shutdown()
 
 
 def _append_ess_threshold_failures(

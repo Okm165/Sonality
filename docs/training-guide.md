@@ -83,7 +83,6 @@ make run
 Recommended training environment tuning:
 
 ```bash
-SONALITY_ESS_THRESHOLD=0.3
 SONALITY_OPINION_COOLING_PERIOD=3
 SONALITY_REFLECTION_EVERY=20
 SONALITY_BOOTSTRAP_DAMPENING_UNTIL=10
@@ -138,7 +137,7 @@ Every training message should pass this loop:
    - `/health` for overall personality health.
 4. **Check narrative evolution** with `/diff` after reflection boundaries (every 20 interactions or when event-driven reflection fires).
 
-If your messages consistently score below ESS threshold, you are not training personality — only chatting.
+If your messages consistently score very low on ESS quality signals, you are not training personality — only chatting.
 
 ### Update Granularity
 
@@ -167,7 +166,7 @@ Provide clear, well-structured arguments. The agent needs genuine reasoning to f
     - *"Finland's education reforms demonstrate that reducing standardized testing and increasing teacher autonomy led to improved PISA scores over 15 years. The causal mechanism appears to be trust in professional judgment outperforming bureaucratic measurement."*
 
 !!! failure "Ineffective Foundation Messages"
-    These will score below ESS threshold and produce no personality change:
+    These typically produce low ESS quality signals and little to no personality change:
 
     - *"I think AI is overhyped."* → ESS ~0.08 (bare assertion)
     - *"Everyone agrees open source is great."* → ESS ~0.10 (social pressure)
@@ -498,13 +497,13 @@ Automated checks log warnings when:
 - A single interaction causes a belief sign reversal (position crosses zero) → potential sycophantic flip
 - Disagreement rate drops below 15% → trending sycophantic
 - Snapshot Jaccard < 0.3 → personality collapse
-- Entrenched beliefs detected (>75% of recent updates agree with current position) → confirmation bias
+- Entrenched beliefs detected by reflection-time LLM assessment → confirmation bias risk
 
 ### Entrenchment Detection
 
 **Research basis:** Martingale Score (NeurIPS 2025, arXiv:2512.02914) — under rational belief updating, future changes should be unpredictable from current position. When updates consistently reinforce the current stance, the agent is entrenching rather than truth-seeking.
 
-Sonality tracks the last 8 signed update magnitudes per belief. During reflection, it checks: if >75% of recent updates agree with the current position's sign, the belief is flagged as entrenched. This appears in the JSONL audit trail and in console warnings.
+Sonality records belief update history and uses reflection-time LLM diagnostics to flag entrenchment patterns. Flagged topics appear in the JSONL audit trail and in console warnings.
 
 **What to do about entrenched beliefs:**
 
@@ -604,7 +603,6 @@ All parameters are set via environment variables in `.env`:
 
 | Variable | Default | Effect |
 |----------|---------|--------|
-| `SONALITY_ESS_THRESHOLD` | 0.3 | Minimum ESS score to trigger opinion update |
 | `SONALITY_REFLECTION_EVERY` | 20 | Interactions between periodic reflections |
 | `SONALITY_BOOTSTRAP_DAMPENING_UNTIL` | 10 | Interactions with 0.5× magnitude |
 | `SONALITY_OPINION_COOLING_PERIOD` | 3 | Interactions before staged opinion commits |

@@ -1,5 +1,8 @@
 # Architecture Assessment
 
+> Status note: this assessment includes pre-Path-A alternatives retained for
+> historical context. Production runtime uses Path A only (Neo4j + pgvector).
+
 Research-backed architecture and training blueprint for Sonality under hard constraints:
 
 - API-only access (provider API, no fine-tuning)
@@ -13,7 +16,7 @@ This document is intentionally implementation-oriented: each recommendation is t
 
 ## 1. ARCHITECTURE ASSESSMENT
 
-### 1.1 Memory Architecture (ChromaDB + JSON vs Graph)
+### 1.1 Memory Architecture (Legacy comparison: Chroma + JSON vs Graph)
 
 **Verdict: MODIFY (lightly), REJECT full graph DB**
 
@@ -24,9 +27,9 @@ This document is intentionally implementation-oriented: each recommendation is t
 - **Impact vs complexity**
   - Full graph layer (Neo4j-style or heavy NetworkX usage): high complexity, uncertain gain for Sonality's single-user conversational pattern.
   - Typed vector memory + quality rerank + lightweight relational signals: high impact, low complexity.
-- **What to replace/remove**
-  - Keep one store (`ChromaDB`) and remove any need for secondary graph persistence.
-  - Prefer metadata-based relation hints instead of graph entities/edges services.
+- **What to replace/remove (historical recommendation; superseded in runtime)**
+  - Legacy recommendation kept a single vector store and avoided secondary graph persistence.
+  - Current runtime supersedes this with Path A dual-store (`Neo4j + PostgreSQL/pgvector`).
 - **Minimal implementation**
   - Keep typed retrieval (`semantic` then `episodic`).
   - Add optional relation hints in metadata (`related_topics`, `stance_sign`) and apply small rerank bonuses for causally adjacent memories.
@@ -272,14 +275,14 @@ Atomic commit plan ordered by impact-to-complexity.
 
 3. **Poisoning provenance metadata**
    - add ingestion provenance + retrieval penalties.
-   - Files: `sonality/memory/episodes.py`, `sonality/agent.py`, tests.
+   - Files: `sonality/memory/dual_store.py`, `sonality/memory/graph.py`, `sonality/agent.py`, tests.
    - Est. `+40 / -12`.
 
 ### (b) Medium-impact
 
 4. **Light relational rerank hints**
    - add relation-aware metadata bonus without graph dependency.
-   - Files: `sonality/memory/episodes.py`, tests.
+   - Files: `sonality/memory/retrieval/`, tests.
    - Est. `+45 / -15`.
 
 5. **Reflection contradiction ledger**

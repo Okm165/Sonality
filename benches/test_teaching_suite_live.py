@@ -12,11 +12,14 @@ from .teaching_harness import (
     EvalProfile,
     MetricOutcome,
     PackDefinition,
-    _probe_artifact_names,
+    probe_artifact_names,
     run_teaching_benchmark,
 )
 
-bench_live = pytest.mark.skipif(not config.API_KEY, reason="No provider API key configured")
+bench_live = pytest.mark.skipif(
+    bool(config.missing_live_api_config()),
+    reason=f"Missing live config: {config.missing_live_api_config()}",
+)
 
 
 def _expected_run_artifacts() -> tuple[str, ...]:
@@ -29,7 +32,7 @@ def _expected_run_artifacts() -> tuple[str, ...]:
         "belief_delta_trace.jsonl",
         "run_isolation_trace.jsonl",
         "memory_validity_trace.jsonl",
-        *_probe_artifact_names(),
+        *probe_artifact_names(),
         *contract_traces,
         "health_metrics_trace.jsonl",
         "observer_verdict_trace.jsonl",
@@ -47,7 +50,7 @@ def _expected_run_artifacts() -> tuple[str, ...]:
 
 
 def _missing_artifact_message(artifact_name: str) -> str:
-    """Test helper for missing artifact message."""
+    """Format a human-readable message for a missing benchmark artifact."""
     normalized = artifact_name.removesuffix(".jsonl").removesuffix(".json").replace("_", "-")
     return f"Missing {normalized} artifact."
 
@@ -61,7 +64,7 @@ def test_teaching_suite_benchmark(
     bench_progress: BenchProgressLevel,
     bench_packs: tuple[PackDefinition, ...],
 ) -> None:
-    """Test that teaching suite benchmark."""
+    """Teaching benchmark produces expected artifacts and passes hard gates."""
     run_dir, outcomes, replicates, blockers = run_teaching_benchmark(
         profile=bench_profile,
         output_root=bench_output_root,
@@ -73,7 +76,9 @@ def test_teaching_suite_benchmark(
     for artifact_name in _expected_run_artifacts():
         assert (run_dir / artifact_name).exists(), _missing_artifact_message(artifact_name)
 
-    assert replicates >= bench_profile.min_runs
+    assert replicates >= bench_profile.min_runs, (
+        f"Only {replicates} replicates completed, expected >= {bench_profile.min_runs}"
+    )
 
     if bench_profile.name in {"rapid", "lean"}:
         # Rapid/lean are iteration signal modes, not release gates.
@@ -84,7 +89,7 @@ def test_teaching_suite_benchmark(
 
 
 def _assert_hard_gates_pass(hard_gates: list[MetricOutcome], blockers: list[str]) -> None:
-    """Test helper for assert hard gates pass."""
+    """Assert that all hard-gate metrics passed; include blockers in failure message."""
     failed = [metric.key for metric in hard_gates if metric.status == "fail"]
     assert not failed, (
         f"Hard gate failures: {failed}; blockers={blockers}. "

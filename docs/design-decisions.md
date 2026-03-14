@@ -1,5 +1,8 @@
 # Design Decisions
 
+> Status note: some entries describe legacy alternatives evaluated earlier in the
+> project. Current implementation is Path A with unified provider + dual store.
+
 Every architectural choice in Sonality is backed by specific research findings. This page documents what we chose, what we rejected, and the evidence behind each decision. Each decision is structured as: **problem**, **solution**, **research backing**, and **alternative considered**.
 
 ## Implemented Decisions
@@ -18,7 +21,7 @@ Every architectural choice in Sonality is backed by specific research findings. 
 | Aspect | Detail |
 |--------|--------|
 | **Problem** | Without input quality gating, the agent absorbs any user assertion as truth — including social pressure, emotional appeals, and bare assertions. |
-| **Solution** | A dedicated LLM call classifies argument quality (Evidence Strength Score) before any personality update. Updates occur only when ESS ≥ threshold (default 0.3). |
+| **Solution** | A dedicated LLM call classifies argument quality (Evidence Strength Score) before personality/belief updates. Runtime gates are multi-factor (classifier reliability + downstream typed provenance decisions), not a single global threshold. |
 | **Research** | Maps to BASIL's (2025) distinction between "sycophantic belief shifts" and "rational belief updating." IBM ArgQ calibration validates the classifier against human-annotated argument quality rankings. |
 | **Alternative** | Update on every interaction. Rejected: bounded confidence models show systems that update on every input converge to consensus or oscillate chaotically (Hegselmann-Krause 2002). |
 
@@ -49,14 +52,14 @@ Every architectural choice in Sonality is backed by specific research findings. 
 | **Research** | Deffuant bounded confidence model: initial uncertainty and convergence dynamics. Anchoring bias (arXiv:2511.05766): early probability shifts are resistant to mitigation. |
 | **Alternative** | Treat all interactions equally. Rejected: bounded confidence models and anchoring research show first impressions have outsized influence. |
 
-### 6. ChromaDB Over Knowledge Graph
+### 6. Dual Store Over Chroma-Only Memory
 
 | Aspect | Detail |
 |--------|--------|
-| **Problem** | Need episodic memory for retrieval. Knowledge graphs (e.g., Graphiti, Neo4j) offer temporal coherence but at what cost? |
-| **Solution** | ChromaDB vector store for episode storage. ESS summaries embedded; retrieval with cosine similarity plus quality-aware reranking (ESS score, source/reasoning quality multipliers, relational topic bonus). |
-| **Research** | Mem0 vs Graphiti (arXiv:2601.07978): vector databases significantly outperform graph databases in efficiency. **No statistically significant accuracy difference.** Graphiti generated **1.17M tokens per test case**, **$152 before abort**. |
-| **Alternative** | Temporal knowledge graph (Graphiti). Rejected: cost and latency prohibitive at this scale; no accuracy gain. Documented upgrade path if temporal coherence becomes bottleneck. |
+| **Problem** | Need both semantic retrieval efficiency and explicit belief/segment/topic provenance. |
+| **Solution** | Path A dual store: `Neo4j` graph + `PostgreSQL/pgvector` derivatives and semantic features. Writes are coordinated via `DualEpisodeStore`; retrieval composes graph traversal and vector search. |
+| **Research** | Prior graph-vs-vector tradeoff findings still apply, but production needs provenance edges and segment lifecycle explicitly represented. |
+| **Alternative** | Chroma-only runtime. Rejected for current architecture because it cannot represent first-class belief provenance and segment graph semantics. |
 
 ### 7. Insight Accumulation Over Lossy Rewrites
 
@@ -72,7 +75,7 @@ Every architectural choice in Sonality is backed by specific research findings. 
 | Aspect | Detail |
 |--------|--------|
 | **Problem** | Without resistance, a single high-ESS interaction could flip a well-established opinion. Opinions should become harder to change as evidence accumulates. |
-| **Solution** | Belief confidence grows logarithmically with evidence count: `confidence = log₂(evidence_count + 1) / log₂(20)`. Update magnitude scaled by `1 / (confidence + 1)`. When user argues against existing stance, extra resistance via `conf += abs(old_pos)`. |
+| **Solution** | Belief revision uses LLM provenance assessment (`update_magnitude`, `contraction_action`, uncertainty) with typed decision contracts, instead of fixed confidence formulas. |
 | **Research** | Sequential Bayesian updating (Oravecz et al., 2016). Bounded confidence models (Hegselmann-Krause, 2002): only sufficiently strong evidence shifts opinions. |
 | **Alternative** | Linear updates regardless of evidence count. Rejected: allows single interactions to overwrite well-established beliefs. |
 
@@ -81,7 +84,7 @@ Every architectural choice in Sonality is backed by specific research findings. 
 | Aspect | Detail |
 |--------|--------|
 | **Problem** | Unreinforced opinions persist forever at full strength ("zombie opinions"). Human memory and neural networks exhibit forgetting, not permanent retention. |
-| **Solution** | During reflection, unreinforced beliefs decay: `R(t) = (1 + gap)^(-β)` with β=0.15. Reinforcement floor: `min(0.6, max(0.0, (evidence_count - 1) × 0.04))`. Beliefs below `min_confidence` (0.05) are dropped. |
+| **Solution** | During reflection, staleness handling is LLM-decided (`RETAIN` / `DECAY` / `FORGET`) with typed responses and guarded execution. |
 | **Research** | FadeMem (2026): biologically-inspired power-law forgetting. Ebbinghaus curve: power-law (not exponential) matches human memory. "Ebbinghaus in LLMs" (2025): neural networks exhibit human-like forgetting curves. |
 | **Alternative** | No decay; opinions persist indefinitely. Rejected: produces zombie opinions; contradicts human memory research. |
 
@@ -142,7 +145,7 @@ Every architectural choice in Sonality is backed by specific research findings. 
 
 ### Equal Treatment of All Interactions
 
-**Why rejected:** Bounded confidence models (Hegselmann-Krause 2002, Deffuant): systems that update on every input converge to consensus or oscillate chaotically. ESS threshold distinguishes meaningful evidence from noise.
+**Why rejected:** Bounded confidence models (Hegselmann-Krause 2002, Deffuant): systems that update on every input converge to consensus or oscillate chaotically. Sonality uses quality-gated updates, not unconditional per-turn belief commits.
 
 ### LoRA Adapters for Personality
 
@@ -175,13 +178,13 @@ Every architectural choice in Sonality is backed by specific research findings. 
 |--------|------------|------------------|-------|------------|------------------------|
 | **Sophia** (arXiv:2512.18202) | Narrative + KG | System 3 meta-layer | No | Hybrid reward | Closest ancestor. Sponge is a simplified System 3 without process-supervised thought search. |
 | **Hindsight** (arXiv:2512.12818) | 4-network graph | Retain/Recall/Reflect | No | World model check | Sonality uses two tiers instead of four networks. Simpler but captures core mechanism. |
-| **Zep/Graphiti** (arXiv:2501.13956) | Temporal KG | Incremental graph update | Yes | Temporal consistency | 94.8% accuracy on temporal tasks vs approximately 60% for vector retrieval. ChromaDB is adequate for prototype. |
+| **Zep/Graphiti** (arXiv:2501.13956) | Temporal KG | Incremental graph update | Yes | Temporal consistency | Historical benchmark context; current Sonality runtime already uses graph + vector dual-store. |
 | **FadeMem** (arXiv:2601.18642) | Dual-layer SML/LML | Adaptive exponential decay | Yes | Importance scoring | Directly inspired Sonality's power-law belief decay. FadeMem achieves 45% storage reduction. |
 | **ABBEL** (2025) | Belief bottleneck | RL-trained belief update | No | Bayesian posterior | Conceptually similar to ESS gating; uses RL training (infeasible for API-only). |
 | **MACI** (arXiv:2510.04488) | Dual-dial | Information quality + behavior | N/A | Provable termination | ESS maps to MACI's "information dial" — same concept, different framing. |
 | **DAM-LLM** (arXiv:2510.27418) | Bayesian affective memory | Bayesian emotional update | Implicit | Consistency check | More theoretically principled. Sonality trades elegance for implementation simplicity. |
 | **Memoria** (arXiv:2512.12686) | Session summaries + KG | Weighted knowledge graph | N/A | KG grounding | Validates that compact personality representation (87.1% accuracy with 2k tokens) is sufficient. |
-| **Behavioral Resonance** (GitHub) | None (stateless) | Heartbeat anchors | N/A | Deep anchors | Demonstrates persona continuity without external memory. Sonality's full architecture is still justified for opinion tracking and evolution. |
+| **Behavioral Resonance** (GitHub) | Stateless | Heartbeat anchors | N/A | Deep anchors | Demonstrates persona continuity without external memory. Sonality's full architecture is still justified for opinion tracking and evolution. |
 | **VIGIL** (arXiv:2512.07094) | EmoBank + core blocks | Self-healing runtime | N/A | Guarded immutability | Similar immutable core identity concept; VIGIL adds emotional valence tracking. |
 
 ## Known Weak Spots
@@ -258,7 +261,7 @@ NeurIPS 2025 (arXiv:2512.02914): all LLMs tested exhibit belief entrenchment —
 
 ### Graph-Based Episode Storage
 
-Zep/Graphiti (arXiv:2501.13956) achieves 94.8% accuracy on temporal tasks vs approximately 60% for vector retrieval. AriGraph (IJCAI 2025) integrates semantic and episodic memories in a graph. ChromaDB is adequate for the prototype but becomes a bottleneck at 200+ episodes when proactive interference kicks in (retrieval accuracy decays log-linearly with database size — arXiv:2506.08184).
+Zep/Graphiti (arXiv:2501.13956) and AriGraph (IJCAI 2025) show the value of explicit relational memory for temporal reasoning. Sonality adopts this direction via Path A dual-store rather than Chroma-only runtime.
 
 **Effort:** High (architecture change). **Impact:** High at scale. **When:** If retrieval quality degrades with episode count.
 

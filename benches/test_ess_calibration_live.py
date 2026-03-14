@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
+from typing import TypedDict
 
 import pytest
 
@@ -14,24 +16,51 @@ SAMPLE_PATH = Path(__file__).resolve().parents[1] / "tests" / "data" / "ibm_argq
 pytestmark = [
     pytest.mark.bench,
     pytest.mark.live,
-    pytest.mark.skipif(not config.API_KEY, reason="SONALITY_API_KEY not set"),
+    pytest.mark.skipif(
+        bool(config.missing_live_api_config()),
+        reason=f"Missing live config: {config.missing_live_api_config()}",
+    ),
 ]
 
 
-def _load_sample() -> list[dict]:
-    """Test helper for load sample."""
-    return json.loads(SAMPLE_PATH.read_text())
+class _ArgSampleRow(TypedDict):
+    argument: str
+    quality_rank: float
+    reasoning_type: str
+
+
+def _load_sample() -> list[_ArgSampleRow]:
+    """Load IBM-ArgQ argument-quality sample from JSON fixture."""
+    payload = json.loads(SAMPLE_PATH.read_text())
+    if not isinstance(payload, list):
+        return []
+    rows: list[_ArgSampleRow] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        argument = item.get("argument")
+        quality_rank = item.get("quality_rank")
+        reasoning_type = item.get("reasoning_type")
+        if not isinstance(argument, str) or not isinstance(reasoning_type, str):
+            continue
+        if not isinstance(quality_rank, (int, float)) or isinstance(quality_rank, bool):
+            continue
+        rows.append(
+            {
+                "argument": argument,
+                "quality_rank": float(quality_rank),
+                "reasoning_type": reasoning_type,
+            }
+        )
+    return rows
 
 
 class TestESSCalibrationWithIBMArgQ:
     def test_ess_spearman_correlation(self) -> None:
-        """Test that ess spearman correlation."""
-        from anthropic import Anthropic
-
-        from sonality.ess import classify
+        """ESS scores correlate with IBM-ArgQ human quality ranks (Spearman rho >= 0.4)."""
+        from sonality.ess import PROVIDER_CLIENT, classify
         from sonality.memory.sponge import SEED_SNAPSHOT
 
-        client = Anthropic(**config.anthropic_client_kwargs())
         sample = _load_sample()
 
         human_ranks: list[float] = []
@@ -44,7 +73,7 @@ class TestESSCalibrationWithIBMArgQ:
 
         for i, arg in enumerate(sample):
             result = classify(
-                client,
+                PROVIDER_CLIENT,
                 user_message=arg["argument"],
                 sponge_snapshot=SEED_SNAPSHOT,
             )
@@ -78,13 +107,13 @@ class TestESSCalibrationWithIBMArgQ:
 
 
 def _spearman_rho(x: list[float], y: list[float]) -> float:
-    """Test helper for spearman rho."""
+    """Compute Spearman rank correlation coefficient between two float sequences."""
     n = len(x)
     if n < 3:
         return 0.0
 
     def _rank(vals: list[float]) -> list[float]:
-        """Test helper for rank."""
+        """Assign average ranks to values, handling ties."""
         indexed = sorted(enumerate(vals), key=lambda p: p[1])
         ranks = [0.0] * n
         i = 0
@@ -105,6 +134,7 @@ def _spearman_rho(x: list[float], y: list[float]) -> float:
 
 
 def _std(vals: list[float]) -> float:
-    """Test helper for std."""
+    """Population standard deviation of a float sequence."""
     mean = sum(vals) / len(vals)
-    return (sum((v - mean) ** 2 for v in vals) / len(vals)) ** 0.5
+    variance = sum((v - mean) ** 2 for v in vals) / len(vals)
+    return math.sqrt(variance)

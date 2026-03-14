@@ -1,0 +1,12 @@
+{
+  "episodes": [
+    {
+      "uid": "ep-1",
+      "summary": "Sample migrated episode",
+      "topics": [
+        "policy"
+      ],
+      "ess_score": 0.7
+    }
+  ]
+}

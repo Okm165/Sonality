@@ -284,9 +284,9 @@ REFLECTION: insights=5 beliefs=11 high_conf=4 stale=2 dropped=1
 
 **Symptom:** No new opinions form over 50+ interactions; high-confidence beliefs &gt; 80%.
 
-**Cause:** ESS threshold too high; or agent has ossified.
+**Cause:** classifier reliability gates are frequently failing, or beliefs are not receiving meaningful counter-evidence.
 
-**Mitigation:** Lower `SONALITY_ESS_THRESHOLD` to 0.2; verify belief decay is active.
+**Mitigation:** check ESS default/coercion logs, verify provenance updates are running, and verify reflection/decay cycles are active.
 
 ### Sycophancy Ratio
 

@@ -1,7 +1,12 @@
 # Research-Backed Upgrade Plan
 
+> Status note: this document is historical planning material. Current runtime
+> architecture is Path A (Neo4j + PostgreSQL/pgvector + unified OpenAI-compatible
+> provider). For current behavior, use `docs/architecture/overview.md`.
+
 This page translates the research synthesis into concrete architecture decisions for Sonality.
-It focuses on high-impact changes that keep the codebase small: no graph DB migration, no heavy orchestration framework, no speculative subsystems.
+It is preserved as archived planning context; references to "no graph migration" reflect
+an earlier phase before the Path A runtime was adopted.
 
 ---
 
@@ -22,7 +27,7 @@ This ordering follows ENGRAM (typed memory over graph complexity), ABBEL (belief
 
 ### Decision
 
-Keep **ChromaDB + JSON** as the primary storage architecture, but enforce lightweight memory typing.
+Current runtime uses **Path A dual-store**: `Neo4j + PostgreSQL/pgvector` with typed memory flows.
 
 ### Why
 
@@ -32,11 +37,11 @@ Keep **ChromaDB + JSON** as the primary storage architecture, but enforce lightw
 
 ### What this project does now
 
-- **Episodic memory**: Chroma episodes tagged `memory_type=episodic` (low-ESS or conversational events).
-- **Semantic memory**: Chroma episodes tagged `memory_type=semantic` (higher-ESS, belief-relevant events).
+- **Episodic memory**: episode nodes + derivative nodes in Neo4j/PostgreSQL.
+- **Semantic memory**: `semantic_features` in PostgreSQL with embeddings.
 - **Procedural memory**: immutable behavior contract in `CORE_IDENTITY` and instruction blocks.
 
-This gives ENGRAM-style typing with minimal code and avoids graph overhead.
+This keeps ENGRAM-style typing while preserving explicit graph provenance.
 
 ### Flat `opinion_vectors` vs relational graph
 
@@ -98,7 +103,7 @@ Keep **append-first, consolidate-later**:
 
 ### Current stance
 
-Chroma default embedding remains acceptable for a small codebase and short summaries.
+Use the configured OpenAI-compatible embedding model with pgvector indexes.
 
 ### Recommended migration path to a long-context embedding backend
 
@@ -113,7 +118,7 @@ Switch only when retrieval quality becomes a measured bottleneck. Keep concrete 
 ### Why not force migration immediately
 
 - No new dependency pressure unless quality requires it.
-- Keeps the system within the current dependency budget (LLM provider SDK, `chromadb`, `pydantic`, `dotenv`).
+- Keeps the system within the current dependency budget (provider client, `pydantic`, `neo4j`, `pgvector`, `psycopg`).
 
 ---
 

@@ -1,5 +1,9 @@
 # Research Background
 
+> Status note: this file contains broad literature synthesis, including legacy
+> options considered during earlier architecture phases. See current docs for
+> implementation truth: `docs/architecture/overview.md`.
+
 Sonality's architecture is grounded in 200+ academic references spanning memory systems, personality psychology, opinion dynamics, anti-sycophancy, and cognitive science. This page synthesizes the key research themes that informed the design.
 
 ## The Core Question
@@ -46,7 +50,7 @@ An independent benchmark (fastpaca.com, 2025) tested memory systems head-to-head
 
 *Aborted after half the benchmark due to cost.
 
-The surprise: long context (84.6%) outperforms sophisticated memory systems. But long context fails at scale — exceeds context windows, attention degrades. Sonality's hybrid (ChromaDB + structured JSON) is a pragmatic middle ground.
+The surprise: long context (84.6%) outperforms sophisticated memory systems. But long context fails at scale — exceeds context windows, attention degrades. Sonality's current middle ground is hybrid structured state plus Path A dual memory (Neo4j + PostgreSQL/pgvector).
 
 ---
 
@@ -109,7 +113,7 @@ Sonality's architecture gives the model personalization (the sponge) AND asks it
 
 | Reference | Year | Finding |
 |-----------|------|---------|
-| **Hegselmann-Krause** | 2002 | Agents only update when evidence exceeds confidence threshold; maps to ESS thresholding |
+| **Hegselmann-Krause** | 2002 | Agents only update when evidence exceeds confidence bounds; maps to Sonality's quality-gated updates |
 | **Deffuant model** | 2002 | Initial uncertainty, convergence dynamics; bootstrap dampening prevents first-impression dominance |
 | **Friedkin-Johnsen** | 1990s | Stubbornness balancing initial beliefs vs social influence; moderate stubbornness reduces polarization |
 | **Oravecz et al.** | 2016 | Sequential Bayesian personality assessment; posterior distributions serve as priors |
@@ -152,7 +156,7 @@ Human memory consolidation during sleep involves:
 
 This maps to Sonality's architecture:
 
-1. Store raw episodic memories (ChromaDB)
+1. Store raw episodic memories (Path A dual store: graph + vector)
 2. Reflection cycle = "sleep" (consolidation)
 3. Transfer synthesized beliefs to sponge snapshot
 4. Decay/forget unreinforced beliefs
@@ -161,7 +165,7 @@ This maps to Sonality's architecture:
 
 ### Dual-Process Theory
 
-Humans form opinions through System 1 (fast, intuitive) and System 2 (slow, analytical). **Nature 2025** confirms LLMs exhibit both modes. For personality evolution, System 2 reasoning is preferred. Sonality's ESS threshold forces System 2 analytical processing — low-evidence messages score below threshold and are ignored. The belief extraction prompt further requires a reasoning chain: what changed, what evidence supported it, why the belief is stronger, and what would reverse it. This structured reasoning prevents snap judgments from overwriting established beliefs.
+Humans form opinions through System 1 (fast, intuitive) and System 2 (slow, analytical). **Nature 2025** confirms LLMs exhibit both modes. For personality evolution, System 2 reasoning is preferred. Sonality enforces this through structured ESS plus downstream typed LLM contracts (reliability/default checks + provenance decisions), so weak or malformed evidence does not drive belief updates.
 
 ### Bayesian Belief Updating
 
@@ -264,11 +268,11 @@ These are genuine open problems. No paper, framework, or production system has f
 
 **Extraction Hallucination.** Every system using LLM extraction hallucinates. Mem0: 49.3% precision on extraction benchmarks. The best systems achieve approximately 85% precision — the remaining 15% introduces corrupted beliefs. Sonality constrains the output via structured schema (tool_use JSON) rather than free-form extraction, which reduces but does not eliminate hallucination. No architecture eliminates this without human review.
 
-**The Echo Chamber.** Agent reads own opinions from the sponge, generates responses biased by those opinions, then updates opinions from those responses. Neural Howlround (arXiv:2504.07992): 67% of conversations exhibit this self-reinforcing loop. Partial mitigation: ESS evaluates only the user message, not the stored episode or the agent's response. But episodes derived from the agent's own biased responses still enter ChromaDB and influence future retrievals.
+**The Echo Chamber.** Agent reads own opinions from the sponge, generates responses biased by those opinions, then updates opinions from those responses. Neural Howlround (arXiv:2504.07992): 67% of conversations exhibit this self-reinforcing loop. Partial mitigation: ESS evaluates only the user message, not the stored episode or the agent's response. But episodes derived from the agent's own biased responses can still enter the dual-store retrieval pipeline and influence future context.
 
 **Evaluation Gap.** No standard benchmark exists for "personality evolution quality." MemBench and LongMemEval measure retrieval accuracy. PersonaMem measures consistency with a fixed persona. PersonaGym evaluates persona adherence. Nothing measures whether an agent's beliefs evolve in a coherent, evidence-driven, non-sycophantic way over long horizons. Sonality's testing suite (see [Testing & Evaluation](../testing.md)) defines custom metrics; these are not comparable across systems.
 
-**No Optimal Update Frequency.** Every system either updates too aggressively (volatile personality) or too conservatively (rigid personality). The right frequency depends on the use case and there is no general theory. Sonality's ESS threshold of 0.3 is a calibrated heuristic, not a principled optimum.
+**No Optimal Update Frequency.** Every system either updates too aggressively (volatile personality) or too conservatively (rigid personality). The right frequency depends on the use case and there is no general theory. Sonality's current gating mix (ESS reliability + downstream typed decision contracts) remains empirical, not a proven global optimum.
 
 **Sycophancy Mitigation Is Partial.** Even with eight defensive layers, some sycophantic behavior will occur. The 78.5% sycophancy rate under first-person framing (SycEval) is resistant to all known prompting interventions. The goal is reduction, not elimination.
 

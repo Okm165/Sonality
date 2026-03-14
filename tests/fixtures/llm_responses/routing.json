@@ -1,0 +1,7 @@
+{
+  "category": "SIMPLE",
+  "depth": "MODERATE",
+  "temporal_expansion": "NO_EXPAND",
+  "semantic_memory": "SKIP",
+  "reasoning": "Default fixture response"
+}

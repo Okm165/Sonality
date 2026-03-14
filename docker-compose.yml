@@ -1,3 +1,13 @@
+# Sonality Docker Compose configuration
+#
+# Image versions are defined in sonality/schema.py for consistency with test containers.
+# Run `make schema-scripts` to regenerate init scripts from schema.py.
+#
+# Database initialization:
+#   PostgreSQL: Uses /docker-entrypoint-initdb.d/ (standard Docker pattern)
+#   Neo4j: Schema initialized by application on startup (Neo4j best practice)
+#          For manual init: `make db-init-neo4j`
+
 services:
   sonality:
     build: .
@@ -7,3 +17,59 @@ services:
       - .env
     volumes:
       - ./data:/app/data
+    depends_on:
+      neo4j:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  neo4j:
+    # Image version from sonality/schema.py: NEO4J_IMAGE
+    image: neo4j:5
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+      # Mount scripts for manual initialization via `make db-init-neo4j`
+      - ./scripts:/scripts:ro
+    environment:
+      NEO4J_AUTH: neo4j/sonality_password
+      NEO4J_PLUGINS: '["apoc"]'
+      NEO4J_dbms_security_procedures_unrestricted: apoc.*
+      NEO4J_dbms_security_procedures_allowlist: apoc.*
+    healthcheck:
+      test: ["CMD-SHELL", "cypher-shell -u neo4j -p sonality_password 'RETURN 1' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  postgres:
+    # Image version from sonality/schema.py: PGVECTOR_IMAGE
+    image: pgvector/pgvector:pg16
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # PostgreSQL runs SQL scripts from /docker-entrypoint-initdb.d/ on first start
+      # This is the Docker-standard initialization approach for PostgreSQL
+      - ./scripts/init_postgres.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    environment:
+      POSTGRES_DB: sonality
+      POSTGRES_USER: sonality
+      POSTGRES_PASSWORD: sonality_password
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sonality -d sonality"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  neo4j_data:
+  neo4j_logs:
+  postgres_data:

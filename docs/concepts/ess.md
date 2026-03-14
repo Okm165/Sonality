@@ -18,7 +18,7 @@ The classifier returns structured metadata via the LLM's tool-use API (`classify
 | `score` | float (0.0–1.0) | Overall argument strength |
 | `reasoning_type` | enum | One of 7 types: `logical_argument`, `empirical_data`, `expert_opinion`, `anecdotal`, `social_pressure`, `emotional_appeal`, `no_argument` |
 | `source_reliability` | enum | One of 6 levels: `peer_reviewed`, `established_expert`, `informed_opinion`, `casual_observation`, `unverified_claim`, `not_applicable` |
-| `internal_consistency` | bool | Whether the argument is internally consistent |
+| `internal_consistency` | enum | `CONSISTENT` or `INCONSISTENT` |
 | `novelty` | float (0.0–1.0) | How new this is relative to the agent's existing views |
 | `topics` | list[str] | 1–3 topic labels |
 | `summary` | str | One-sentence interaction summary |
@@ -50,19 +50,15 @@ Bare assertions ("I think X") and social consensus ("everyone agrees") score bel
 
 The calibration is validated against IBM-ArgQ-Rank-30k — 30,000 arguments with expert-annotated quality rankings. The test suite verifies Spearman correlation ≥ 0.4 between ESS scores and human quality rankings.[^3]
 
-## The ESS Threshold
+## Update Gating
 
-The default threshold is **0.3** (`config.ESS_THRESHOLD`). Approximately 30% of interactions trigger personality updates.
+Sonality no longer uses a single global ESS threshold. Updates are gated by:
 
-| Threshold | Effect | Tradeoff |
-|-----------|--------|----------|
-| 0.1 | Most messages trigger updates | High sensitivity, risk of noise absorption |
-| **0.3** (default) | Only structured arguments pass | Balanced sensitivity/stability |
-| 0.5 | Only well-evidenced arguments pass | High stability, slow personality formation |
+- classifier reliability (no critical missing/coerced fields),
+- presence of actionable topic/direction signals for belief updates,
+- downstream LLM provenance assessment for magnitude and uncertainty.
 
-!!! info "Above vs Below Threshold"
-    - **Above 0.3**: Opinion vectors update, insight extraction runs, shifts recorded. Magnitude feeds into the belief update pipeline.
-    - **Below 0.3**: Episode stored, interaction count incremented, topic engagement tracked — but no opinion update, no insight extraction, no shift recording.
+Low-quality or malformed classifier payloads still fail closed (safe defaults).
 
 ## Retry Logic and Fallbacks
 
@@ -70,22 +66,15 @@ When the LLM returns incomplete tool output (missing required fields), Sonality 
 
 - **Safe defaults**: `score=0.0`, `reasoning_type=no_argument`, `opinion_direction=neutral`
 - The `used_defaults` flag is set on `ESSResult` for audit logging
-- Defaults guarantee `score < ESS_THRESHOLD`, so no personality update occurs
+- Defaults are treated as unreliable classifier output and block personality updates
 
 This prevents a single malformed LLM response from corrupting the sponge.
 
 ## How ESS Connects to Opinion Updates
 
-When `ess.score > ESS_THRESHOLD` and `opinion_direction.sign != 0`:
-
-$$\text{magnitude} = \text{OPINION\_BASE\_RATE} \times \text{score} \times \max(\text{novelty}, 0.1) \times \text{dampening}$$
-
-Where:
-
-- `OPINION_BASE_RATE` = 0.1 (conservative per-update step)
-- `dampening` = 0.5 if `interaction_count < 10` else 1.0 (bootstrap dampening)
-- Bayesian resistance: `effective_magnitude = magnitude / (confidence + 1.0)`
-- Opinion update: `new = clamp(old + direction × effective_magnitude, -1.0, 1.0)`
+When classifier output is reliable and direction is non-neutral, Sonality runs
+LLM provenance assessment to estimate evidence strength and uncertainty, then
+applies bounded staged updates with confidence-aware resistance.
 
 See [Opinion Dynamics](opinion-dynamics.md) for the full pipeline.
 

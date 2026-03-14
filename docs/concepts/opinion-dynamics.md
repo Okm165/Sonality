@@ -4,13 +4,17 @@ Sonality's belief system draws from formal opinion dynamics models — mathemati
 
 ## The Magnitude Formula
 
-When an interaction passes the ESS threshold (`ess.score > 0.3`), Sonality computes a raw delta and stages it for delayed commit:
+When an interaction passes ESS quality gates, Sonality stages an opinion delta for delayed commit.
 
-$$\text{magnitude} = \text{OPINION\_BASE\_RATE} \times \text{ess.score} \times \max(\text{ess.novelty}, 0.1) \times \text{dampening}$$
+Primary path: LLM-based `assess_belief_evidence()` determines direction, evidence strength, and contraction signal per topic with provenance tracking.
+
+Fallback path:
+
+$$\text{magnitude} = \text{BASE\_OPINION\_MAGNITUDE} \times \text{ess.score} \times \max(\text{ess.novelty}, 0.1) \times \text{dampening}$$
 
 | Factor | Value | Purpose |
 |--------|-------|---------|
-| `OPINION_BASE_RATE` | 0.1 | Conservative per-update step; caps maximum shift at 10% of opinion space |
+| `BASE_OPINION_MAGNITUDE` | 0.1 | Conservative fallback step; caps maximum shift at 10% of opinion space |
 | `ess.score` | 0.0–1.0 | ESS argument quality |
 | `max(ess.novelty, 0.1)` | 0.1–1.0 | Diminishing returns on repeated arguments; floor prevents zero magnitude |
 | `dampening` | 0.5 or 1.0 | 0.5× for first 10 interactions (`interaction_count < BOOTSTRAP_DAMPENING_UNTIL`) |
@@ -67,38 +71,15 @@ $$\text{new} = \text{clamp}(\text{old} + \text{direction} \times \text{effective
 - `direction` = +1.0 (supports), -1.0 (opposes), or 0.0 (neutral; no update)
 - Clamping keeps opinions in [-1, 1]
 
-## Power-Law Belief Decay
+## LLM-Guided Belief Decay
 
-During reflection only, unreinforced beliefs lose confidence following a power-law retention curve:
+During reflection, stale beliefs are assessed with `BELIEF_DECAY_PROMPT` and classified as `RETAIN`, `DECAY`, or `FORGET`.
 
-$$R(t) = (1 + \text{gap})^{-\beta}$$
-
-Where:
-
-- `gap` = `interaction_count - last_reinforced` (interactions since belief was last reinforced)
-- β = 0.15 (`BELIEF_DECAY_RATE`, from FadeMem 2026 / Ebbinghaus-inspired curves)
-- Decay runs **only** on beliefs with `gap ≥ 5`
-
-**Reinforcement floor** prevents well-evidenced beliefs from decaying to nothing:
-
-$$\text{floor} = \min(0.6, \max(0.0, (\text{evidence\_count} - 1) \times 0.04))$$
-
-$$\text{new\_conf} = \max(\text{floor}, \text{conf} \times R(t))$$
-
-**Minimum confidence threshold**: 0.05. Below this, the belief is dropped entirely (removed from `opinion_vectors` and `belief_meta`).
-
-| Gap (interactions) | Retention (β=0.15) | With floor (ev=10, floor=0.36) |
-|-------------------|--------------------|-------------------------------|
-| 5 | 0.78 | max(0.36, conf × 0.78) |
-| 10 | 0.69 | max(0.36, conf × 0.69) |
-| 20 | 0.61 | max(0.36, conf × 0.61) |
-| 50 | 0.49 | max(0.36, conf × 0.49) |
-
-Power-law (not exponential) matches the Ebbinghaus human memory curve and neural network forgetting research.[^4]
+Fallback behavior still uses conservative floor protection (`min(0.6, max(0.0, (evidence_count - 1) × 0.04))`) and minimum confidence pruning to avoid catastrophic forgetting.
 
 ## Structural Disagreement Detection
 
-Sonality detects disagreement structurally rather than via keywords:
+Sonality detects disagreement with `DISAGREEMENT_DETECTION_PROMPT` (LLM-structured), with sign-based fallback:
 
 ```python
 # User argued against agent's existing stance
@@ -135,7 +116,7 @@ The Diminishing Stubbornness Extension (arXiv:2409.12601) shows that stubbornnes
 | Source | Key Finding |
 |--------|-------------|
 | **Friedkin-Johnsen** | Stubbornness balancing initial beliefs vs social influence; Sonality's Bayesian resistance maps to λ |
-| **Hegselmann-Krause (2002)** | Bounded confidence — only sufficiently strong evidence shifts opinions; ESS threshold implements this |
+| **Hegselmann-Krause (2002)** | Bounded confidence — only sufficiently strong evidence shifts opinions; Sonality quality-gated updates implement this |
 | **Deffuant model** | Initial uncertainty, convergence dynamics; bootstrap dampening prevents first-impression dominance |
 | **Oravecz et al. (2016)** | Sequential Bayesian personality assessment; posterior-as-prior for next update |
 | **AGM framework** | Belief revision consistency requirements |

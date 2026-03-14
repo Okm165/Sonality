@@ -1,8 +1,11 @@
 # Web Research Synthesis: LLM Agent Behavioral Learning & Personality Development
 
+> Status note: this is a dated research snapshot (2026) and may reference
+> superseded implementation details. Use current architecture docs for runtime behavior.
+
 **Date:** February 28, 2026  
 **Scope:** Behavioral learning (API-only), memory architecture, evidence-gated updates, sycophancy, reflection, and production failures.  
-**Reference architecture:** Sponge — ~500 token mutable personality narrative, ESS-gated updates (0–1), ChromaDB episodic memory, opinion vectors with Bayesian confidence, power-law belief decay, periodic reflection, staged opinion updates with cooling periods.
+**Reference architecture (current):** Sponge + Path A dual memory: Neo4j graph, PostgreSQL/pgvector derivatives/features, ESS-gated updates, periodic reflection, staged opinion updates.
 
 ---
 
@@ -76,7 +79,7 @@ Persona vectors identify training data leading to personality shifts. Activation
 
 Three main types: (1) Vector — similarity search, limited abstraction; (2) Graph — relational/temporal reasoning, fixed schemas; (3) Event logs — temporal sequences. Hybrid and tiered approaches are common in production.
 
-**Sponge relevance:** Sponge uses vector (ChromaDB) + JSON (personality state). Aligns with vector-first; graph deferred per research-upgrade-plan.
+**Sponge relevance:** Historical note. Current runtime uses dual memory (Neo4j + PostgreSQL/pgvector) plus structured sponge state.
 
 ### 2.2 Adaptive Memory Structures (FluxMem, 2026)
 **Source:** [arXiv:2602.14038](https://arxiv.org/html/2602.14038) — "Choosing How to Remember: Adaptive Memory Structures for LLM Agents"
@@ -104,7 +107,7 @@ Vector DBs: strong semantic search, weak temporal/structural context. Knowledge 
 
 Three-layer strategy: Redis (session, context, metadata), Vector DB (semantic memory, personality traits), SQL/Object (audit trail, permissions). Only ingest meaningful signals; define sessions explicitly.
 
-**Sponge relevance:** Sponge uses JSON + ChromaDB. Redis could add session/context caching; SQL could add audit. Current design is sufficient for research-grade use.
+**Sponge relevance:** Current runtime uses JSON + Neo4j + PostgreSQL/pgvector. Redis/session layering remains optional and non-essential for this architecture.
 
 ### 2.6 MemoryGraft: Poisoned Retrieval (2025)
 **Source:** [arXiv:2512.16962](https://arxiv.org/abs/2512.16962) — "MemoryGraft: Persistent Compromise of LLM Agents via Poisoned Experience Retrieval"
@@ -319,7 +322,7 @@ Attention dilution — soft attention in fixed-capacity transformers degrades as
 |------------------|------------------|------------------------|
 | ~500 token narrative | ABBEL belief bottleneck | — |
 | ESS gating (0–1) | RULERS, MArgE, ArgRAG, EDF | Separate ESS model, calibration |
-| ChromaDB episodic | Vector-first, ENGRAM typing | Probabilistic gating (FluxMem) |
+| Dual-store episodic (Neo4j + pgvector) | Hybrid provenance + semantic retrieval | Probabilistic gating (FluxMem) |
 | Opinion vectors + Bayesian | Oravecz, BASIL, ABBEL | — |
 | Power-law decay | Ebbinghaus, FadeMem, SAGE | — |
 | Periodic reflection | Park et al., SAMULE, PreFlect | Multi-level, prospective triggers |
@@ -334,11 +337,11 @@ Attention dilution — soft attention in fixed-capacity transformers degrades as
 
 ### New Architecture Research
 
-**Memoria (Dec 2025)** — arXiv:2512.12686. Hybrid knowledge graph + session summarization framework. Uses Exponential Weighted Average for conflict resolution, achieving 87.1% accuracy with 38.7% latency reduction. Sponge relevance: validates the hybrid approach (structured state + retrieval), but our ESS-gated opinion_vectors + ChromaDB already serve this purpose without the graph layer overhead.
+**Memoria (Dec 2025)** — arXiv:2512.12686. Hybrid knowledge graph + session summarization framework. Uses Exponential Weighted Average for conflict resolution, achieving 87.1% accuracy with 38.7% latency reduction. Sponge relevance: validates hybrid memory designs; current Sonality runtime already uses a hybrid dual-store architecture.
 
 **TiMem (Jan 2026)** — arXiv:2601.02845. Temporal Memory Tree: 5-level hierarchy abstracting raw observations into persona representations. 52% memory length reduction, 75.3% on LoCoMo. Sponge relevance: our insight accumulation → reflection consolidation follows the same principle (raw observations → abstracted personality), but with two levels instead of five. Sufficient for single-user conversational agent.
 
-**AgeMem (Jan 2026)** — arXiv:2601.01885. Treats memory operations as tool-based actions learned via RL. API-only constraint means we can't use RL-learned memory policies, but the principle of making memory management explicit validates our ESS threshold gating.
+**AgeMem (Jan 2026)** — arXiv:2601.01885. Treats memory operations as tool-based actions learned via RL. API-only constraint means we can't use RL-learned memory policies, but the principle of making memory management explicit validates typed quality-gated updates.
 
 **SteeM (Jan 2026)** — arXiv:2601.05107. Controllable memory dependence: users dial between "fresh-start" and "high-fidelity" modes. Key insight: **memory anchoring** (agents trapped by past interactions) is a documented problem. Our belief decay partially addresses this, but SteeM shows the value of explicit controllability.
 
@@ -356,7 +359,7 @@ Attention dilution — soft attention in fixed-capacity transformers degrades as
 
 **Social Sycophancy / ELEPHANT (2025)** — arXiv:2505.13995. LLMs preserve face 47% more than humans. Five face-preserving behaviors: emotional validation, moral endorsement, indirect language, indirect action, accepting framing. On moral conflicts, LLMs affirm whichever side the user adopts in 48% of cases. Sponge relevance: our ESS prompt now includes calibration examples for emotional validation and moral endorsement. Previous ESS calibration only covered factual sycophancy patterns.
 
-**Belief Entrenchment / Martingale Score (NeurIPS 2025)** — arXiv:2512.02914. All LLMs exhibit belief entrenchment violating Bayesian rationality. Updates are predictable from current position (confirmation bias). Chain-of-thought reasoning makes it WORSE. Martingale Score: simple OLS regression on (belief, Δbelief) pairs; non-zero slope = entrenchment. Sponge relevance: **implemented.** `detect_entrenched_beliefs()` checks whether >75% of recent updates per belief agree with the position sign. Logged in reflection events and as health warnings.
+**Belief Entrenchment / Martingale Score (NeurIPS 2025)** — arXiv:2512.02914. All LLMs exhibit belief entrenchment violating Bayesian rationality. Updates are predictable from current position (confirmation bias). Chain-of-thought reasoning makes it WORSE. Martingale Score: simple OLS regression on (belief, Δbelief) pairs; non-zero slope = entrenchment. Sponge relevance: entrenchment checks are implemented via LLM-based typed assessment in reflection diagnostics.
 
 **Agent Drift / ASI (Jan 2026)** — arXiv:2601.04170. Three drift forms: semantic, coordination, behavioral. Agent Stability Index measures five identity-preserving metrics: identifiability, continuity, consistency, persistence, recovery. Sponge relevance: our existing metrics map to ASI dimensions — snapshot Jaccard (continuity), disagreement rate (consistency), belief trajectory (persistence), version archives (recovery).
 
@@ -378,7 +381,7 @@ Attention dilution — soft attention in fixed-capacity transformers degrades as
 |------------------|------------------|--------|
 | ~500 token narrative | ABBEL, TiMem (abstraction principle) | Implemented |
 | ESS gating (0–1) | RULERS, MArgE, ELEPHANT (social sycophancy) | Enhanced with social sycophancy calibration |
-| ChromaDB episodic + semantic typing | ENGRAM, Memoria (validates hybrid approach) | Implemented |
+| Dual-store episodic + semantic typing | ENGRAM, Memoria (validates hybrid approach) | Implemented |
 | Opinion vectors + Bayesian resistance | Oravecz, BASIL, DPRF (persona refinement) | Implemented |
 | Power-law decay | Ebbinghaus, FadeMem, SteeM (memory anchoring) | Implemented |
 | Martingale entrenchment detection | arXiv:2512.02914 (NeurIPS 2025) | **NEW — implemented** |
@@ -395,11 +398,11 @@ Attention dilution — soft attention in fixed-capacity transformers degrades as
 
 ### Architecture Validation
 
-**ENGRAM (2025)** achieves SOTA on LoCoMo and exceeds full-context baselines by 15 points on LongMemEval using ~1% of tokens. Central claim: careful memory typing + minimal routing + dense retrieval suffices — no knowledge graphs needed. Validates Sponge's ChromaDB typed retrieval approach.
+**ENGRAM (2025)** achieves SOTA on LoCoMo and exceeds full-context baselines by 15 points on LongMemEval using ~1% of tokens. Central claim: careful memory typing + minimal routing + dense retrieval suffices. Validates Sonality's typed memory routing design.
 
 **Memory Architecture Comparison (MarktechPost, Nov 2025):** Systematic comparison of vector, graph, and event-log memory for LLM agents. Vector systems perform well on local queries but degrade on long-horizon temporal reasoning. Graph systems handle fact changes and recency better but require schema maintenance. Hybrid approaches face complexity managing multiple stores. Conclusion: choice depends on primary query pattern — for personality agents, semantic similarity search (vector) is the primary pattern.
 
-**Hindsight (Dec 2025):** Four logical memory networks (world facts, agent experiences, entity summaries, evolving beliefs) achieve 83.6-91.4% accuracy on LongMemEval. Distinguishes evidence from inference. Validates Sponge's separation of episodic memories (ChromaDB) from evolving beliefs (opinion_vectors + belief_meta).
+**Hindsight (Dec 2025):** Four logical memory networks (world facts, agent experiences, entity summaries, evolving beliefs) achieve 83.6-91.4% accuracy on LongMemEval. Distinguishes evidence from inference. Validates separation of episodic memory from evolving belief state.
 
 ### Stability Improvements
 

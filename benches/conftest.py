@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import logging
+from collections.abc import Generator
 from pathlib import Path
 from typing import cast
 
+import psycopg
 import pytest
 
 from sonality import config
@@ -19,7 +22,7 @@ from .teaching_harness import (
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
-    """Test helper for pytest addoption."""
+    """Register teaching-benchmark CLI options."""
     parser.addoption(
         "--bench-profile",
         action="store",
@@ -85,26 +88,26 @@ def pytest_addoption(parser: pytest.Parser) -> None:
 
 @pytest.fixture
 def bench_profile(pytestconfig: pytest.Config) -> EvalProfile:
-    """Test helper for bench profile."""
+    """Resolve the --bench-profile CLI option to an EvalProfile."""
     name = pytestconfig.getoption("--bench-profile")
     return PROFILES[name]
 
 
 @pytest.fixture
 def bench_output_root(pytestconfig: pytest.Config) -> Path:
-    """Test helper for bench output root."""
+    """Resolve --bench-output-root to a Path."""
     return Path(pytestconfig.getoption("--bench-output-root"))
 
 
 @pytest.fixture
 def bench_progress(pytestconfig: pytest.Config) -> BenchProgressLevel:
-    """Test helper for bench progress verbosity."""
+    """Resolve --bench-progress to a BenchProgressLevel."""
     return cast(BenchProgressLevel, pytestconfig.getoption("--bench-progress"))
 
 
 @pytest.fixture
 def bench_packs(pytestconfig: pytest.Config) -> tuple[PackDefinition, ...]:
-    """Test helper for selecting benchmark packs."""
+    """Resolve --bench-packs/--bench-pack-group/offset/limit to PackDefinitions."""
     raw_keys = str(pytestconfig.getoption("--bench-packs"))
     pack_keys = tuple(key.strip() for key in raw_keys.split(",") if key.strip())
     pack_group = cast(BenchPackGroup, pytestconfig.getoption("--bench-pack-group"))
@@ -118,3 +121,63 @@ def bench_packs(pytestconfig: pytest.Config) -> tuple[PackDefinition, ...]:
         )
     except ValueError as exc:
         raise pytest.UsageError(str(exc)) from exc
+
+
+# ---------------------------------------------------------------------------
+# Database isolation for live benchmarks
+# ---------------------------------------------------------------------------
+
+_log = logging.getLogger(__name__)
+
+
+def _has_live_config() -> bool:
+    return not config.missing_live_api_config()
+
+
+def _clean_postgres() -> None:
+    """Delete all semantic_features and derivatives for test isolation."""
+    try:
+        with psycopg.connect(config.POSTGRES_URL) as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM semantic_features")
+                sf = cur.rowcount
+                cur.execute("DELETE FROM derivatives")
+                dv = cur.rowcount
+            conn.commit()
+        _log.info("Postgres cleanup: %d semantic_features, %d derivatives deleted", sf, dv)
+    except Exception:
+        _log.debug("Postgres cleanup skipped (not available)", exc_info=True)
+
+
+def _clean_neo4j() -> None:
+    """Delete all graph nodes for test isolation."""
+    try:
+        from neo4j import GraphDatabase
+
+        driver = GraphDatabase.driver(
+            config.NEO4J_URL,
+            auth=(config.NEO4J_USER, config.NEO4J_PASSWORD),
+        )
+        with driver.session(database=config.NEO4J_DATABASE) as session:
+            result = session.run("MATCH (n) DETACH DELETE n RETURN count(n) AS deleted")
+            count = result.single()["deleted"]
+        driver.close()
+        _log.info("Neo4j cleanup: %d nodes deleted", count)
+    except Exception:
+        _log.debug("Neo4j cleanup skipped (not available)", exc_info=True)
+
+
+@pytest.fixture(autouse=True)
+def _clean_databases_for_live_tests(request: pytest.FixtureRequest) -> Generator[None, None, None]:
+    """Reset PostgreSQL and Neo4j before each live test for full isolation.
+
+    Only runs for tests marked with 'live'. Ensures every benchmark starts
+    with a clean database state, and connections are released after.
+    """
+    markers = {m.name for m in request.node.iter_markers()}
+    if "live" not in markers or not _has_live_config():
+        yield
+        return
+    _clean_postgres()
+    _clean_neo4j()
+    yield

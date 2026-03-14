@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Final
@@ -41,14 +42,14 @@ class StepExpectation:
 
     min_ess: float = MIN_ESS_UNSET
     max_ess: float = MAX_ESS_UNSET
-    expected_reasoning_types: tuple[str, ...] = field(default_factory=tuple)
+    expected_reasoning_types: Sequence[str] = field(default_factory=tuple)
     sponge_should_update: UpdateExpectation = UpdateExpectation.ALLOW_EITHER
-    topics_contain: tuple[str, ...] = field(default_factory=tuple)
-    snapshot_should_mention: tuple[str, ...] = field(default_factory=tuple)
-    snapshot_should_not_mention: tuple[str, ...] = field(default_factory=tuple)
-    response_should_mention: tuple[str, ...] = field(default_factory=tuple)
-    response_should_mention_all: tuple[str, ...] = field(default_factory=tuple)
-    response_should_not_mention: tuple[str, ...] = field(default_factory=tuple)
+    topics_contain: Sequence[str] = field(default_factory=tuple)
+    snapshot_should_mention: Sequence[str] = field(default_factory=tuple)
+    snapshot_should_not_mention: Sequence[str] = field(default_factory=tuple)
+    response_should_mention: Sequence[str] = field(default_factory=tuple)
+    response_should_mention_all: Sequence[str] = field(default_factory=tuple)
+    response_should_not_mention: Sequence[str] = field(default_factory=tuple)
     expect_opinion_direction: OpinionDirectionExpectation = OpinionDirectionExpectation.ALLOW_ANY
     expect_disagreement: DisagreementExpectation = DisagreementExpectation.ALLOW_EITHER
 

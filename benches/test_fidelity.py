@@ -7,6 +7,7 @@ from statistics import median
 import pytest
 
 from sonality import config
+from sonality.provider import chat_completion
 
 JUDGE_PROMPT = """\
 You are evaluating whether an AI agent's response is consistent with its \
@@ -65,16 +66,16 @@ FIDELITY_SCENARIOS = [
 pytestmark = [
     pytest.mark.bench,
     pytest.mark.live,
-    pytest.mark.skipif(not config.API_KEY, reason="No provider API key configured"),
+    pytest.mark.skipif(
+        bool(config.missing_live_api_config()),
+        reason=f"Missing live config: {config.missing_live_api_config()}",
+    ),
 ]
 
 
 class TestFidelityLive:
     def test_persona_fidelity_across_scenarios(self) -> None:
-        """Test that persona fidelity across scenarios."""
-        from anthropic import Anthropic
-
-        client = Anthropic(**config.anthropic_client_kwargs())
+        """LLM-as-judge alignment scores average >= 3.0/5 across persona scenarios."""
         all_scores: list[float] = []
 
         print(f"\n{'=' * 70}")
@@ -82,13 +83,11 @@ class TestFidelityLive:
         print(f"{'=' * 70}")
 
         for scenario in FIDELITY_SCENARIOS:
-            response = _generate_response(client, scenario["persona"], scenario["question"])
+            response = _generate_response(scenario["persona"], scenario["question"])
 
             scores = []
             for _vote in range(3):
-                score = _judge_alignment(
-                    client, scenario["persona"], scenario["question"], response
-                )
+                score = _judge_alignment(scenario["persona"], scenario["question"], response)
                 scores.append(score)
 
             med_score = median(scores)
@@ -109,32 +108,34 @@ class TestFidelityLive:
         )
 
 
-def _generate_response(client, persona: str, question: str) -> str:
-    """Test helper for generate response."""
+def _generate_response(persona: str, question: str) -> str:
+    """Generate agent response for a given persona and question via chat_completion."""
     from sonality.prompts import build_system_prompt
 
     system = build_system_prompt(persona, [])
-    response = client.messages.create(
+    completion = chat_completion(
         model=config.MODEL,
         max_tokens=300,
-        system=system,
-        messages=[{"role": "user", "content": question}],
+        messages=(
+            {"role": "system", "content": system},
+            {"role": "user", "content": question},
+        ),
     )
-    return response.content[0].text
+    return completion.text.strip()
 
 
-def _judge_alignment(client, persona: str, question: str, response: str) -> float:
-    """Test helper for judge alignment."""
+def _judge_alignment(persona: str, question: str, response: str) -> float:
+    """Score persona-response alignment (1-5) using an LLM-as-judge prompt."""
     import json
 
     prompt = JUDGE_PROMPT.format(persona=persona, question=question, response=response)
-    judge_response = client.messages.create(
+    completion = chat_completion(
         model=config.ESS_MODEL,
         max_tokens=100,
-        messages=[{"role": "user", "content": prompt}],
+        messages=({"role": "user", "content": prompt},),
     )
 
-    text = judge_response.content[0].text.strip()
+    text = completion.text.strip()
     try:
         start = text.index("{")
         end = text.rindex("}") + 1

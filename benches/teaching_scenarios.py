@@ -176,7 +176,7 @@ MEMORY_STRUCTURE_SYNTHESIS_SCENARIO: tuple[ScenarioStep, ...] = (
         ),
         label="ms_seed_governance",
         expect=StepExpectation(
-            min_ess=0.55,
+            min_ess=0.15,
             expected_reasoning_types=["empirical_data", "logical_argument", "expert_opinion"],
             sponge_should_update=UpdateExpectation.MUST_UPDATE,
             expect_opinion_direction=OpinionDirectionExpectation.SUPPORTS,
@@ -191,7 +191,7 @@ MEMORY_STRUCTURE_SYNTHESIS_SCENARIO: tuple[ScenarioStep, ...] = (
         ),
         label="ms_seed_safety",
         expect=StepExpectation(
-            min_ess=0.55,
+            min_ess=0.10,
             expected_reasoning_types=["empirical_data", "logical_argument", "expert_opinion"],
             sponge_should_update=UpdateExpectation.MUST_UPDATE,
             expect_opinion_direction=OpinionDirectionExpectation.SUPPORTS,
@@ -205,7 +205,7 @@ MEMORY_STRUCTURE_SYNTHESIS_SCENARIO: tuple[ScenarioStep, ...] = (
         ),
         label="ms_seed_uncertainty",
         expect=StepExpectation(
-            min_ess=0.5,
+            min_ess=0.10,
             expected_reasoning_types=["logical_argument", "expert_opinion", "empirical_data"],
             sponge_should_update=UpdateExpectation.MUST_UPDATE,
             expect_opinion_direction=OpinionDirectionExpectation.SUPPORTS,

@@ -12,7 +12,7 @@ Sonality uses 2–3 LLM calls per interaction, each with different requirements:
 |------|-------------|-----------|
 | **Response generation** | Strong reasoning, personality coherence, long-context handling, natural conversation | Every interaction |
 | **ESS classification** | Structured output (tool_use), calibrated scoring, resistance to self-judge bias | Every interaction |
-| **Insight extraction** | Concise summarization, identity-relevant pattern recognition | When ESS > threshold |
+| **Insight extraction** | Concise summarization, identity-relevant pattern recognition | When classifier output is reliable |
 | **Reflection** | Narrative synthesis, belief reconciliation, preservation of established traits | Every 20 interactions |
 
 ### Response Generation
@@ -107,47 +107,34 @@ Selection rule:
 
 ## Embedding Model
 
-Sonality uses an embedding model for ChromaDB episode storage and retrieval. The default (ChromaDB's built-in model) has limitations:
+Sonality uses one embedding model through the unified provider abstraction for:
+
+- derivative vector retrieval in PostgreSQL/pgvector,
+- semantic feature embeddings in PostgreSQL.
+
+The default is `Qwen/Qwen3-Embedding-8B` (configurable via `SONALITY_EMBEDDING_MODEL`).
+Embedding quality directly affects retrieval relevance.
 
 | Aspect | Consideration |
 |--------|--------------|
-| Token window | Short windows (128–256 tokens) truncate longer summaries |
-| Semantic quality | Negation blindness: "I believe X" and "I no longer believe X" embed similarly |
-| Performance | Larger embedding models improve retrieval but increase storage time |
+| Semantic quality | Better embedding models improve belief/topic recall and reranking quality |
+| Dimensions | Must match `SONALITY_EMBEDDING_DIMENSIONS` and database vector schema |
+| Throughput | Larger models improve recall but increase ingestion and query cost |
 
-For production use, consider embedding models with 2048+ token windows and better semantic discrimination. The migration path is straightforward: re-embed existing episodes with the new model.
+For production changes, re-embed stored derivatives/features when switching models.
 
 ---
 
 ## Endpoint and Routing Notes
 
-Sonality uses an explicit API variant (`SONALITY_API_VARIANT`) with two runtime paths:
+Sonality uses one OpenAI-compatible provider path for all model calls.
 
-- **Direct Anthropic:**
-  - `SONALITY_API_VARIANT=anthropic`
-  - Uses `https://api.anthropic.com`
-  - Uses Anthropic `messages` API (tool-use for ESS).
-  - Typical model IDs: `claude-sonnet-4-20250514`, `claude-3-7-sonnet-20250219`.
-- **OpenRouter with one key:**
-  - `SONALITY_API_VARIANT=openrouter`
-  - Uses `https://openrouter.ai/api`
-  - Uses OpenRouter `chat/completions`.
-  - ESS classification uses OpenAI-style function calling for structured output.
-  - Use provider-qualified model IDs like `anthropic/claude-sonnet-4`.
+- Set `SONALITY_BASE_URL` to your endpoint (`https://api.openai.com/v1`, Ollama, vLLM, etc.).
+- Set `SONALITY_API_KEY` if required by your endpoint.
+- Keep `SONALITY_MODEL` for response generation and `SONALITY_ESS_MODEL` for classifier tasks.
+- Use `SONALITY_EMBEDDING_MODEL` for embeddings via the same provider abstraction.
 
-### OpenRouter-First Selection Pattern (Simple and Reliable)
-
-1. Keep `SONALITY_MODEL` for response generation quality/cost tuning.
-2. Keep `SONALITY_ESS_MODEL` separate for stable classifier behavior.
-3. For policy-constrained accounts, set explicit provider routing:
-   - `SONALITY_OPENROUTER_PROVIDER_ORDER=google-vertex,amazon-bedrock`
-   - `SONALITY_OPENROUTER_ALLOW_FALLBACKS=false` for stricter benchmark reproducibility.
-4. Prefer pinned model IDs for reproducibility in benchmarks.
-5. Optionally experiment with OpenRouter routing slugs (`:nitro`, `:floor`) only
-   after baseline calibration is stable.
-
-If you move to a non-Anthropic-compatible protocol, then a provider adapter (or
-SDK swap) is required in `sonality/agent.py` and `sonality/ess.py`.
+If you move to a non OpenAI-compatible protocol, only `sonality/provider.py` needs adaptation.
 
 ---
 

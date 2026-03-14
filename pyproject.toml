@@ -5,9 +5,10 @@ description = "LLM agent with a self-evolving personality via the Sponge archite
 readme = "README.md"
 requires-python = ">=3.12,<3.14"
 dependencies = [
-    "anthropic>=0.40.0",
-    "chromadb>=0.5.0",
     "datasets>=4.6.1",
+    "neo4j>=5.0.0",
+    "pgvector>=0.3.0",
+    "psycopg[binary,pool]>=3.2.0",
     "pydantic>=2.0.0",
     "python-dotenv>=1.0.0",
 ]
@@ -16,8 +17,10 @@ dependencies = [
 dev = [
     "ruff>=0.8.0",
     "pytest>=8.0.0",
+    "pytest-timeout>=2.3.0",
     "mypy>=1.0.0",
     "playwright>=1.58.0",
+    "testcontainers[postgres,neo4j]>=4.0.0",
 ]
 docs = [
     "zensical>=0.0.24",
@@ -37,7 +40,7 @@ src = ["sonality", "tests", "benches"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "UP", "B", "SIM", "RUF"]
-ignore = ["E501"]
+ignore = ["E501", "RUF001", "RUF002"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["sonality"]

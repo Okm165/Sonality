@@ -1,67 +1,109 @@
 from __future__ import annotations
 
+import asyncio
+import dataclasses
 import json
 import logging
+import threading
 import time
-from collections.abc import Callable
+from collections.abc import Coroutine
+from concurrent.futures import Future
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Final
 
-from anthropic import Anthropic, APIError
+from pydantic import BaseModel
 
 from . import config
 from .ess import (
+    PROVIDER_CLIENT,
     ESSResult,
+    KnowledgeDensity,
     ReasoningType,
-    SourceReliability,
     classifier_exception_fallback,
     classify,
 )
-from .memory import (
-    AdmissionPolicy,
-    EpisodeStore,
-    MemoryType,
-    ProvenanceQuality,
-    SpongeState,
-    compute_magnitude,
-    extract_insight,
-    validate_snapshot,
+from .llm.caller import llm_call
+from .llm.prompts import (
+    BELIEF_DECAY_PROMPT,
+    DISAGREEMENT_DETECTION_PROMPT,
+    ENTRENCHMENT_DETECTION_PROMPT,
+    REFLECTION_GATE_PROMPT,
+    TOPIC_CANONICALIZATION_PROMPT,
 )
-from .openrouter import chat_completion
+from .memory import (
+    BackgroundSummarizer,
+    BoundaryDecision,
+    ChainOfQueryAgent,
+    ConsolidationEngine,
+    ContractionAction,
+    DatabaseConnections,
+    DerivativeChunker,
+    DualEpisodeStore,
+    EventBoundaryDetector,
+    ExternalEmbedder,
+    ForgettingEngine,
+    MemoryGraph,
+    QueryCategory,
+    QueryRouter,
+    SemanticIngestionWorker,
+    SemanticMemoryDecision,
+    ShortTermMemory,
+    SplitQueryAgent,
+    SpongeState,
+    StoredEpisode,
+    TemporalExpansionDecision,
+    UpdateMagnitude,
+    assess_belief_evidence,
+    assess_health,
+    consolidate_knowledge,
+    dump_memory_snapshot,
+    extract_and_store_knowledge,
+    extract_insight,
+    prune_stale_knowledge,
+    rerank_episodes,
+    retrieve_relevant_knowledge,
+)
+from .memory.context_format import format_episode_line
 from .prompts import REFLECTION_PROMPT, build_system_prompt
+from .provider import chat_completion
 
 log = logging.getLogger(__name__)
 
-MAX_RETRIES: Final = 3
-RETRY_BACKOFF: Final = 1.5
-TRUSTED_REASONING: Final[frozenset[ReasoningType]] = frozenset(
-    {
-        ReasoningType.LOGICAL_ARGUMENT,
-        ReasoningType.EMPIRICAL_DATA,
-        ReasoningType.EXPERT_OPINION,
-    }
-)
-TRUSTED_SOURCES: Final[frozenset[SourceReliability]] = frozenset(
-    {
-        SourceReliability.PEER_REVIEWED,
-        SourceReliability.ESTABLISHED_EXPERT,
-        SourceReliability.INFORMED_OPINION,
-    }
-)
-AGM_CONTRACTION_SCORE: Final = 0.65
-AGM_CONTRACTION_CONFIDENCE: Final = 0.55
-AGM_CONTRACTION_POSITION: Final = 0.45
-AGM_CONTRACTION_RATIO: Final = 0.35
-SEMANTIC_MEMORY_MIN_ESS: Final = 0.55
-CONTRADICTION_POSITION_THRESHOLD: Final = 0.35
-COERCION_UPDATE_MARGIN: Final = 0.1
 CRITICAL_ESS_DEFAULT_FIELDS: Final[frozenset[str]] = frozenset(
     {
         "coerced:score",
         "coerced:reasoning_type",
         "coerced:opinion_direction",
+    }
+)
+_UTILITY_USED_DELTA: Final = 0.10
+_UTILITY_NOISE_DELTA: Final = -0.05
+
+
+# Universal per-update magnitude ceiling. The LLM's assess_belief_evidence already
+# calibrates evidence_strength per reasoning type and source quality; this only
+# clips extreme outliers. Manipulative types are blocked upstream by the
+# _NO_UPDATE_REASONING frozenset + manipulative check — they never reach here.
+MAX_SINGLE_UPDATE_MAGNITUDE: Final[float] = 0.25
+
+# Minimum ESS score required for empirical-evidence personality updates (insight
+# extraction, belief staging, provenance opinion updates).
+# Chosen to block bare authority claims (~0.08) and weak popularity surveys (~0.28)
+# while allowing genuine empirical arguments (~0.35+).
+MIN_ESS_FOR_EMPIRICAL_UPDATE: Final[float] = 0.30
+
+# Minimum ESS score for logical_argument insight extraction. Lower than the
+# empirical threshold to allow principled reasoning to shape beliefs, but not
+# so low that one-liner fallacies embedded in manipulative messages qualify.
+MIN_ESS_FOR_LOGICAL_INSIGHT: Final[float] = 0.25
+
+# Reasoning types whose coherent structure justifies belief updates at a lower
+# (not zero) score threshold than empirical evidence.
+_SCORE_EXEMPT_REASONING: Final = frozenset(
+    {
+        ReasoningType.LOGICAL_ARGUMENT,
     }
 )
 
@@ -74,6 +116,28 @@ class ReflectionTrigger(StrEnum):
     EVENT_DRIVEN = "event_driven"
 
 
+class DisagreementVerdict(StrEnum):
+    DISAGREEMENT = "DISAGREEMENT"
+    NO_DISAGREEMENT = "NO_DISAGREEMENT"
+
+
+class EntrenchmentStatus(StrEnum):
+    ENTRENCHED = "ENTRENCHED"
+    NOT_ENTRENCHED = "NOT_ENTRENCHED"
+
+
+class BeliefDecayAction(StrEnum):
+    RETAIN = "RETAIN"
+    DECAY = "DECAY"
+    FORGET = "FORGET"
+
+
+class ReflectionGateDecision(StrEnum):
+    SKIP = "SKIP"
+    PERIODIC = "PERIODIC"
+    EVENT_DRIVEN = "EVENT_DRIVEN"
+
+
 @dataclass(frozen=True, slots=True)
 class ReflectionGate:
     """Reflection gate decision carrying trigger metadata for one turn."""
@@ -83,55 +147,42 @@ class ReflectionGate:
     window_interactions: int
 
 
-def _status_code(exc: APIError) -> int | None:
-    """Extract a numeric HTTP status code when available."""
-    code = getattr(exc, "status_code", None)
-    return code if isinstance(code, int) else None
+class TopicCanonResponse(BaseModel):
+    """Structured response for LLM-based topic canonicalization."""
+
+    mappings: dict[str, str] = {}
 
 
-def _extract_text_block(response: object) -> str:
-    """Pull the first text payload from an Anthropic response object."""
-    content = getattr(response, "content", None)
-    if not isinstance(content, list):
-        return ""
-    fallback = ""
-    for block in content:
-        text = getattr(block, "text", "")
-        if not isinstance(text, str):
-            continue
-        if getattr(block, "type", None) == "text":
-            return text
-        if not fallback:
-            fallback = text
-    return fallback
+class DisagreementDetectionResponse(BaseModel):
+    """Structured response for topic-level disagreement checks."""
+
+    disagreement_verdict: DisagreementVerdict = DisagreementVerdict.NO_DISAGREEMENT
+    disagreement_strength: float = 0.0
+    reasoning: str = ""
 
 
-def _to_nonnegative_int(value: object) -> int:
-    """Convert mixed numeric values to a non-negative integer token count."""
-    if isinstance(value, bool):
-        return 0
-    if isinstance(value, int):
-        return max(value, 0)
-    if isinstance(value, float):
-        return max(int(value), 0)
-    return 0
+class BeliefDecayResponse(BaseModel):
+    """Structured response for belief staleness handling."""
+
+    action: BeliefDecayAction = BeliefDecayAction.RETAIN
+    new_confidence: float = 0.0
+    reasoning: str = ""
 
 
-def _extract_usage_tokens(response: object) -> tuple[int, int]:
-    """Extract request/response token counts from model usage metadata."""
-    usage = getattr(response, "usage", None)
-    input_tokens = _to_nonnegative_int(getattr(usage, "input_tokens", 0))
-    output_tokens = _to_nonnegative_int(getattr(usage, "output_tokens", 0))
-    return input_tokens, output_tokens
+class EntrenchmentDetectionResponse(BaseModel):
+    """Structured response for belief entrenchment detection."""
+
+    entrenchment_status: EntrenchmentStatus = EntrenchmentStatus.NOT_ENTRENCHED
+    confidence: float = 0.0
+    reasoning: str = ""
+    recommendation: str = ""
 
 
-def _is_trusted_evidence(ess: ESSResult) -> bool:
-    """Return whether evidence clears trusted reasoning/source consistency gates."""
-    return (
-        ess.internal_consistency
-        and ess.reasoning_type in TRUSTED_REASONING
-        and ess.source_reliability in TRUSTED_SOURCES
-    )
+class ReflectionGateResponse(BaseModel):
+    """Structured response for per-turn reflection trigger decisions."""
+
+    trigger: ReflectionGateDecision = ReflectionGateDecision.SKIP
+    reasoning: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,26 +195,21 @@ class ModelUsage:
     ess_output_tokens: int = 0
 
 
-def _api_call_with_retry[T](fn: Callable[..., T], *args: object, **kwargs: object) -> T:
-    """Retry transient (5xx) API failures with exponential backoff."""
-    for attempt in range(MAX_RETRIES):
-        try:
-            return fn(*args, **kwargs)
-        except APIError as exc:
-            status = _status_code(exc)
-            if status is not None and status >= 500 and attempt < MAX_RETRIES - 1:
-                wait = RETRY_BACKOFF ** (attempt + 1)
-                log.warning(
-                    "API error %s on attempt %d/%d, retrying in %.1fs",
-                    status,
-                    attempt + 1,
-                    MAX_RETRIES,
-                    wait,
-                )
-                time.sleep(wait)
-                continue
-            raise
-    raise RuntimeError("Exhausted retries without success")
+@dataclass(frozen=True, slots=True)
+class RuntimeComponents:
+    db: DatabaseConnections
+    embedder: ExternalEmbedder
+    graph: MemoryGraph
+    dual_store: DualEpisodeStore
+    stm: ShortTermMemory
+    summarizer: BackgroundSummarizer
+    boundary_detector: EventBoundaryDetector
+    query_router: QueryRouter
+    chain_agent: ChainOfQueryAgent
+    split_agent: SplitQueryAgent
+    consolidation: ConsolidationEngine
+    forgetting: ForgettingEngine
+    semantic_worker: SemanticIngestionWorker
 
 
 class SonalityAgent:
@@ -177,7 +223,7 @@ class SonalityAgent:
     ) -> None:
         """Boot the runtime agent and load persistent memory state.
 
-        Assumes explicit API config (`SONALITY_API_KEY`, `SONALITY_API_VARIANT`).
+        Assumes one OpenAI-compatible provider endpoint for chat and embeddings.
         """
         missing = config.missing_live_api_config()
         if missing:
@@ -191,20 +237,46 @@ class SonalityAgent:
             config.BASE_URL,
         )
         if self.model == self.ess_model:
-            log.warning(
-                "Main and ESS models are identical; using a separate ESS model reduces self-judge coupling"
-            )
-        self.client = (
-            None
-            if config.API_VARIANT == "openrouter"
-            else Anthropic(api_key=config.API_KEY, base_url=config.BASE_URL)
-        )
+            log.debug("Main and ESS models are identical (single-model setup)")
         self.sponge = SpongeState.load(config.SPONGE_FILE)
-        self.episodes = EpisodeStore(str(config.CHROMADB_DIR))
         self.conversation: list[dict[str, str]] = []
-        self.last_ess: ESSResult | None = None
+        self.last_ess = classifier_exception_fallback("")
         self.last_usage = ModelUsage()
-        self.previous_snapshot: str | None = None
+        self.previous_snapshot = ""
+        self._last_entrenched: list[str] = []
+        self._last_entrenched_interaction: int = -1
+        # LLM-based topic normalization cache: raw_lower → canonical_lower
+        self._topic_canon_cache: dict[str, str] = {}
+
+        # Background event loop for async database operations
+        self._loop = asyncio.new_event_loop()
+        self._loop_thread = threading.Thread(
+            target=self._loop.run_forever, name="agent-async-loop", daemon=True
+        )
+        self._loop_thread.start()
+
+        try:
+            runtime = self._run_async(self._init_new_architecture())
+            self._db = runtime.db
+            self._embedder = runtime.embedder
+            self._graph = runtime.graph
+            self._dual_store = runtime.dual_store
+            self._stm = runtime.stm
+            self._summarizer = runtime.summarizer
+            self._boundary_detector = runtime.boundary_detector
+            self._query_router = runtime.query_router
+            self._chain_agent = runtime.chain_agent
+            self._split_agent = runtime.split_agent
+            self._consolidation = runtime.consolidation
+            self._forgetting = runtime.forgetting
+            self._semantic_worker = runtime.semantic_worker
+            log.info("New memory architecture initialized (Neo4j + pgvector)")
+        except Exception as exc:
+            log.exception("New memory architecture initialization failed")
+            raise RuntimeError(
+                "Path A storage (Neo4j + pgvector) is required and failed to initialize"
+            ) from exc
+
         log.info(
             "Agent ready: sponge v%d, %d prior interactions, %d beliefs",
             self.sponge.version,
@@ -212,26 +284,126 @@ class SonalityAgent:
             len(self.sponge.opinion_vectors),
         )
 
+    def _run_async[T](self, coro: Coroutine[object, object, T]) -> T:
+        """Run an async coroutine from sync context via the background event loop."""
+        future: Future[T] = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        return future.result(timeout=config.ASYNC_TIMEOUT)
+
+    async def _init_new_architecture(self) -> RuntimeComponents:
+        """Initialize Neo4j + pgvector + embedding components."""
+        db = await DatabaseConnections.create()
+        embedder = ExternalEmbedder()
+        graph = MemoryGraph(db.neo4j_driver)
+        chunker = DerivativeChunker(embedder)
+        dual_store = DualEpisodeStore(graph, db.pg_pool, chunker, embedder)
+        stm = await ShortTermMemory.load(db.pg_pool)
+        summarizer = BackgroundSummarizer(stm)
+        summarizer.start()
+        boundary_detector = EventBoundaryDetector()
+        latest_segment_counter = await graph.get_latest_segment_counter()
+        boundary_detector.set_segment_counter(latest_segment_counter)
+        query_router = QueryRouter()
+        chain_agent = ChainOfQueryAgent(dual_store, graph)
+        split_agent = SplitQueryAgent(dual_store, graph)
+        consolidation = ConsolidationEngine(graph)
+        forgetting = ForgettingEngine(graph, dual_store)
+        semantic_worker = SemanticIngestionWorker(config.POSTGRES_URL, embedder)
+        semantic_worker.start()
+        # Restore last episode UID for temporal linking
+        last_uid = await graph.get_last_episode_uid()
+        if last_uid:
+            dual_store._last_episode_uid = last_uid
+        return RuntimeComponents(
+            db=db,
+            embedder=embedder,
+            graph=graph,
+            dual_store=dual_store,
+            stm=stm,
+            summarizer=summarizer,
+            boundary_detector=boundary_detector,
+            query_router=query_router,
+            chain_agent=chain_agent,
+            split_agent=split_agent,
+            consolidation=consolidation,
+            forgetting=forgetting,
+            semantic_worker=semantic_worker,
+        )
+
+    def shutdown(self) -> None:
+        """Gracefully shut down background threads and database connections."""
+        self._summarizer.stop()
+        self._semantic_worker.stop()
+        try:
+            self._run_async(self._db.close())
+        except Exception:
+            log.exception("Error closing database connections")
+        self._loop.call_soon_threadsafe(self._loop.stop)
+        self._loop_thread.join(timeout=5)
+
     def respond(self, user_message: str) -> str:
         """Run one interaction turn and persist resulting personality state.
 
         This is the canonical orchestration entrypoint used by the CLI.
         """
+        _t0 = time.perf_counter()
         log.info("=== Interaction #%d ===", self.sponge.interaction_count + 1)
         log.info("User: %.120s", user_message)
 
-        relevant = self.episodes.retrieve_typed(
-            query=user_message,
-            episodic_n=config.EPISODIC_RETRIEVAL_COUNT,
-            semantic_n=config.SEMANTIC_RETRIEVAL_COUNT,
-        )
+        # Step 2: Add to STM buffer
+        self._stm.add_message("user", user_message)
+
+        # Step 3-4: Retrieve relevant memories + stored knowledge
+        try:
+            relevant = self._run_async(self._retrieve_new_arch(user_message))
+        except Exception:
+            log.exception("Memory retrieval failed")
+            relevant = []
+        try:
+            knowledge_lines = self._run_async(
+                retrieve_relevant_knowledge(
+                    query=user_message,
+                    pg_pool=self._db.pg_pool,
+                    embedder=self._embedder,
+                )
+            )
+            log.debug(
+                "Knowledge retrieval: %d items | query='%.60s'%s",
+                len(knowledge_lines),
+                user_message,
+                f" | top={knowledge_lines[0][:80]!r}" if knowledge_lines else "",
+            )
+        except Exception:
+            log.debug("Knowledge retrieval failed", exc_info=True)
+            knowledge_lines = []
         structured_traits = self._build_structured_traits()
 
+        # Step 5: Build system prompt (with STM running summary if available)
         system_prompt = build_system_prompt(
             sponge_snapshot=self.sponge.snapshot,
             relevant_episodes=relevant,
             structured_traits=structured_traits,
+            knowledge_context=knowledge_lines,
         )
+        if self._stm.running_summary:
+            stm_section = f"\n\n## Recent Context Summary\n{self._stm.running_summary}"
+            idx = next(
+                (
+                    i
+                    for marker in (
+                        "\n## Personality Traits",
+                        "\n## Relevant Past Conversations",
+                        "\n## Instructions",
+                    )
+                    if (i := system_prompt.find(marker)) > 0
+                ),
+                -1,
+            )
+            system_prompt = (
+                system_prompt[:idx] + stm_section + system_prompt[idx:]
+                if idx > 0
+                else system_prompt + stm_section
+            )
+
         self._log_context_event(
             user_message=user_message,
             relevant_episodes=relevant,
@@ -245,41 +417,40 @@ class SonalityAgent:
         self.conversation.append({"role": "user", "content": user_message})
         self._truncate_conversation()
 
-        if self.client is None:
-            completion = chat_completion(
-                model=self.model,
-                max_tokens=2048,
-                messages=(
-                    {"role": "system", "content": system_prompt},
-                    *self.conversation,
-                ),
-            )
-            response_input_tokens = completion.input_tokens
-            response_output_tokens = completion.output_tokens
-            assistant_msg = completion.text
-        else:
-            response = _api_call_with_retry(
-                self.client.messages.create,
-                model=self.model,
-                max_tokens=2048,
-                system=system_prompt,
-                messages=self.conversation,
-            )
-            response_input_tokens, response_output_tokens = _extract_usage_tokens(response)
-            assistant_msg = _extract_text_block(response)
+        completion = chat_completion(
+            model=self.model,
+            max_tokens=config.FAST_LLM_MAX_TOKENS,
+            messages=(
+                {"role": "system", "content": system_prompt},
+                *self.conversation,
+            ),
+        )
+        response_input_tokens = completion.input_tokens
+        response_output_tokens = completion.output_tokens
+        assistant_msg = completion.text
         if not assistant_msg:
             log.warning("Model response contained no text block; using empty reply")
         self.conversation.append({"role": "assistant", "content": assistant_msg})
 
+        # Add assistant response to STM
+        self._stm.add_message("assistant", assistant_msg)
+
+        log.info("Agent: %.200s", assistant_msg)
+        log.debug("Agent (full): %s", assistant_msg)
+        _llm_elapsed = time.perf_counter() - _t0
+        log.info("Interaction #%d LLM: %.1fs", self.sponge.interaction_count + 1, _llm_elapsed)
+
         self._post_process(user_message, assistant_msg)
+        _total_elapsed = time.perf_counter() - _t0
+        log.info("Interaction #%d total: %.1fs", self.sponge.interaction_count, _total_elapsed)
         last_ess = self.last_ess
         self.last_usage = ModelUsage(
             response_calls=1,
-            ess_calls=last_ess.attempt_count if last_ess else 0,
+            ess_calls=last_ess.attempt_count,
             response_input_tokens=response_input_tokens,
             response_output_tokens=response_output_tokens,
-            ess_input_tokens=last_ess.input_tokens if last_ess else 0,
-            ess_output_tokens=last_ess.output_tokens if last_ess else 0,
+            ess_input_tokens=last_ess.input_tokens,
+            ess_output_tokens=last_ess.output_tokens,
         )
         self._log_event(
             {
@@ -289,6 +460,131 @@ class SonalityAgent:
             }
         )
         return assistant_msg
+
+    async def _retrieve_new_arch(self, user_message: str) -> list[str]:
+        """Full retrieval pipeline: route → search → expand → rerank."""
+        # Step 3: Route query
+        stm_context = self._stm.get_recent_context()
+        decision = self._query_router.route(user_message, context=stm_context)
+
+        log.info(
+            "Query routing: category=%s n_results=%d temporal=%s semantic=%s",
+            decision.category,
+            decision.n_results,
+            decision.temporal_expansion,
+            decision.semantic_memory,
+        )
+        if decision.category == QueryCategory.NONE:
+            return []
+
+        # Step 4: Retrieve based on category
+        if decision.category == QueryCategory.MULTI_ENTITY:
+            split_result = await self._split_agent.retrieve(
+                user_message, n_per_sub=decision.n_results
+            )
+            episodes = split_result.episodes
+        elif decision.category in (QueryCategory.TEMPORAL, QueryCategory.AGGREGATION):
+            chain_result = await self._chain_agent.retrieve(user_message, base_n=decision.n_results)
+            episodes = chain_result.episodes
+        elif decision.category == QueryCategory.BELIEF_QUERY:
+            over_fetch = decision.n_results * config.RETRIEVAL_OVER_FETCH_FACTOR
+            belief_hits = await self._graph.find_belief_related_episodes(
+                user_message,
+                limit=over_fetch,
+            )
+            topic_hits = await self._graph.find_topic_related_episodes(
+                user_message,
+                limit=max(2, over_fetch // 2),
+            )
+            vector_hits = await self._dual_store.vector_search(user_message, top_k=over_fetch)
+            vector_uids = list({row[1] for row in vector_hits})
+            episodes = belief_hits + topic_hits + await self._graph.get_episodes(vector_uids)
+        else:
+            # Simple query: direct vector search
+            over_fetch = decision.n_results * config.RETRIEVAL_OVER_FETCH_FACTOR
+            results = await self._dual_store.vector_search(user_message, top_k=over_fetch)
+            episode_uids = list({r[1] for r in results})
+            topic_hits = await self._graph.find_topic_related_episodes(
+                user_message,
+                limit=max(2, over_fetch // 2),
+            )
+            episodes = topic_hits + await self._graph.get_episodes(episode_uids)
+        episodes = list({episode.uid: episode for episode in episodes}.values())
+
+        # Step 5: Temporal expansion
+        if decision.temporal_expansion is TemporalExpansionDecision.EXPAND and episodes:
+            expanded_uids: set[str] = set()
+            for ep in episodes[:3]:  # Expand top 3 only
+                neighbors = await self._graph.traverse_temporal_context(ep.uid)
+                for n in neighbors:
+                    expanded_uids.add(n.uid)
+            new_uids = [u for u in expanded_uids if u not in {e.uid for e in episodes}]
+            if new_uids:
+                extra = await self._graph.get_episodes(new_uids)
+                episodes.extend(extra)
+
+        # Step 7: LLM Listwise Rerank
+        if len(episodes) > 1:
+            episodes = rerank_episodes(user_message, episodes)
+
+        selected = episodes[: decision.n_results]
+        semantic_context: list[str] = []
+        if decision.semantic_memory is SemanticMemoryDecision.SEARCH:
+            semantic_context = await self._search_semantic_features(
+                user_message,
+                top_k=max(2, min(decision.n_results, 6)),
+            )
+
+        # Step 8: Differentiated utility feedback for selected vs. noisy candidates
+        for idx, ep in enumerate(episodes):
+            try:
+                delta = _UTILITY_USED_DELTA if idx < len(selected) else _UTILITY_NOISE_DELTA
+                await self._graph.update_utility(ep.uid, delta=delta)
+            except Exception:
+                log.debug("Utility update failed for %s", ep.uid[:8])
+
+        # Step 10: Format as context strings (matching legacy format)
+        episode_context = [
+            format_episode_line(
+                created_at=ep.created_at,
+                summary=ep.summary,
+                content=ep.content,
+                content_limit=300,
+            )
+            for ep in selected
+        ]
+        log.info(
+            "Retrieval: category=%s n_episodes=%d n_semantic=%d | episodes=%s",
+            decision.category,
+            len(selected),
+            len(semantic_context),
+            [(ep.uid[:8], (ep.summary or ep.content)[:50]) for ep in selected],
+        )
+        return [*episode_context, *semantic_context]
+
+    async def _search_semantic_features(self, query: str, *, top_k: int) -> list[str]:
+        """Search semantic features via pgvector similarity."""
+        query_embedding = self._embedder.embed_query(query)
+        async with self._db.pg_pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute("SET hnsw.iterative_scan = 'relaxed_order'")
+            await cur.execute("SET hnsw.ef_search = 100")
+            await cur.execute(
+                """
+                SELECT category, tag, feature_name, value, confidence,
+                       embedding <=> %s::vector AS distance
+                FROM semantic_features
+                WHERE embedding IS NOT NULL
+                ORDER BY embedding <=> %s::vector, confidence DESC, updated_at DESC
+                LIMIT %s
+                """,
+                (query_embedding, query_embedding, top_k),
+            )
+            rows = await cur.fetchall()
+        return [
+            f"[semantic/{row[0]!s}] {row[1]!s}.{row[2]!s}: {row[3]!s}"
+            f" (conf={float(row[4]):.2f}, dist={float(row[5]):.3f})"
+            for row in rows
+        ]
 
     def _truncate_conversation(self) -> None:
         """Keep chat history inside a configured character budget.
@@ -315,12 +611,122 @@ class SonalityAgent:
         ess = self._classify_ess(user_message)
         self.last_ess = ess
         self._log_ess(ess, user_message)
+        log.info(
+            "ESS: score=%.3f type=%s dir=%s novelty=%.2f topics=%s severity=%s attempts=%d",
+            ess.score,
+            ess.reasoning_type,
+            ess.opinion_direction,
+            ess.novelty,
+            list(ess.topics),
+            ess.default_severity,
+            ess.attempt_count,
+        )
 
-        self._store_episode(user_message, agent_response, ess)
+        # Event boundary detection + dual-store storage (required architecture)
+        previous_segment_id = self._boundary_detector.current_segment_id
+        segment_id = ""
+        segment_label = ""
+        segment_reasoning = ""
+        closed_segment_id = ""
+        try:
+            boundary = self._boundary_detector.check_boundary(user_message)
+            segment_id = boundary.segment_id
+            if boundary.boundary_decision is BoundaryDecision.BOUNDARY:
+                closed_segment_id = previous_segment_id
+                segment_label = boundary.label
+                segment_reasoning = boundary.reasoning
+                log.info("Segment boundary: %s (%s)", boundary.label, boundary.boundary_type)
+        except Exception:
+            log.exception("Boundary detection failed")
+
+        episode_uid = self._store_episode_new_arch(
+            user_message,
+            agent_response,
+            ess,
+            segment_id,
+            segment_label,
+            segment_reasoning,
+        )
+        if closed_segment_id:
+            self._try_consolidate_segment(closed_segment_id, trigger="boundary")
+        if not episode_uid:
+            log.warning("Dual-store write failed; skipping post-processing belief update")
+
+        # Queue for semantic feature extraction (include ESS context so the worker
+        # can distinguish low-evidence chit-chat from belief-shaping exchanges)
+        if episode_uid:
+            ess_line = (
+                f"ESS: {ess.score:.2f} ({ess.reasoning_type}) | "
+                f"direction={ess.opinion_direction} | "
+                f"topics={list(ess.topics)}"
+            )
+            content = f"User: {user_message}\nAssistant: {agent_response}\n{ess_line}"
+            self._semantic_worker.enqueue(episode_uid, content)
+
+        # Manipulative/invalid interactions should not mutate personality state.
+        # debunked_claim: conclusively refuted claims must never update beliefs.
+        # social_pressure / emotional_appeal: coercive but no evidential content.
+        # anecdotal: unsourced "experts say" / "studies show" without actual evidence.
+        manipulative = ess.reasoning_type in {
+            "social_pressure",
+            "emotional_appeal",
+            "debunked_claim",
+            "anecdotal",
+        }
+        if manipulative:
+            log.info(
+                "Manipulative interaction (%s, score=%.3f): freezing sponge mutation",
+                ess.reasoning_type,
+                ess.score,
+            )
+        else:
+            log.debug(
+                "Non-manipulative interaction (%s, score=%.3f): sponge mutation allowed",
+                ess.reasoning_type,
+                ess.score,
+            )
+
+        # Knowledge proposition extraction (inline, gated by ESS knowledge_density).
+        # Facts are stored regardless, but opinion staging requires:
+        # - non-manipulative reasoning type, AND
+        # - either a logical argument (score-exempt) or ESS score above the threshold.
+        if episode_uid:
+            self._extract_knowledge(
+                user_message,
+                agent_response,
+                ess,
+                episode_uid,
+                stage_opinions=(
+                    not manipulative
+                    and (
+                        (
+                            ess.reasoning_type in _SCORE_EXEMPT_REASONING
+                            and ess.score >= MIN_ESS_FOR_LOGICAL_INSIGHT
+                        )
+                        or ess.score >= MIN_ESS_FOR_EMPIRICAL_UPDATE
+                    )
+                ),
+            )
+            # Normalize topics in freshly-staged knowledge updates (same LLM canon logic as ESS topics)
+            self._normalize_staged_topics()
+
+        # Persist STM to PostgreSQL
+        try:
+            self._run_async(self._stm.persist(self._db.pg_pool))
+        except Exception:
+            log.debug("STM persistence failed", exc_info=True)
+
         self.sponge.interaction_count += 1
-        committed = self.sponge.apply_due_staged_updates()
-        if committed:
-            log.info("Committed staged beliefs: %s", committed)
+
+        if not manipulative:
+            committed = self.sponge.apply_due_staged_updates()
+            if committed:
+                log.info("Committed staged beliefs: %s", committed)
+            else:
+                log.debug(
+                    "No staged beliefs due (pending=%d)",
+                    len(self.sponge.staged_opinion_updates),
+                )
             self._log_event(
                 {
                     "event": "opinion_commit",
@@ -330,16 +736,32 @@ class SonalityAgent:
                 }
             )
 
-        self._update_topics(ess)
-        self._update_opinions(ess)
-        if self._detect_disagreement(ess):
+        for topic in ess.topics:
+            self.sponge.track_topic(topic)
+        if episode_uid and not manipulative:
+            try:
+                self._run_async(
+                    self._update_opinions_with_provenance(
+                        user_message, agent_response, ess, episode_uid
+                    )
+                )
+            except Exception:
+                log.exception("Provenance opinion update failed")
+        if self._detect_disagreement(user_message, ess):
             self.sponge.note_disagreement()
         else:
             self.sponge.note_agreement()
 
         self.previous_snapshot = self.sponge.snapshot
-        self._extract_insight(user_message, agent_response, ess)
-        self._maybe_reflect()
+        if not manipulative:
+            self._extract_insight(user_message, agent_response, ess)
+            self._maybe_reflect()
+        else:
+            log.info(
+                "Deferring insight + reflection (manipulative turn #%d, type=%s)",
+                self.sponge.interaction_count,
+                ess.reasoning_type,
+            )
         self._log_health_event()
 
         self.sponge.save(config.SPONGE_FILE, config.SPONGE_HISTORY_DIR)
@@ -348,8 +770,8 @@ class SonalityAgent:
     def _classify_ess(self, user_message: str) -> ESSResult:
         """Classify user evidence and fallback safely on classifier failures."""
         try:
-            return classify(
-                self.client,
+            ess = classify(
+                PROVIDER_CLIENT,
                 user_message,
                 self.sponge.snapshot,
                 model=self.ess_model,
@@ -357,72 +779,190 @@ class SonalityAgent:
         except Exception:
             log.exception("ESS classification failed, using safe defaults")
             return classifier_exception_fallback(user_message)
+        canonical = self._normalize_topics_llm(ess.topics)
+        return ess if canonical == ess.topics else dataclasses.replace(ess, topics=canonical)
 
-    def _store_episode(self, user_message: str, agent_response: str, ess: ESSResult) -> None:
-        """Persist interaction memory with conservative semantic-admission gates.
+    def _normalize_topics_llm(self, raw_topics: tuple[str, ...]) -> tuple[str, ...]:
+        """Map ESS topic labels to canonical forms already in belief memory.
 
-        Semantic memory admission is intentionally strict to reduce replay of
-        weak evidence in future retrieval cycles.
+        Prevents topic fragmentation where "nuclear" and "nuclear energy" accumulate
+        as separate beliefs. Uses a session-scoped cache to avoid repeated LLM calls
+        for topics seen in previous interactions.
         """
+        if not raw_topics:
+            return raw_topics
+
+        existing = set(self.sponge.opinion_vectors) | set(
+            self.sponge.behavioral_signature.topic_engagement
+        )
+
+        result: list[str] = []
+        uncached: list[str] = []
+        for raw in raw_topics:
+            lower = raw.strip().lower()
+            if lower in self._topic_canon_cache:
+                result.append(self._topic_canon_cache[lower])
+                continue
+            # Cheap local normalization: treat hyphens as spaces for matching
+            dehyphenated = lower.replace("-", " ")
+            if lower in existing:
+                self._topic_canon_cache[lower] = lower
+                result.append(lower)
+            elif dehyphenated != lower and dehyphenated in existing:
+                self._topic_canon_cache[lower] = dehyphenated
+                log.debug("Topic hyphen-normalized: '%s' → '%s'", lower, dehyphenated)
+                result.append(dehyphenated)
+            elif not existing:
+                self._topic_canon_cache[lower] = lower
+                result.append(lower)
+            else:
+                uncached.append(lower)
+
+        if uncached:
+            # Include new topics in the existing set so they can dedup against each other
+            all_candidates = sorted(existing | set(uncached))
+            prompt = TOPIC_CANONICALIZATION_PROMPT.format(
+                existing=json.dumps(all_candidates),
+                new_topics=json.dumps(uncached),
+            )
+            llm_result = llm_call(
+                prompt=prompt,
+                response_model=TopicCanonResponse,
+                fallback=TopicCanonResponse(mappings={t: t for t in uncached}),
+            )
+            mappings = llm_result.value.mappings
+            for raw in uncached:
+                canonical = mappings.get(raw, raw).strip().lower() or raw
+                self._topic_canon_cache[raw] = canonical
+                if canonical != raw:
+                    log.debug("Topic canonical: '%s' → '%s'", raw, canonical)
+                result.append(canonical)
+
+        return tuple(result)
+
+    def _normalize_staged_topics(self) -> None:
+        """Canonicalize topics in pending staged opinion updates.
+
+        Called after knowledge extraction stages new opinion updates so that
+        propositions with slightly different topic wording (e.g. "nuclear power"
+        vs "nuclear energy") map to the same canonical belief entry.
+        """
+        raw_topics = tuple({u.topic for u in self.sponge.staged_opinion_updates})
+        if not raw_topics:
+            return
+        canonical = self._normalize_topics_llm(raw_topics)
+        mapping = dict(zip(raw_topics, canonical, strict=True))
+        for update in self.sponge.staged_opinion_updates:
+            mapped = mapping.get(update.topic, update.topic)
+            if mapped != update.topic:
+                update.topic = mapped
+
+    def _extract_knowledge(
+        self,
+        user_message: str,
+        agent_response: str,
+        ess: ESSResult,
+        episode_uid: str,
+        *,
+        stage_opinions: bool = True,
+    ) -> None:
+        """Extract and store knowledge propositions when ESS signals learnable content.
+
+        Args:
+            stage_opinions: If False, facts are still stored but opinion-type
+                propositions do not generate staged belief updates. Should be
+                False for manipulative turns, bare authority claims, or weak
+                empirical evidence (score below MIN_ESS_FOR_EMPIRICAL_UPDATE)
+                unless the reasoning type is score-exempt (e.g. logical_argument).
+        """
+        if ess.knowledge_density == KnowledgeDensity.NONE:
+            log.debug("Knowledge extraction skipped: density=NONE")
+            return
+        log.debug(
+            "Knowledge extraction starting: density=%s stage_opinions=%s",
+            ess.knowledge_density,
+            stage_opinions,
+        )
+        text = f"User: {user_message}\nAssistant: {agent_response}"
         try:
-            # Keep semantic memory high-precision: storing weak/fragile arguments
-            # as "semantic" increases replay risk (AgentPoison 2024, MemoryGraft 2025).
-            ess_reliable_for_updates = self._ess_reliable_for_updates(ess)
-            semantic_candidate = ess.score >= SEMANTIC_MEMORY_MIN_ESS and _is_trusted_evidence(ess)
-            memory_type = MemoryType.SEMANTIC if semantic_candidate else MemoryType.EPISODIC
-            admission_policy = (
-                AdmissionPolicy.SEMANTIC_STRICT
-                if semantic_candidate
-                else AdmissionPolicy.EPISODIC_QUALITY_DEMOTION
-                if ess.score > config.ESS_THRESHOLD
-                else AdmissionPolicy.EPISODIC_LOW_ESS
-            )
-            provenance_quality = (
-                ProvenanceQuality.TRUSTED
-                if semantic_candidate and ess_reliable_for_updates
-                else ProvenanceQuality.UNCERTAIN
-                if ess.score > config.ESS_THRESHOLD
-                and ess.internal_consistency
-                and ess_reliable_for_updates
-                else ProvenanceQuality.LOW
-            )
-            self.episodes.store(
-                user_message=user_message,
-                agent_response=agent_response,
-                ess=ess,
-                interaction_count=self.sponge.interaction_count + 1,
-                memory_type=memory_type,
-                admission_policy=admission_policy,
-                provenance_quality=provenance_quality,
-            )
-            if ess.score > config.ESS_THRESHOLD and memory_type == MemoryType.EPISODIC:
-                log.info(
-                    "Stored high-ESS episode as episodic due to quality gates "
-                    "(type=%s source=%s consistent=%s)",
-                    ess.reasoning_type,
-                    ess.source_reliability,
-                    ess.internal_consistency,
+            stored = self._run_async(
+                extract_and_store_knowledge(
+                    text=text,
+                    episode_uid=episode_uid,
+                    pg_pool=self._db.pg_pool,
+                    embedder=self._embedder,
+                    sponge=self.sponge,
+                    stage_opinions=stage_opinions,
                 )
+            )
+            if stored:
+                log.info("Knowledge extraction stored %d propositions", stored)
         except Exception:
-            log.exception("Episode storage failed")
+            log.exception("Knowledge extraction failed")
 
-    def _update_topics(self, ess: ESSResult) -> None:
-        """Increment topic engagement counters from ESS topic labels."""
-        for topic in ess.topics:
-            self.sponge.track_topic(topic)
+    def _store_episode_new_arch(
+        self,
+        user_message: str,
+        agent_response: str,
+        ess: ESSResult,
+        segment_id: str,
+        segment_label: str,
+        segment_reasoning: str,
+    ) -> str:
+        """Store episode in Neo4j + pgvector dual store. Returns episode UID on success."""
+        try:
+            stored: StoredEpisode = self._run_async(
+                self._dual_store.store(
+                    user_message=user_message,
+                    agent_response=agent_response,
+                    summary=ess.summary[:300],
+                    topics=list(ess.topics),
+                    ess_score=ess.score,
+                    segment_id=segment_id,
+                    segment_label=segment_label,
+                    segment_reasoning=segment_reasoning,
+                )
+            )
+            return stored.episode_uid
+        except Exception:
+            log.exception("Dual-store episode storage failed")
+            return ""
 
-    def _detect_disagreement(self, ess: ESSResult) -> bool:
-        """Structural disagreement: user argued against agent's existing stance.
+    def _detect_disagreement(self, user_message: str, ess: ESSResult) -> bool:
+        """Structural disagreement between current user evidence and held beliefs.
 
-        More reliable than keyword matching (brittle) or LLM self-judgment
-        (self-judge bias up to 50pp — SYConBench, EMNLP 2025).
+        Also checks staged (uncommitted) opinion updates so early-interaction
+        disagreement is correctly tracked before beliefs mature.
         """
         sign = ess.opinion_direction.sign
         if sign == 0.0:
             return False
+        # Build effective position map: committed + net staged
+        staged_net: dict[str, float] = {}
+        for s in self.sponge.staged_opinion_updates:
+            staged_net[s.topic] = staged_net.get(s.topic, 0.0) + s.signed_magnitude
         for topic in ess.topics:
-            pos = self.sponge.opinion_vectors.get(topic, 0.0)
-            if abs(pos) > 0.1 and pos * sign < 0:
+            committed = self.sponge.opinion_vectors.get(topic, 0.0)
+            staged = staged_net.get(topic, 0.0)
+            pos = committed + staged
+            prompt = DISAGREEMENT_DETECTION_PROMPT.format(
+                user_message=user_message[:500],
+                topic=topic,
+                position_value=f"{pos:+.2f}",
+                opinion_direction=f"{sign:+.1f}",
+            )
+            try:
+                result = llm_call(
+                    prompt=prompt,
+                    response_model=DisagreementDetectionResponse,
+                    fallback=DisagreementDetectionResponse(),
+                )
+            except Exception:
+                continue
+            if not result.success:
+                continue
+            response = result.value
+            if response.disagreement_verdict is DisagreementVerdict.DISAGREEMENT:
                 return True
         return False
 
@@ -431,7 +971,7 @@ class SonalityAgent:
         candidates: list[tuple[float, str]] = []
         for staged in self.sponge.staged_opinion_updates:
             pos = self.sponge.opinion_vectors.get(staged.topic, 0.0)
-            if abs(pos) < CONTRADICTION_POSITION_THRESHOLD or pos * staged.signed_magnitude >= 0:
+            if pos * staged.signed_magnitude >= 0:
                 continue
             summary = (
                 f"{staged.topic}({pos:+.2f} vs {staged.signed_magnitude:+.3f},"
@@ -441,34 +981,21 @@ class SonalityAgent:
         candidates.sort(key=lambda item: item[0], reverse=True)
         return [summary for _, summary in candidates]
 
-    def _should_contract_before_revision(
-        self, topic: str, direction: float, ess: ESSResult
-    ) -> bool:
-        """Decide whether to soften a strong belief before reversing direction."""
-        old_pos = self.sponge.opinion_vectors.get(topic, 0.0)
-        meta = self.sponge.belief_meta.get(topic)
-        if meta is None:
-            return False
-        return (
-            old_pos * direction < 0
-            and abs(old_pos) >= AGM_CONTRACTION_POSITION
-            and meta.confidence >= AGM_CONTRACTION_CONFIDENCE
-            and ess.score >= AGM_CONTRACTION_SCORE
-            and _is_trusted_evidence(ess)
-        )
-
-    def _apply_agm_contraction(self, topic: str, ess: ESSResult) -> None:
-        """Apply a partial AGM-style contraction to a strongly held belief."""
+    def _apply_llm_contraction(self, topic: str, evidence_strength: float) -> None:
+        """Soften a belief when provenance assessment recommends contraction."""
         old_pos = self.sponge.opinion_vectors.get(topic, 0.0)
         if abs(old_pos) < 1e-9:
             return
-        step = min(abs(old_pos), max(0.02, abs(old_pos) * AGM_CONTRACTION_RATIO))
+        strength = max(0.0, min(1.0, evidence_strength))
+        step = min(abs(old_pos), max(0.02, abs(old_pos) * strength))
         new_pos = old_pos - (1.0 if old_pos > 0 else -1.0) * step
         self.sponge.opinion_vectors[topic] = new_pos
         if topic in self.sponge.belief_meta:
-            self.sponge.belief_meta[topic].confidence *= 1.0 - AGM_CONTRACTION_RATIO / 2.0
+            meta = self.sponge.belief_meta[topic]
+            meta.confidence = max(0.0, meta.confidence - step * 0.5)
+            meta.uncertainty = min(1.0, max(meta.uncertainty, 1.0 - meta.confidence))
         self.sponge.record_shift(
-            description=f"AGM contraction on {topic} (ESS {ess.score:.2f})",
+            description=f"LLM-guided contraction on {topic}",
             magnitude=step,
         )
         self._log_event(
@@ -479,77 +1006,198 @@ class SonalityAgent:
                 "old_pos": round(old_pos, 4),
                 "new_pos": round(new_pos, 4),
                 "delta": round(step, 4),
-                "ess_score": ess.score,
+                "evidence_strength": round(strength, 4),
             }
         )
 
-    def _ess_reliable_for_updates(self, ess: ESSResult) -> bool:
-        """Return whether ESS payload quality is sufficient for memory updates.
+    # Reasoning types the LLM classifies as non-substantive (no personality updates).
+    _NO_UPDATE_REASONING: Final = frozenset(
+        {
+            ReasoningType.NO_ARGUMENT,
+            ReasoningType.SOCIAL_PRESSURE,
+            ReasoningType.EMOTIONAL_APPEAL,
+            ReasoningType.DEBUNKED_CLAIM,
+        }
+    )
 
-        Coercions on non-critical fields are tolerated, but missing/exception
-        fallbacks and coercions on core decision fields stay blocked. Coercion-
-        tagged low-confidence scores also require extra margin before updates.
+    @staticmethod
+    def _ess_reliable(ess: ESSResult) -> bool:
+        return ess.default_severity not in {"missing", "exception"} and not any(
+            f in CRITICAL_ESS_DEFAULT_FIELDS for f in ess.defaulted_fields
+        )
+
+    def _ess_allows_update(
+        self,
+        ess: ESSResult,
+        *,
+        update_kind: str,
+        require_topics: bool = False,
+    ) -> bool:
+        """Return whether ESS permits a personality update path.
+
+        Reasoning types in _NO_UPDATE_REASONING are always blocked.
+        For all other types a minimum score gate of MIN_ESS_FOR_EMPIRICAL_UPDATE
+        applies. Use _ess_allows_insight_update for paths where logical coherence
+        justifies updates even at low ESS scores.
         """
-        if ess.default_severity in {"missing", "exception"}:
+        if require_topics and not ess.topics:
             return False
-        if (
-            ess.default_severity == "coercion"
-            and ess.score < config.ESS_THRESHOLD + COERCION_UPDATE_MARGIN
-        ):
-            return False
-        return not any(field in CRITICAL_ESS_DEFAULT_FIELDS for field in ess.defaulted_fields)
-
-    def _update_opinions(self, ess: ESSResult) -> None:
-        """Stage delayed opinion updates when evidence clears ESS quality gates.
-
-        Opinion vectors are never updated directly here; all deltas pass through
-        staged cooling commits to avoid reactive single-turn flips.
-        """
-        if ess.score <= config.ESS_THRESHOLD or not ess.topics:
-            return
-        if not self._ess_reliable_for_updates(ess):
+        if ess.reasoning_type in self._NO_UPDATE_REASONING:
             log.info(
-                "Skipping opinion update due to ESS fallback defaults (severity=%s fields=%s)",
+                "Skipping %s: reasoning_type=%s is non-substantive", update_kind, ess.reasoning_type
+            )
+            return False
+        if ess.score < MIN_ESS_FOR_EMPIRICAL_UPDATE:
+            log.info(
+                "Skipping %s: score=%.3f below min %.2f (type=%s)",
+                update_kind,
+                ess.score,
+                MIN_ESS_FOR_EMPIRICAL_UPDATE,
+                ess.reasoning_type,
+            )
+            return False
+        if not self._ess_reliable(ess):
+            log.info(
+                "Skipping %s due to ESS fallback defaults (severity=%s fields=%s)",
+                update_kind,
                 ess.default_severity,
                 ess.defaulted_fields,
             )
-            return
-        direction = ess.opinion_direction.sign
-        if direction == 0.0:
-            return
+            return False
+        return True
 
-        magnitude = compute_magnitude(ess, self.sponge)
+    def _ess_allows_insight_update(self, ess: ESSResult) -> bool:
+        """Like _ess_allows_update but with a lower threshold for logical arguments.
 
-        provenance = f"ESS {ess.score:.2f}: {ess.summary[:60]}"
-        for topic in ess.topics:
-            if self._should_contract_before_revision(topic, direction, ess):
-                self._apply_agm_contraction(topic, ess)
-            old_pos = self.sponge.opinion_vectors.get(topic, 0.0)
-            conf = (
-                self.sponge.belief_meta[topic].confidence
-                if topic in self.sponge.belief_meta
-                else 0.0
+        Principled reasoning shapes personality even below the empirical evidence
+        threshold, but a floor of MIN_ESS_FOR_LOGICAL_INSIGHT still applies to
+        prevent one-liner fallacies embedded in manipulative messages from
+        qualifying as insight-worthy logical arguments.
+        """
+        if ess.reasoning_type in self._NO_UPDATE_REASONING:
+            return False
+        min_score = (
+            MIN_ESS_FOR_LOGICAL_INSIGHT
+            if ess.reasoning_type in _SCORE_EXEMPT_REASONING
+            else MIN_ESS_FOR_EMPIRICAL_UPDATE
+        )
+        if ess.score < min_score:
+            log.info(
+                "Skipping insight: score=%.3f below min %.2f (type=%s)",
+                ess.score,
+                min_score,
+                ess.reasoning_type,
             )
-            if old_pos * direction < 0:
-                conf += abs(old_pos)
-            effective_mag = magnitude / (conf + 1.0)
-            due = self.sponge.stage_opinion_update(
+            return False
+        if not self._ess_reliable(ess):
+            log.info(
+                "Skipping insight due to ESS fallback defaults (severity=%s fields=%s)",
+                ess.default_severity,
+                ess.defaulted_fields,
+            )
+            return False
+        return True
+
+    def _stage_topic_opinion_update(
+        self,
+        *,
+        topic: str,
+        direction: float,
+        magnitude: float,
+        provenance: str,
+        episode_uid: str = "",
+        new_uncertainty: float = -1.0,
+    ) -> None:
+        """Stage one topic update and emit a consistent audit event."""
+        if magnitude <= 0.0:
+            return
+        due = self.sponge.stage_opinion_update(
+            topic=topic,
+            direction=direction,
+            magnitude=magnitude,
+            cooling_period=config.OPINION_COOLING_PERIOD,
+            provenance=provenance,
+            new_uncertainty=new_uncertainty,
+        )
+        event: dict[str, object] = {
+            "event": "opinion_staged",
+            "interaction": self.sponge.interaction_count,
+            "topic": topic,
+            "signed_magnitude": direction * magnitude,
+            "due_interaction": due,
+            "staged_total": len(self.sponge.staged_opinion_updates),
+        }
+        if episode_uid:
+            event["provenance_episode"] = episode_uid
+        self._log_event(event)
+
+    async def _update_opinions_with_provenance(
+        self,
+        user_message: str,
+        agent_response: str,
+        ess: ESSResult,
+        episode_uid: str,
+    ) -> None:
+        """Use LLM-based evidence assessment with episode provenance links."""
+        if not self._ess_allows_update(
+            ess, update_kind="provenance opinion update", require_topics=True
+        ):
+            return
+        # Use only the user's message so the LLM assesses the USER's claim, not
+        # the agent's rebuttal. The agent's response may debunk the claim but that
+        # doesn't mean the agent has a negative belief about the domain itself.
+        content = f"User: {user_message}\nESS summary: {ess.summary}\nESS score: {ess.score:.2f}"
+        fallback_direction = ess.opinion_direction.sign
+
+        for topic in ess.topics:
+            try:
+                update = await assess_belief_evidence(
+                    topic=topic,
+                    episode_uid=episode_uid,
+                    episode_content=content,
+                    ess_score=ess.score,
+                    reasoning_type=str(ess.reasoning_type),
+                    source_reliability=str(ess.source_reliability),
+                    sponge=self.sponge,
+                    graph=self._graph,
+                )
+            except Exception:
+                log.exception("Belief provenance assessment failed for %s", topic)
+                continue
+
+            direction = update.direction if abs(update.direction) > 1e-6 else fallback_direction
+            if abs(direction) < 1e-6:
+                continue
+            if update.contraction_action is ContractionAction.CONTRACT:
+                self._apply_llm_contraction(topic, update.evidence_strength)
+
+            old_pos = self.sponge.opinion_vectors.get(topic, 0.0)
+            meta = self.sponge.belief_meta.get(topic)
+            confidence = (meta.confidence if meta else 0.0) + (
+                abs(old_pos) if old_pos * direction < 0 else 0.0
+            )
+            raw_mag = max(0.0, min(1.0, update.evidence_strength)) / (confidence + 1.0)
+            effective_mag = min(raw_mag, MAX_SINGLE_UPDATE_MAGNITUDE)
+            log.debug(
+                "Belief magnitude %s: raw=%.3f effective=%.3f (type=%s)",
+                topic,
+                raw_mag,
+                effective_mag,
+                ess.reasoning_type,
+            )
+            self._stage_topic_opinion_update(
                 topic=topic,
                 direction=direction,
                 magnitude=effective_mag,
-                cooling_period=config.OPINION_COOLING_PERIOD,
-                provenance=provenance,
+                provenance=f"{update.reasoning[:120]} (ep={episode_uid[:8]})",
+                episode_uid=episode_uid,
+                new_uncertainty=update.new_uncertainty,
             )
-            self._log_event(
-                {
-                    "event": "opinion_staged",
-                    "interaction": self.sponge.interaction_count,
-                    "topic": topic,
-                    "signed_magnitude": direction * effective_mag,
-                    "due_interaction": due,
-                    "staged_total": len(self.sponge.staged_opinion_updates),
-                }
-            )
+            if update.update_magnitude is UpdateMagnitude.MAJOR:
+                self.sponge.record_shift(
+                    description=f"Belief update: {topic} ({update.reasoning[:60]})",
+                    magnitude=abs(direction * effective_mag),
+                )
 
     def _extract_insight(self, user_message: str, agent_response: str, ess: ESSResult) -> None:
         """Extract personality insight per interaction, consolidated during reflection.
@@ -557,18 +1205,10 @@ class SonalityAgent:
         Avoids lossy per-interaction full snapshot rewrites (ABBEL 2025: belief
         bottleneck). Snapshot only changes during reflection (Park et al. 2023).
         """
-        if ess.score <= config.ESS_THRESHOLD:
-            return
-        if not self._ess_reliable_for_updates(ess):
-            log.info(
-                "Skipping insight extraction due to ESS fallback defaults (severity=%s fields=%s)",
-                ess.default_severity,
-                ess.defaulted_fields,
-            )
+        if not self._ess_allows_insight_update(ess):
             return
         try:
             insight = extract_insight(
-                self.client,
                 ess,
                 user_message,
                 agent_response,
@@ -578,7 +1218,7 @@ class SonalityAgent:
                 return
             self.sponge.pending_insights.append(insight)
             self.sponge.version += 1
-            magnitude = compute_magnitude(ess, self.sponge)
+            magnitude = max(0.01, ess.score * max(ess.novelty, 0.1))
             self.sponge.record_shift(
                 description=f"ESS {ess.score:.2f}: {insight[:80]}",
                 magnitude=magnitude,
@@ -631,32 +1271,77 @@ class SonalityAgent:
             f"Staged beliefs: {staged_line}"
         )
 
+    # Minimum interactions required before event-driven reflection is allowed.
+    # Prevents aggressive early reflection on fresh agents with few interactions.
+    _MIN_WINDOW_FOR_EVENT_DRIVEN: int = 5
+
     def _reflection_gate(self) -> ReflectionGate:
         """Determine whether reflection should run for this interaction."""
         window_interactions = self.sponge.interaction_count - self.sponge.last_reflection_at
-        if window_interactions < config.REFLECTION_EVERY // 2:
-            return ReflectionGate(
-                trigger=ReflectionTrigger.SKIP,
-                trigger_label="skip",
-                window_interactions=window_interactions,
-            )
-
-        periodic = window_interactions >= config.REFLECTION_EVERY
         recent_mag = sum(
             shift.magnitude
             for shift in self.sponge.recent_shifts
             if shift.interaction > self.sponge.last_reflection_at
         )
-        if periodic:
+
+        # Hard minimum window: never reflect before 5 interactions have accumulated.
+        if window_interactions < self._MIN_WINDOW_FOR_EVENT_DRIVEN:
+            return ReflectionGate(
+                trigger=ReflectionTrigger.SKIP,
+                trigger_label=f"skip (window={window_interactions} < min={self._MIN_WINDOW_FOR_EVENT_DRIVEN})",
+                window_interactions=window_interactions,
+            )
+
+        prompt = REFLECTION_GATE_PROMPT.format(
+            interaction_count=self.sponge.interaction_count,
+            window_interactions=window_interactions,
+            target_cadence=config.REFLECTION_EVERY,
+            pending_insights=len(self.sponge.pending_insights),
+            staged_updates=len(self.sponge.staged_opinion_updates),
+            recent_shift_magnitude=f"{recent_mag:.3f}",
+            disagreement_rate=f"{self.sponge.behavioral_signature.disagreement_rate:.2f}",
+            belief_count=len(self.sponge.belief_meta),
+        )
+        # At-cadence periodic reflection is not gated by the LLM — it always fires.
+        # The LLM gate only decides whether to fire *early* (event-driven) before cadence.
+        if window_interactions >= config.REFLECTION_EVERY:
+            log.info(
+                "Periodic reflection: window=%d >= cadence=%d",
+                window_interactions,
+                config.REFLECTION_EVERY,
+            )
             return ReflectionGate(
                 trigger=ReflectionTrigger.PERIODIC,
                 trigger_label="periodic",
                 window_interactions=window_interactions,
             )
-        if recent_mag > config.REFLECTION_SHIFT_THRESHOLD:
+
+        # Below cadence: consult LLM for event-driven early reflection.
+        result = llm_call(
+            prompt=prompt,
+            response_model=ReflectionGateResponse,
+            fallback=ReflectionGateResponse(trigger=ReflectionGateDecision.SKIP),
+        )
+        if not result.success:
+            return ReflectionGate(
+                trigger=ReflectionTrigger.SKIP,
+                trigger_label="skip (invalid gate payload)",
+                window_interactions=window_interactions,
+            )
+        trigger_name = result.value.trigger
+        if trigger_name is ReflectionGateDecision.PERIODIC:
+            return ReflectionGate(
+                trigger=ReflectionTrigger.PERIODIC,
+                trigger_label="periodic",
+                window_interactions=window_interactions,
+            )
+        if trigger_name is ReflectionGateDecision.EVENT_DRIVEN:
+            reason = (
+                result.value.reasoning[:80] if result.value.reasoning else f"mag={recent_mag:.3f}"
+            )
             return ReflectionGate(
                 trigger=ReflectionTrigger.EVENT_DRIVEN,
-                trigger_label=f"event-driven (mag={recent_mag:.3f})",
+                trigger_label=f"event-driven ({reason})",
                 window_interactions=window_interactions,
             )
         return ReflectionGate(
@@ -665,9 +1350,9 @@ class SonalityAgent:
             window_interactions=window_interactions,
         )
 
-    def _reflection_beliefs_text(self) -> str:
-        """Render sorted current belief state for reflection prompts."""
-        return (
+    def _reflection_prompt(self, trigger_label: str, recent_episodes: list[str]) -> str:
+        """Assemble reflection prompt from current belief/shift/insight state."""
+        beliefs_text = (
             "\n".join(
                 f"- {topic}: {self.sponge.opinion_vectors.get(topic, 0):+.2f} "
                 f"(conf={meta.confidence:.2f}, ev={meta.evidence_count}, "
@@ -679,59 +1364,59 @@ class SonalityAgent:
             )
             or "No beliefs formed yet."
         )
-
-    def _reflection_shifts_text(self) -> str:
-        """Render recent shift history for reflection prompts."""
-        return (
+        shifts_text = (
             "\n".join(
                 f"- #{shift.interaction} (mag {shift.magnitude:.3f}): {shift.description}"
                 for shift in self.sponge.recent_shifts
             )
             or "No recent shifts."
         )
-
-    def _reflection_maturity_instruction(self) -> str:
-        """Build maturity-aware instruction fragment for reflection prompts."""
-        interaction_count = self.sponge.interaction_count
-        belief_count = len(self.sponge.opinion_vectors)
-        if interaction_count < 20:
-            return "Focus on accurately recording what you've learned so far."
-        if interaction_count < 50 or belief_count < 10:
-            return "Look for patterns across your experiences and beliefs."
-        return (
-            "Your worldview is developing coherence. Based on your accumulated "
-            "beliefs, you may have nascent views on topics you haven't explicitly "
-            "discussed. If a pattern suggests a new position, articulate it tentatively."
-        )
-
-    def _reflection_prompt(self, trigger_label: str, recent_episodes: list[str]) -> str:
-        """Assemble reflection prompt from current belief/shift/insight state."""
-        insights_text = (
-            "\n".join(f"- {insight}" for insight in self.sponge.pending_insights) or "None."
-        )
+        n = self.sponge.interaction_count
+        b = len(self.sponge.opinion_vectors)
+        if n < 20:
+            maturity = "Focus on accurately recording what you've learned so far."
+        elif n < 50 or b < 10:
+            maturity = "Look for patterns across your experiences and beliefs."
+        else:
+            maturity = (
+                "Your worldview is developing coherence. Based on your accumulated "
+                "beliefs, you may have nascent views on topics you haven't explicitly "
+                "discussed. If a pattern suggests a new position, articulate it tentatively."
+            )
         return REFLECTION_PROMPT.format(
             trigger=trigger_label,
             current_snapshot=self.sponge.snapshot,
             structured_traits=self._build_structured_traits(),
-            current_beliefs=self._reflection_beliefs_text(),
-            pending_insights=insights_text,
+            current_beliefs=beliefs_text,
+            pending_insights="\n".join(f"- {i}" for i in self.sponge.pending_insights) or "None.",
             episode_count=len(recent_episodes),
             episode_summaries="\n".join(f"- {episode}" for episode in recent_episodes),
-            recent_shifts=self._reflection_shifts_text(),
-            maturity_instruction=self._reflection_maturity_instruction(),
+            recent_shifts=shifts_text,
+            maturity_instruction=maturity,
             max_tokens=config.SPONGE_MAX_TOKENS,
         )
 
-    def _apply_reflection_snapshot(self, pre_snapshot: str, reflected_snapshot: str) -> None:
+    def _apply_reflection_snapshot(
+        self, pre_snapshot: str, reflected_snapshot: str, opinions_before: dict[str, float]
+    ) -> None:
         """Validate and commit reflected snapshot text when it changed."""
         if not reflected_snapshot or reflected_snapshot == pre_snapshot:
             log.info("Reflection produced no changes")
             return
-        if not validate_snapshot(pre_snapshot, reflected_snapshot):
-            log.warning("Reflection output rejected by validation")
+        # Guard against unbounded snapshot growth: ~4 chars/token.
+        char_limit = config.SPONGE_MAX_TOKENS * 4
+        if len(reflected_snapshot) > char_limit:
+            reflected_snapshot = reflected_snapshot[:char_limit]
+            log.debug(
+                "Reflection snapshot truncated to %d chars (limit %d)", char_limit, char_limit
+            )
+        if len(reflected_snapshot) < 30:
+            log.warning(
+                "Reflection output rejected: snapshot too short (%d chars)", len(reflected_snapshot)
+            )
             return
 
-        self._check_belief_preservation(reflected_snapshot)
+        self._check_belief_preservation(opinions_before)
         self.sponge.snapshot = reflected_snapshot
         self.sponge.version += 1
         self.sponge.record_shift(
@@ -772,6 +1457,80 @@ class SonalityAgent:
             window_interactions=window_interactions,
         )
 
+    def _decay_beliefs_with_llm(self) -> list[str]:
+        """Use LLM staleness assessment to retain, decay, or forget beliefs."""
+        dropped: list[str] = []
+        stale_candidates = [
+            (
+                self.sponge.interaction_count - meta.last_reinforced,
+                topic,
+                meta,
+                self.sponge.opinion_vectors.get(topic, 0.0),
+            )
+            for topic, meta in self.sponge.belief_meta.items()
+            if self.sponge.interaction_count - meta.last_reinforced >= 5
+        ]
+        for gap, topic, meta, position in sorted(stale_candidates, reverse=True)[:10]:
+            prompt = BELIEF_DECAY_PROMPT.format(
+                topic=topic,
+                position=f"{position:+.2f}",
+                confidence=f"{meta.confidence:.2f}",
+                evidence_count=meta.evidence_count,
+                gap=gap,
+                total_interactions=self.sponge.interaction_count,
+            )
+            result = llm_call(
+                prompt=prompt,
+                response_model=BeliefDecayResponse,
+                fallback=BeliefDecayResponse(
+                    action=BeliefDecayAction.RETAIN, new_confidence=meta.confidence
+                ),
+            )
+            if not result.success:
+                continue
+            response = result.value
+            action = response.action
+            if action is BeliefDecayAction.FORGET:
+                dropped.append(topic)
+                del self.sponge.belief_meta[topic]
+                self.sponge.opinion_vectors.pop(topic, None)
+                continue
+            if action is BeliefDecayAction.DECAY:
+                meta.confidence = max(0.0, min(1.0, response.new_confidence))
+                meta.uncertainty = 1.0 - meta.confidence
+        return dropped
+
+    def _detect_entrenched_beliefs_llm(self, min_updates: int = 4) -> list[str]:
+        """Use LLM to detect echo-chamber style belief entrenchment (cached per turn)."""
+        if self._last_entrenched_interaction == self.sponge.interaction_count:
+            return list(self._last_entrenched)
+        entrenched: list[str] = []
+        candidates = [
+            (topic, meta, self.sponge.opinion_vectors.get(topic, 0.0))
+            for topic, meta in self.sponge.belief_meta.items()
+            if len(meta.recent_updates) >= min_updates
+        ]
+        for topic, meta, position in candidates[:10]:
+            prompt = ENTRENCHMENT_DETECTION_PROMPT.format(
+                topic=topic,
+                position=f"{position:+.2f}",
+                recent_updates=", ".join(f"{update:+.3f}" for update in meta.recent_updates[-8:]),
+                supporting_count=len(meta.supporting_episode_uids),
+                contradicting_count=len(meta.contradicting_episode_uids),
+            )
+            result = llm_call(
+                prompt=prompt,
+                response_model=EntrenchmentDetectionResponse,
+                fallback=EntrenchmentDetectionResponse(),
+            )
+            if not result.success:
+                continue
+            if result.value.entrenchment_status is EntrenchmentStatus.ENTRENCHED:
+                entrenched.append(topic)
+        self._last_entrenched = entrenched
+        self._last_entrenched_interaction = self.sponge.interaction_count
+        return entrenched
+
     def _maybe_reflect(self) -> None:
         """Run periodic or event-driven reflection and snapshot consolidation.
 
@@ -788,23 +1547,100 @@ class SonalityAgent:
             gate.trigger_label,
         )
 
-        dropped = self.sponge.decay_beliefs(decay_rate=config.BELIEF_DECAY_RATE)
+        # Dump full DB state before reflection for manual inspection
+        self._dump_snapshot(f"PRE_REFLECTION #{self.sponge.interaction_count}")
+
+        opinions_before_reflection = dict(self.sponge.opinion_vectors)
+        dropped = self._decay_beliefs_with_llm()
         if dropped:
             log.info("Decay removed %d stale beliefs: %s", len(dropped), dropped)
 
-        entrenched = self.sponge.detect_entrenched_beliefs()
+        entrenched = self._detect_entrenched_beliefs_llm()
         if entrenched:
             log.warning("Entrenched beliefs detected: %s", entrenched)
         contradictions = self._collect_unresolved_contradictions()
         if contradictions:
             log.info("Contradiction backlog (%d): %s", len(contradictions), contradictions[:3])
 
-        recent_episodes = self.episodes.retrieve(
-            "recent personality development and opinion changes",
-            n_results=min(config.REFLECTION_EVERY, 10),
-            min_relevance=0.0,
-            where={"interaction": {"$gte": self.sponge.last_reflection_at}},
-        )
+        try:
+            pending = self._run_async(
+                self._graph.list_unconsolidated_segments(
+                    exclude_segment_id=self._boundary_detector.current_segment_id,
+                    limit=4,
+                )
+            )
+            for segment_id in pending:
+                self._try_consolidate_segment(segment_id, trigger="reflection")
+        except Exception:
+            log.exception("Consolidation failed during reflection")
+
+        # Knowledge consolidation: review for contradictions and merges in pgvector
+        try:
+            result = self._run_async(
+                consolidate_knowledge(pg_pool=self._db.pg_pool, snapshot=self.sponge.snapshot)
+            )
+            if result and (result.contradictions or result.merges):
+                log.info(
+                    "Knowledge consolidation: %d contradictions, %d merges, %d opinion candidates",
+                    len(result.contradictions),
+                    len(result.merges),
+                    len(result.opinion_candidates),
+                )
+        except Exception:
+            log.exception("Knowledge consolidation failed")
+
+        # Prune low-confidence stale knowledge entries from pgvector
+        try:
+            self._run_async(prune_stale_knowledge(self._db.pg_pool))
+        except Exception:
+            log.debug("Knowledge pruning failed", exc_info=True)
+
+        # Forgetting: assess and archive low-importance episodes
+        try:
+            self._run_async(self._run_forgetting_cycle())
+        except Exception:
+            log.exception("Forgetting cycle failed during reflection")
+
+        # Sync Neo4j Belief nodes with sponge — prune graph beliefs for
+        # topics that were decayed/forgotten from opinion_vectors
+        try:
+            active = set(self.sponge.opinion_vectors.keys())
+            self._run_async(self._graph.sync_beliefs(active))
+        except Exception:
+            log.debug("Belief graph sync failed", exc_info=True)
+
+        # Prune Topic nodes with zero active episode connections
+        try:
+            self._run_async(self._graph.prune_orphan_topics())
+        except Exception:
+            log.debug("Topic pruning failed", exc_info=True)
+
+        # Consistency check: clean derivative orphans across Neo4j and pgvector
+        try:
+            orphans: list[str] = self._run_async(self._dual_store.verify_consistency())
+            if orphans:
+                log.warning("Consistency check cleaned %d orphan derivatives", len(orphans))
+        except Exception:
+            log.exception("Consistency verification failed during reflection")
+
+        # LLM-based health assessment
+        try:
+            health = assess_health(self.sponge)
+            if health.concerns:
+                log.warning("Health assessment concerns: %s", health.concerns)
+        except Exception:
+            log.debug("LLM health assessment failed", exc_info=True)
+
+        try:
+            recent_episodes = (
+                self._run_async(
+                    self._graph.list_recent_episode_context(min(config.REFLECTION_EVERY, 10))
+                )
+                or []
+            )
+        except Exception:
+            log.debug("Reflection episode retrieval failed", exc_info=True)
+            recent_episodes = []
         if not recent_episodes:
             log.info("No episodes for reflection, skipping")
             self.sponge.last_reflection_at = self.sponge.interaction_count
@@ -814,21 +1650,15 @@ class SonalityAgent:
 
         try:
             pre_snapshot = self.sponge.snapshot
-            if self.client is None:
-                completion = chat_completion(
-                    model=self.ess_model,
-                    max_tokens=700,
-                    messages=({"role": "user", "content": prompt},),
-                )
-                reflected_snapshot = completion.text.strip()
-            else:
-                response = self.client.messages.create(
-                    model=self.ess_model,
-                    max_tokens=700,
-                    messages=[{"role": "user", "content": prompt}],
-                )
-                reflected_snapshot = _extract_text_block(response).strip()
-            self._apply_reflection_snapshot(pre_snapshot, reflected_snapshot)
+            completion = chat_completion(
+                model=self.ess_model,
+                max_tokens=config.FAST_LLM_MAX_TOKENS,
+                messages=({"role": "user", "content": prompt},),
+            )
+            reflected_snapshot = completion.text.strip()
+            self._apply_reflection_snapshot(
+                pre_snapshot, reflected_snapshot, opinions_before_reflection
+            )
             self._finalize_reflection_cycle(
                 dropped=dropped,
                 entrenched=entrenched,
@@ -838,30 +1668,92 @@ class SonalityAgent:
         except Exception:
             log.exception("Reflection cycle failed")
 
-    def _check_belief_preservation(self, new_snapshot: str) -> None:
-        """Warn if reflection dropped high-confidence beliefs from the snapshot.
+        # Dump full DB state after reflection for delta analysis
+        self._dump_snapshot(f"POST_REFLECTION #{self.sponge.interaction_count}")
 
-        Constitutional AI Character Training (Nov 2025): losing a trait from
-        the narrative = losing it from behavior. PERSIST (2025): monitor for
-        personality erosion across reflections.
+    def _dump_snapshot(self, label: str) -> None:
+        """Dump full DB state to debug log for manual inspection."""
+        try:
+
+            async def _snap() -> None:
+                async with self._db.neo4j_driver.session(
+                    database=config.NEO4J_DATABASE
+                ) as neo_sess:
+                    await dump_memory_snapshot(
+                        self._db.pg_pool,
+                        neo_sess,
+                        self.sponge,
+                        label=label,
+                    )
+
+            self._run_async(_snap())
+        except Exception:
+            log.debug("Memory snapshot (%s) failed", label, exc_info=True)
+
+    def _try_consolidate_segment(self, segment_id: str, *, trigger: str) -> None:
+        """Attempt one segment consolidation and log failures per trigger path."""
+        if not segment_id:
+            return
+        try:
+            summary_uid = self._run_async(self._consolidation.maybe_consolidate_segment(segment_id))
+            if summary_uid:
+                log.info(
+                    "Consolidated segment %s -> summary %s (%s)",
+                    segment_id,
+                    summary_uid[:8],
+                    trigger,
+                )
+        except Exception:
+            log.exception("Segment consolidation failed (%s, segment=%s)", trigger, segment_id)
+
+    async def _run_forgetting_cycle(self) -> None:
+        """Assess old episodes for potential archival during reflection."""
+        candidates = await self._graph.get_forgetting_candidates(limit=20)
+
+        if len(candidates) < 5:
+            return
+
+        forgetting_result = await self._forgetting.assess_and_forget(
+            candidates, snapshot_excerpt=self.sponge.snapshot[:300]
+        )
+        if forgetting_result.archived > 0:
+            log.info(
+                "Forgetting: assessed=%d, kept=%d, archived=%d",
+                forgetting_result.total_assessed,
+                forgetting_result.kept,
+                forgetting_result.archived,
+            )
+
+    def _check_belief_preservation(self, opinions_before: dict[str, float]) -> None:
+        """Warn if reflection dropped high-magnitude beliefs from opinion_vectors.
+
+        Checks actual vector entries, not snapshot text.  Snapshot is a narrative
+        and will not mention every tracked topic verbatim.  The real danger is a
+        belief being evicted from opinion_vectors entirely, which is what we watch.
         """
-        strong = [t for t, m in self.sponge.belief_meta.items() if m.confidence > 0.5]
-        missing = [t for t in strong if t.lower().replace("_", " ") not in new_snapshot.lower()]
-        if missing:
-            log.warning("HEALTH: reflection dropped strong beliefs: %s", missing)
+        strong_before = {t for t, v in opinions_before.items() if abs(v) > 0}
+        strong_after = set(self.sponge.opinion_vectors)
+        dropped = strong_before - strong_after
+        if dropped:
+            log.warning("HEALTH: reflection evicted strong beliefs from vectors: %s", dropped)
 
     def _log_interaction_summary(self, ess: ESSResult) -> None:
         """Structured per-interaction summary for monitoring personality evolution."""
         parts = [
             f"[#{self.sponge.interaction_count}]",
             f"ESS={ess.score:.2f}({ess.reasoning_type})",
+            f"dir={ess.opinion_direction}",
+            f"src={ess.source_reliability}",
+            f"novelty={ess.novelty:.2f}",
             f"staged={len(self.sponge.staged_opinion_updates)}",
             f"pending={len(self.sponge.pending_insights)}",
         ]
         if ess.topics:
-            parts.append(f"topics={ess.topics}")
-        if ess.score > config.ESS_THRESHOLD:
-            parts.append(f"v{self.sponge.version}")
+            parts.append(f"topics={list(ess.topics)}")
+        parts.append(f"beliefs={len(self.sponge.opinion_vectors)}")
+        parts.append(f"v{self.sponge.version}")
+        if ess.default_severity != "none":
+            parts.append(f"ESS_FALLBACK={ess.default_severity}({list(ess.defaulted_fields)})")
 
         for topic in ess.topics:
             meta = self.sponge.belief_meta.get(topic)
@@ -932,18 +1824,8 @@ class SonalityAgent:
         disagreement = self.sponge.behavioral_signature.disagreement_rate
 
         warnings: list[str] = []
-        if self.sponge.interaction_count >= 20 and disagreement < 0.15:
-            warnings.append("possible_sycophancy")
-        if words and len(words) < 15:
-            warnings.append("snapshot_too_short")
-        if words and unique_ratio < 0.4:
-            warnings.append("snapshot_bland")
-        if self.sponge.interaction_count >= 40 and len(self.sponge.opinion_vectors) < 3:
-            warnings.append("low_belief_growth")
-        if high_conf_ratio > 0.8 and len(metas) >= 5:
-            warnings.append("ossified_beliefs")
 
-        entrenched = self.sponge.detect_entrenched_beliefs()
+        entrenched = self._detect_entrenched_beliefs_llm()
         if entrenched:
             warnings.append("entrenched_beliefs")
         contradictions = self._collect_unresolved_contradictions()
@@ -993,7 +1875,7 @@ class SonalityAgent:
         window_interactions: int = 1,
     ) -> None:
         """Log structured reflection metrics for longitudinal analysis."""
-        old_words = set((self.previous_snapshot or "").lower().split())
+        old_words = set(self.previous_snapshot.lower().split())
         new_words = set(self.sponge.snapshot.lower().split())
         union = old_words | new_words
         jaccard = len(old_words & new_words) / len(union) if union else 1.0
