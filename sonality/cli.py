@@ -12,25 +12,6 @@ from .agent import SonalityAgent
 from .memory import SpongeState
 
 
-def _print_status(agent: SonalityAgent) -> None:
-    """Print a one-line post-turn summary of ESS and sponge state."""
-    ess = agent.last_ess
-    score_str = f"{ess.score:.2f}" if ess else "n/a"
-    topics = ", ".join(ess.topics) if ess and ess.topics else ""
-    updated = bool(ess and (ess.topics or ess.opinion_direction.sign != 0.0))
-    parts = [
-        f"ESS {score_str}",
-        f"v{agent.sponge.version}",
-        f"#{agent.sponge.interaction_count}",
-        f"staged={len(agent.sponge.staged_opinion_updates)}",
-    ]
-    if topics:
-        parts.append(topics)
-    if updated:
-        parts.append("\033[33mSPONGE UPDATED\033[0m")
-    print(f"  [{' | '.join(parts)}]")
-
-
 def _show_health(agent: SonalityAgent) -> None:
     """Print human-readable personality health diagnostics."""
     s = agent.sponge
@@ -276,7 +257,21 @@ def main() -> None:
             print(f"\033[31mError: {exc}\033[0m")
             continue
         print(f"Sonality: {response}")
-        _print_status(agent)
+        ess = agent.last_ess
+        score_str = f"{ess.score:.2f}" if ess else "n/a"
+        topics = ", ".join(ess.topics) if ess and ess.topics else ""
+        updated = bool(ess and (ess.topics or ess.opinion_direction.sign != 0.0))
+        parts = [
+            f"ESS {score_str}",
+            f"v{agent.sponge.version}",
+            f"#{agent.sponge.interaction_count}",
+            f"staged={len(agent.sponge.staged_opinion_updates)}",
+        ]
+        if topics:
+            parts.append(topics)
+        if updated:
+            parts.append("\033[33mSPONGE UPDATED\033[0m")
+        print(f"  [{' | '.join(parts)}]")
 
 
 if __name__ == "__main__":
