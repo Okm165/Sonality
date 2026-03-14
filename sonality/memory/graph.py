@@ -290,12 +290,12 @@ class MemoryGraph:
         )
 
     async def get_episodes(self, uids: list[str]) -> list[EpisodeNode]:
-        """Fetch multiple episodes by UID."""
+        """Fetch multiple non-archived episodes by UID."""
         if not uids:
             return []
         async with self._driver.session(database=_DB) as session:
             result = await session.run(
-                "MATCH (e:Episode) WHERE e.uid IN $uids RETURN e",
+                "MATCH (e:Episode) WHERE e.uid IN $uids AND NOT e.archived RETURN e",
                 uids=uids,
             )
             records = [record async for record in result]
@@ -354,13 +354,15 @@ class MemoryGraph:
         before: int = 2,
         after: int = 2,
     ) -> list[EpisodeNode]:
-        """Retrieve temporally adjacent episodes for context expansion."""
+        """Retrieve temporally adjacent non-archived episodes for context expansion."""
         async with self._driver.session(database=_DB) as session:
             result = await session.run(
                 f"""
                 MATCH (focal:Episode {{uid: $uid}})
                 OPTIONAL MATCH path_before = (prev:Episode)-[:TEMPORAL_NEXT*1..{before}]->(focal)
+                  WHERE NOT prev.archived
                 OPTIONAL MATCH path_after = (focal)-[:TEMPORAL_NEXT*1..{after}]->(next:Episode)
+                  WHERE NOT next.archived
                 WITH focal,
                      COLLECT(DISTINCT prev) AS befores,
                      COLLECT(DISTINCT next) AS afters
