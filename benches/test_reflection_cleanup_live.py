@@ -11,11 +11,11 @@ Tests:
 
 Run: uv run pytest benches/test_reflection_cleanup_live.py -v -s -m live
 """
+
 from __future__ import annotations
 
 import logging
 import tempfile
-import time
 from pathlib import Path
 from typing import Any
 from unittest import mock
@@ -43,13 +43,8 @@ REFLECTION_CADENCE = 5
 def _reset_dbs() -> None:
     with psycopg.connect(config.POSTGRES_URL) as conn:
         conn.autocommit = True
-        conn.execute(
-            "TRUNCATE derivatives, semantic_features, stm_state "
-            "RESTART IDENTITY CASCADE"
-        )
-    driver = GraphDatabase.driver(
-        config.NEO4J_URL, auth=(config.NEO4J_USER, config.NEO4J_PASSWORD)
-    )
+        conn.execute("TRUNCATE derivatives, semantic_features, stm_state RESTART IDENTITY CASCADE")
+    driver = GraphDatabase.driver(config.NEO4J_URL, auth=(config.NEO4J_USER, config.NEO4J_PASSWORD))
     try:
         with driver.session() as s:
             s.run("MATCH (n) DETACH DELETE n")
@@ -58,9 +53,7 @@ def _reset_dbs() -> None:
 
 
 def _neo4j_count(label: str) -> int:
-    driver = GraphDatabase.driver(
-        config.NEO4J_URL, auth=(config.NEO4J_USER, config.NEO4J_PASSWORD)
-    )
+    driver = GraphDatabase.driver(config.NEO4J_URL, auth=(config.NEO4J_USER, config.NEO4J_PASSWORD))
     try:
         with driver.session() as s:
             return s.run(f"MATCH (n:{label}) RETURN count(n) AS cnt").single()["cnt"]
@@ -69,14 +62,10 @@ def _neo4j_count(label: str) -> int:
 
 
 def _neo4j_rel_count(rel_type: str) -> int:
-    driver = GraphDatabase.driver(
-        config.NEO4J_URL, auth=(config.NEO4J_USER, config.NEO4J_PASSWORD)
-    )
+    driver = GraphDatabase.driver(config.NEO4J_URL, auth=(config.NEO4J_USER, config.NEO4J_PASSWORD))
     try:
         with driver.session() as s:
-            return s.run(
-                f"MATCH ()-[r:{rel_type}]->() RETURN count(r) AS cnt"
-            ).single()["cnt"]
+            return s.run(f"MATCH ()-[r:{rel_type}]->() RETURN count(r) AS cnt").single()["cnt"]
     finally:
         driver.close()
 
@@ -103,6 +92,7 @@ class _AgentContext:
         for p in self._patches:
             p.start()
         from sonality.agent import SonalityAgent
+
         self.agent = SonalityAgent()
         return self.agent
 
@@ -124,9 +114,7 @@ def _snapshot(label: str) -> dict[str, Any]:
         "contradicts": _neo4j_rel_count("CONTRADICTS_BELIEF"),
         "derivatives_pg": _pg_count("derivatives"),
         "semantic_features": _pg_count("semantic_features"),
-        "knowledge_features": _pg_count(
-            "semantic_features", "category = 'knowledge'"
-        ),
+        "knowledge_features": _pg_count("semantic_features", "category = 'knowledge'"),
     }
     print(f"\n  [{label}] {snap}")
     log.info("BENCH_SNAPSHOT %s: %s", label, snap)
@@ -136,6 +124,7 @@ def _snapshot(label: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # R1: Belief Graph Sync
 # ---------------------------------------------------------------------------
+
 
 class TestBeliefGraphSync:
     """After reflection decays beliefs, the corresponding Neo4j Belief nodes
@@ -175,14 +164,14 @@ class TestBeliefGraphSync:
             print(f"  Topics: {topics_pre} -> {topics_post}")
 
             assert beliefs_post <= beliefs_pre, (
-                f"Belief count should not grow after reflection "
-                f"({beliefs_pre} -> {beliefs_post})"
+                f"Belief count should not grow after reflection ({beliefs_pre} -> {beliefs_post})"
             )
 
 
 # ---------------------------------------------------------------------------
 # R2: Topic Pruning
 # ---------------------------------------------------------------------------
+
 
 class TestTopicPruning:
     """After episodes are archived/forgotten, orphan Topic nodes with
@@ -214,13 +203,16 @@ class TestTopicPruning:
 
             log.info(
                 "R2 topic pruning: %d -> %d (delta=%d)",
-                topics_pre, topics_post, topics_pre - topics_post,
+                topics_pre,
+                topics_post,
+                topics_pre - topics_post,
             )
 
 
 # ---------------------------------------------------------------------------
 # R3: Knowledge Pruning
 # ---------------------------------------------------------------------------
+
 
 class TestKnowledgePruning:
     """Low-confidence stale knowledge entries should be removed from pgvector
@@ -256,9 +248,7 @@ class TestKnowledgePruning:
             for i in range(REFLECTION_CADENCE + 2):
                 agent.respond(f"What is {i * 3} plus {i * 7}?")
 
-            post_knowledge = _pg_count(
-                "semantic_features", "category = 'knowledge'"
-            )
+            post_knowledge = _pg_count("semantic_features", "category = 'knowledge'")
             stale_remaining = _pg_count(
                 "semantic_features",
                 "category = 'knowledge' AND confidence < 0.2 "
@@ -269,14 +259,14 @@ class TestKnowledgePruning:
             print(f"  Stale remaining: {stale_remaining}")
 
             assert stale_remaining == 0, (
-                f"Expected 0 stale low-confidence entries after reflection, "
-                f"got {stale_remaining}"
+                f"Expected 0 stale low-confidence entries after reflection, got {stale_remaining}"
             )
 
 
 # ---------------------------------------------------------------------------
 # R4: Derivative Consistency
 # ---------------------------------------------------------------------------
+
 
 class TestDerivativeConsistency:
     """After forgetting archives episodes, Neo4j and pgvector derivative
@@ -316,6 +306,7 @@ class TestDerivativeConsistency:
 # R5: Full Reflection Cycle
 # ---------------------------------------------------------------------------
 
+
 class TestFullReflectionCycle:
     """End-to-end test: substantive data, social pressure, then enough
     filler to trigger reflection. Verify all cleanup operations fire."""
@@ -346,12 +337,14 @@ class TestFullReflectionCycle:
 
             post = _snapshot("post-reflection")
 
-            print(f"\n  === Full Reflection Cycle Results ===")
+            print("\n  === Full Reflection Cycle Results ===")
             print(f"  Beliefs: {pre['beliefs']} -> {post['beliefs']}")
             print(f"  Topics: {pre['topics']} -> {post['topics']}")
             print(f"  Knowledge: {pre['knowledge_features']} -> {post['knowledge_features']}")
             print(f"  Supports: {pre['supports']} -> {post['supports']}")
-            print(f"  Derivatives sync: neo4j={post['derivatives_neo4j']} pg={post['derivatives_pg']}")
+            print(
+                f"  Derivatives sync: neo4j={post['derivatives_neo4j']} pg={post['derivatives_pg']}"
+            )
 
             assert post["derivatives_neo4j"] == post["derivatives_pg"], (
                 "Derivative mismatch after full reflection cycle"
@@ -369,6 +362,7 @@ class TestFullReflectionCycle:
 # ---------------------------------------------------------------------------
 # R6: Knowledge Consolidation
 # ---------------------------------------------------------------------------
+
 
 class TestKnowledgeConsolidation:
     """Feed contradicting facts across multiple turns. Reflection should
@@ -392,7 +386,7 @@ class TestKnowledgeConsolidation:
                 "for H2O occurs at precisely 100°C (373.15 K)."
             )
 
-            pre = _snapshot("pre-consolidation")
+            _snapshot("pre-consolidation")
             boiling_pre = _pg_count(
                 "semantic_features",
                 "category = 'knowledge' AND "
@@ -404,7 +398,7 @@ class TestKnowledgeConsolidation:
             for i in range(REFLECTION_CADENCE + 2):
                 agent.respond(f"What is {i} squared?")
 
-            post = _snapshot("post-consolidation")
+            _snapshot("post-consolidation")
             boiling_post = _pg_count(
                 "semantic_features",
                 "category = 'knowledge' AND "
@@ -415,7 +409,8 @@ class TestKnowledgeConsolidation:
 
             log.info(
                 "R6 consolidation: boiling entries %d -> %d",
-                boiling_pre, boiling_post,
+                boiling_pre,
+                boiling_post,
             )
             assert boiling_post <= boiling_pre, (
                 f"Knowledge consolidation should not increase duplicate entries "

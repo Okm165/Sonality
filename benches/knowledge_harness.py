@@ -49,21 +49,21 @@ class KnowledgeBatteryReport:
 # Database access
 # ---------------------------------------------------------------------------
 
+
 def fetch_knowledge_features(limit: int = 200) -> list[StoredKnowledgeFact]:
     """Synchronously query all knowledge-category semantic features."""
-    with psycopg.connect(config.POSTGRES_URL) as conn:
-        with conn.cursor(row_factory=dict_row) as cur:
-            cur.execute(
-                """
+    with psycopg.connect(config.POSTGRES_URL) as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            """
                 SELECT uid, tag, feature_name, value, confidence, episode_citations
                 FROM semantic_features
                 WHERE category = 'knowledge'
                 ORDER BY confidence DESC, updated_at DESC
                 LIMIT %s
                 """,
-                (limit,),
-            )
-            rows = cur.fetchall()
+            (limit,),
+        )
+        rows = cur.fetchall()
     return [
         StoredKnowledgeFact(
             uid=str(row["uid"]),
@@ -81,9 +81,7 @@ def clear_knowledge_features() -> int:
     """Remove all knowledge-category features (for test isolation). Returns count deleted."""
     with psycopg.connect(config.POSTGRES_URL) as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                "DELETE FROM semantic_features WHERE category = 'knowledge'"
-            )
+            cur.execute("DELETE FROM semantic_features WHERE category = 'knowledge'")
             deleted = cur.rowcount
         conn.commit()
     return deleted
@@ -122,13 +120,15 @@ def seed_knowledge_features(facts: list[dict[str, object]]) -> int:
 # Matching and counting
 # ---------------------------------------------------------------------------
 
+
 def count_matching_facts(
     stored: list[StoredKnowledgeFact],
     expected_phrases: list[str],
 ) -> int:
     """Count how many expected phrases appear in stored knowledge values."""
     return sum(
-        1 for phrase in expected_phrases
+        1
+        for phrase in expected_phrases
         if any(phrase.lower() in fact.value.lower() for fact in stored)
     )
 
@@ -252,6 +252,7 @@ def extraction_recall(
 # Reporting
 # ---------------------------------------------------------------------------
 
+
 def print_knowledge_report(report: KnowledgeBatteryReport) -> None:
     """Print a formatted single-battery knowledge report."""
     print(f"\n{'=' * 70}")
@@ -282,7 +283,9 @@ def print_knowledge_summary(reports: list[KnowledgeBatteryReport]) -> None:
     print(f"  {'Battery':<40s} {'Pass%':>6s} {'Score':>6s} {'Known':>6s}")
     print(f"  {'-' * 40} {'-' * 6} {'-' * 6} {'-' * 6}")
     for r in reports:
-        print(f"  {r.battery_name:<40s} {r.pass_rate:>5.0%} {r.score:>6.2f} {r.knowledge_stored:>6d}")
+        print(
+            f"  {r.battery_name:<40s} {r.pass_rate:>5.0%} {r.score:>6.2f} {r.knowledge_stored:>6d}"
+        )
     overall = sum(r.score for r in reports) / len(reports) if reports else 0.0
     print(f"  {'-' * 40} {'-' * 6} {'-' * 6} {'-' * 6}")
     print(f"  {'OVERALL':<40s} {'':>6s} {overall:>6.2f}")

@@ -377,7 +377,13 @@ K7_SCENARIO: list[ScenarioStep] = [
         label="k7_recall_probe",
         expect=StepExpectation(
             max_ess=0.20,
-            response_should_mention_all=["Voyager", "1977", "interstellar", "Golden Record", "plutonium"],
+            response_should_mention_all=[
+                "Voyager",
+                "1977",
+                "interstellar",
+                "Golden Record",
+                "plutonium",
+            ],
         ),
     ),
 ]
@@ -920,8 +926,7 @@ K16_SCENARIO: list[ScenarioStep] = [
     ),
     ScenarioStep(
         message=(
-            "What specific numbers can you cite about the capacity of different "
-            "anode materials?"
+            "What specific numbers can you cite about the capacity of different anode materials?"
         ),
         label="k16_specifics_probe",
         expect=StepExpectation(

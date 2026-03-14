@@ -132,6 +132,7 @@ def _build_reflection_scenario(
 # R1: Belief Preservation Through Reflection
 # ---------------------------------------------------------------------------
 
+
 class TestReflectionBeliefPreservation:
     """Opinions established via strong evidence should survive a reflection
     cycle without significant drift.
@@ -152,16 +153,22 @@ class TestReflectionBeliefPreservation:
                 },
                 belief_meta={
                     "exercise": BeliefMeta(
-                        confidence=0.6, evidence_count=3,
-                        last_reinforced=3, provenance="empirical",
+                        confidence=0.6,
+                        evidence_count=3,
+                        last_reinforced=3,
+                        provenance="empirical",
                     ),
                     "climate_change": BeliefMeta(
-                        confidence=0.5, evidence_count=2,
-                        last_reinforced=3, provenance="empirical",
+                        confidence=0.5,
+                        evidence_count=2,
+                        last_reinforced=3,
+                        provenance="empirical",
                     ),
                     "sleep": BeliefMeta(
-                        confidence=0.5, evidence_count=2,
-                        last_reinforced=3, provenance="empirical",
+                        confidence=0.5,
+                        evidence_count=2,
+                        last_reinforced=3,
+                        provenance="empirical",
                     ),
                 },
                 interaction_count=5,
@@ -197,7 +204,7 @@ class TestReflectionBeliefPreservation:
             surviving = sum(1 for t in seeded_topics if t in final_opinions)
             survival_rate = surviving / len(seeded_topics)
 
-            score = (retention_rate * 0.5 + survival_rate * 0.5)
+            score = retention_rate * 0.5 + survival_rate * 0.5
             report = BatteryReport(
                 battery_name="R1: Belief Preservation Through Reflection",
                 steps_total=len(results),
@@ -206,9 +213,7 @@ class TestReflectionBeliefPreservation:
                 details={
                     "topics_mentioned_post_reflect": f"{topics_mentioned_post}/{total_post}",
                     "opinion_survival_rate": f"{survival_rate:.2f}",
-                    "final_opinions": {
-                        k: f"{v:+.3f}" for k, v in sorted(final_opinions.items())
-                    },
+                    "final_opinions": {k: f"{v:+.3f}" for k, v in sorted(final_opinions.items())},
                 },
             )
             print_battery_report(report)
@@ -223,6 +228,7 @@ class TestReflectionBeliefPreservation:
 # R2: Reflection Decay Calibration
 # ---------------------------------------------------------------------------
 
+
 class TestReflectionDecayCalibration:
     """Fresh beliefs should survive reflection; stale ones should decay or
     be forgotten.
@@ -233,9 +239,7 @@ class TestReflectionDecayCalibration:
         with tempfile.TemporaryDirectory() as td:
             seed_sponge_state(
                 td,
-                snapshot=(
-                    "I have views on exercise, climate, sleep, phrenology, and alchemy."
-                ),
+                snapshot=("I have views on exercise, climate, sleep, phrenology, and alchemy."),
                 opinion_vectors={
                     "exercise": 0.40,
                     "climate_change": 0.35,
@@ -245,31 +249,43 @@ class TestReflectionDecayCalibration:
                 },
                 belief_meta={
                     "exercise": BeliefMeta(
-                        confidence=0.7, evidence_count=5,
-                        last_reinforced=48, provenance="empirical",
+                        confidence=0.7,
+                        evidence_count=5,
+                        last_reinforced=48,
+                        provenance="empirical",
                     ),
                     "climate_change": BeliefMeta(
-                        confidence=0.6, evidence_count=4,
-                        last_reinforced=47, provenance="empirical",
+                        confidence=0.6,
+                        evidence_count=4,
+                        last_reinforced=47,
+                        provenance="empirical",
                     ),
                     "sleep": BeliefMeta(
-                        confidence=0.6, evidence_count=3,
-                        last_reinforced=45, provenance="empirical",
+                        confidence=0.6,
+                        evidence_count=3,
+                        last_reinforced=45,
+                        provenance="empirical",
                     ),
                     "phrenology": BeliefMeta(
-                        confidence=0.3, evidence_count=1,
-                        last_reinforced=5, provenance="anecdotal",
+                        confidence=0.3,
+                        evidence_count=1,
+                        last_reinforced=5,
+                        provenance="anecdotal",
                     ),
                     "alchemy": BeliefMeta(
-                        confidence=0.2, evidence_count=1,
-                        last_reinforced=2, provenance="anecdotal",
+                        confidence=0.2,
+                        evidence_count=1,
+                        last_reinforced=2,
+                        provenance="anecdotal",
                     ),
                 },
                 interaction_count=50,
             )
 
             scenario = _build_reflection_scenario(
-                reinforce=True, filler_count=6, post_probes=False,
+                reinforce=True,
+                filler_count=6,
+                post_probes=False,
             )
 
             with mock.patch.object(config, "REFLECTION_EVERY", 5):
@@ -289,7 +305,7 @@ class TestReflectionDecayCalibration:
             fresh_rate = fresh_surviving / len(fresh_topics)
             stale_decay_rate = 1.0 - (stale_surviving / len(stale_topics))
 
-            score = (fresh_rate * 0.5 + stale_decay_rate * 0.5)
+            score = fresh_rate * 0.5 + stale_decay_rate * 0.5
 
             report = BatteryReport(
                 battery_name="R2: Reflection Decay Calibration",
@@ -314,6 +330,7 @@ class TestReflectionDecayCalibration:
 # R3: Reflection Idempotency
 # ---------------------------------------------------------------------------
 
+
 class TestReflectionIdempotency:
     """Back-to-back reflections with no new input should produce minimal
     state change.
@@ -322,7 +339,9 @@ class TestReflectionIdempotency:
     @pytest.mark.timeout(3600)
     def test_idempotent_reflection(self) -> None:
         scenario_phase1 = _build_reflection_scenario(
-            reinforce=True, filler_count=6, post_probes=False,
+            reinforce=True,
+            filler_count=6,
+            post_probes=False,
         )
         scenario_phase2: list[ScenarioStep] = [
             ScenarioStep(

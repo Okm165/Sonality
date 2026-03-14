@@ -305,7 +305,7 @@ class TestMemoryLeakageLive:
             )
 
             related = next(step for step in results if step.label == "ml_related_reentry")
-            recall_tokens = forbidden + ("protein", "plant", "vegan", "legume", "bean")
+            recall_tokens = (*forbidden, "protein", "plant", "vegan", "legume", "bean")
             assert any(token in related.response_text.lower() for token in recall_tokens), (
                 "Related-domain reentry should recall prior preference context"
             )

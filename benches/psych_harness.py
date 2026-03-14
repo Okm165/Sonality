@@ -16,7 +16,7 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from sonality.memory.sponge import BeliefMeta, BehavioralSignature, SpongeState
+from sonality.memory.sponge import BehavioralSignature, BeliefMeta, SpongeState
 
 from .scenario_runner import StepResult
 
@@ -58,6 +58,7 @@ def seed_sponge_state(
 # ---------------------------------------------------------------------------
 # Aggregate metrics
 # ---------------------------------------------------------------------------
+
 
 @dataclass(frozen=True, slots=True)
 class FlipMetrics:
@@ -129,13 +130,15 @@ def compute_belief_drift(
             continue
 
         step_drifts = [abs(values[i] - values[i - 1]) for i in range(1, len(values))]
-        metrics.append(BeliefDriftMetrics(
-            topic=topic,
-            initial_value=values[0],
-            final_value=values[-1],
-            total_drift=abs(values[-1] - values[0]),
-            max_single_step_drift=max(step_drifts) if step_drifts else 0.0,
-        ))
+        metrics.append(
+            BeliefDriftMetrics(
+                topic=topic,
+                initial_value=values[0],
+                final_value=values[-1],
+                total_drift=abs(values[-1] - values[0]),
+                max_single_step_drift=max(step_drifts) if step_drifts else 0.0,
+            )
+        )
     return metrics
 
 
@@ -158,6 +161,7 @@ def check_evidence_hierarchy(
     Compares update magnitude (version bump + staged-update delta) between
     two groups of labeled steps.
     """
+
     def _update_signal(r: StepResult) -> float:
         if r.sponge_version_after > r.sponge_version_before:
             return 1.0
@@ -197,6 +201,7 @@ def check_evidence_hierarchy(
 # B6: Ambivalence / Splitting metrics
 # ---------------------------------------------------------------------------
 
+
 @dataclass(frozen=True, slots=True)
 class AmbivalenceScore:
     """Whether a probe response references both pros and cons of a topic."""
@@ -223,18 +228,21 @@ def compute_ambivalence(
         text = r.response_text.lower()
         has_pro = any(kw in text for kw in pro_keywords)
         has_con = any(kw in text for kw in con_keywords)
-        scores.append(AmbivalenceScore(
-            label=label,
-            mentions_pro=has_pro,
-            mentions_con=has_con,
-            is_nuanced=has_pro and has_con,
-        ))
+        scores.append(
+            AmbivalenceScore(
+                label=label,
+                mentions_pro=has_pro,
+                mentions_con=has_con,
+                is_nuanced=has_pro and has_con,
+            )
+        )
     return scores
 
 
 # ---------------------------------------------------------------------------
 # B7: Persona persistence metrics
 # ---------------------------------------------------------------------------
+
 
 @dataclass(frozen=True, slots=True)
 class PersistenceScore:
@@ -269,18 +277,21 @@ def compute_persistence(
             for t in shared_topics
             if abs(r_pre.opinion_vectors[t]) > 0.05
         )
-        scores.append(PersistenceScore(
-            pre_label=pre_l,
-            post_label=post_l,
-            keyword_overlap=overlap,
-            opinion_preserved=not sign_flipped,
-        ))
+        scores.append(
+            PersistenceScore(
+                pre_label=pre_l,
+                post_label=post_l,
+                keyword_overlap=overlap,
+                opinion_preserved=not sign_flipped,
+            )
+        )
     return scores
 
 
 # ---------------------------------------------------------------------------
 # Reflection delta metrics
 # ---------------------------------------------------------------------------
+
 
 @dataclass(frozen=True, slots=True)
 class ReflectionDelta:
@@ -372,5 +383,3 @@ def print_step_results(results: list[StepResult], title: str) -> None:
     rate = (passed / total * 100) if total else 0
     print(f"\n  Result: {passed}/{total} passed ({rate:.0f}%)")
     print(f"{'=' * 70}")
-
-

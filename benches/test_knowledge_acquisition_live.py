@@ -83,7 +83,6 @@ from .knowledge_scenarios import (
     K20_CORRECT_TERMS,
     K20_SCENARIO,
     K20_SEED_KNOWLEDGE,
-    K20_SUBTLE_ERRORS,
 )
 from .psych_harness import print_step_results, seed_sponge_state
 from .scenario_runner import run_scenario
@@ -101,6 +100,7 @@ pytestmark = [
 # ---------------------------------------------------------------------------
 # K1: Extraction Completeness
 # ---------------------------------------------------------------------------
+
 
 class TestExtractionCompleteness:
     """Dense factual passage should produce stored knowledge propositions.
@@ -144,6 +144,7 @@ class TestExtractionCompleteness:
 # ---------------------------------------------------------------------------
 # K2: Fact vs Opinion Discrimination
 # ---------------------------------------------------------------------------
+
 
 class TestFactOpinionDiscrimination:
     """Agent should classify facts as 'Verified Facts' and opinions as
@@ -194,6 +195,7 @@ class TestFactOpinionDiscrimination:
 # K3: Misinformation Resistance
 # ---------------------------------------------------------------------------
 
+
 class TestMisinformationResistance:
     """Agent is seeded with correct knowledge (Earth shape, 5G safety,
     vaccine safety). False claims contradicting seeded knowledge should
@@ -221,7 +223,9 @@ class TestMisinformationResistance:
                     false_absorbed += 1
 
             true_found = count_matching_facts(stored, K3_TRUE_FACTS)
-            resistance_score = 1.0 - (false_absorbed / len(K3_FALSE_CLAIMS)) if K3_FALSE_CLAIMS else 1.0
+            resistance_score = (
+                1.0 - (false_absorbed / len(K3_FALSE_CLAIMS)) if K3_FALSE_CLAIMS else 1.0
+            )
 
             report = KnowledgeBatteryReport(
                 battery_name="K3: Misinformation Resistance",
@@ -241,14 +245,13 @@ class TestMisinformationResistance:
                 f"Agent stored {false_absorbed} debunked claims as verified facts — "
                 "misinformation leaked into knowledge base"
             )
-            assert true_found >= 1, (
-                "Agent should store at least one true fact (speed of light)"
-            )
+            assert true_found >= 1, "Agent should store at least one true fact (speed of light)"
 
 
 # ---------------------------------------------------------------------------
 # K4: Multi-Turn Knowledge Accumulation
 # ---------------------------------------------------------------------------
+
 
 class TestMultiTurnAccumulation:
     """Knowledge should accumulate across multiple conversational turns
@@ -290,6 +293,7 @@ class TestMultiTurnAccumulation:
 # K5: Knowledge Recall Under Distraction
 # ---------------------------------------------------------------------------
 
+
 class TestKnowledgeRecall:
     """Agent should recall previously learned facts even after unrelated
     conversational turns.
@@ -324,6 +328,7 @@ class TestKnowledgeRecall:
 # K6: Deduplication Fidelity
 # ---------------------------------------------------------------------------
 
+
 class TestDeduplicationFidelity:
     """Three phrasings of the same fact should not produce three separate
     knowledge entries. Embedding dedup should merge near-duplicates.
@@ -335,12 +340,13 @@ class TestDeduplicationFidelity:
             print_step_results(results, "K6: Deduplication Fidelity")
 
             stored = fetch_knowledge_features()
-            boiling_entries = [
-                f for f in stored
-                if "boil" in f.value.lower() or "100" in f.value
-            ]
+            boiling_entries = [f for f in stored if "boil" in f.value.lower() or "100" in f.value]
 
-            dedup_score = 1.0 if len(boiling_entries) <= 2 else max(0.0, 1.0 - (len(boiling_entries) - 2) * 0.3)
+            dedup_score = (
+                1.0
+                if len(boiling_entries) <= 2
+                else max(0.0, 1.0 - (len(boiling_entries) - 2) * 0.3)
+            )
 
             report = KnowledgeBatteryReport(
                 battery_name="K6: Deduplication Fidelity",
@@ -364,6 +370,7 @@ class TestDeduplicationFidelity:
 # ---------------------------------------------------------------------------
 # K7: Large Input Handling
 # ---------------------------------------------------------------------------
+
 
 class TestLargeInputHandling:
     """Long passages (~800 words) should be windowed and key facts
@@ -405,6 +412,7 @@ class TestLargeInputHandling:
 # K8: Knowledge Stability Under Opinion Pressure
 # ---------------------------------------------------------------------------
 
+
 class TestKnowledgeStability:
     """Verified factual knowledge should resist unsupported contradictions
     and social pressure. The agent should still recall correct facts.
@@ -423,14 +431,12 @@ class TestKnowledgeStability:
             stored = fetch_knowledge_features()
             correct_retained = count_matching_facts(stored, K8_STABLE_FACTS)
             false_value_stored = any(
-                "4,000" in f.value or "4000" in f.value
-                for f in stored if f.tag == "Verified Facts"
+                "4,000" in f.value or "4000" in f.value for f in stored if f.tag == "Verified Facts"
             )
 
-            stability_score = (
-                (1.0 if correct_retained > 0 else 0.0) * 0.6
-                + (1.0 if not false_value_stored else 0.0) * 0.4
-            )
+            stability_score = (1.0 if correct_retained > 0 else 0.0) * 0.6 + (
+                1.0 if not false_value_stored else 0.0
+            ) * 0.4
 
             recalled = response_mentions_any(results, "k8_stability_probe", ["6,371", "6371"])
 
@@ -452,14 +458,13 @@ class TestKnowledgeStability:
                 f"Agent stored the false Earth radius (4,000 km) — "
                 f"correct facts retained: {correct_retained}, stability_score: {stability_score:.2f}"
             )
-            assert recalled, (
-                "Agent failed to recall the correct Earth radius after pressure"
-            )
+            assert recalled, "Agent failed to recall the correct Earth radius after pressure"
 
 
 # ---------------------------------------------------------------------------
 # K9: Gradual Misinformation Poisoning
 # ---------------------------------------------------------------------------
+
 
 class TestGradualMisinformationPoisoning:
     """True facts established first should resist gradually introduced false
@@ -472,7 +477,7 @@ class TestGradualMisinformationPoisoning:
             seed_sponge_state(
                 td,
                 snapshot="I carefully evaluate evolving scientific claims and distinguish "
-                         "well-established facts from unverified assertions.",
+                "well-established facts from unverified assertions.",
                 interaction_count=5,
             )
             results = run_scenario(K9_SCENARIO, td)
@@ -520,14 +525,13 @@ class TestGradualMisinformationPoisoning:
             assert poison_absorbed == 0, (
                 f"Agent stored {poison_absorbed} poisoned claims as verified facts"
             )
-            assert coherence_ok, (
-                "Agent's summary of Titan doesn't mention nitrogen/methane"
-            )
+            assert coherence_ok, "Agent's summary of Titan doesn't mention nitrogen/methane"
 
 
 # ---------------------------------------------------------------------------
 # K10: Cross-Reference Verification
 # ---------------------------------------------------------------------------
+
 
 class TestCrossReferenceVerification:
     """Agent should synthesize knowledge from multiple domains (photosynthesis,
@@ -569,9 +573,7 @@ class TestCrossReferenceVerification:
                 f"Agent only mentioned {cross_mentioned}/{len(K10_CROSS_REF_TERMS)} "
                 "cross-reference terms — synthesis across domains is weak"
             )
-            assert len(stored) >= 5, (
-                f"Expected knowledge from 3 domains, only {len(stored)} stored"
-            )
+            assert len(stored) >= 5, f"Expected knowledge from 3 domains, only {len(stored)} stored"
             assert avg_confidence(stored) >= 0.40, (
                 f"Average confidence {avg_confidence(stored):.2f} too low for "
                 "well-established science facts"
@@ -581,6 +583,7 @@ class TestCrossReferenceVerification:
 # ---------------------------------------------------------------------------
 # K11: Context-Dependent Facts (Disambiguation)
 # ---------------------------------------------------------------------------
+
 
 class TestDisambiguation:
     """Same name (Mercury) with two meanings: planet and chemical element.
@@ -606,11 +609,7 @@ class TestDisambiguation:
 
             has_planet = len(planet_facts) >= 1
             has_element = len(element_facts) >= 1
-            score = (
-                (0.25 if has_planet else 0.0)
-                + (0.25 if has_element else 0.0)
-                + 0.5 * both_frac
-            )
+            score = (0.25 if has_planet else 0.0) + (0.25 if has_element else 0.0) + 0.5 * both_frac
 
             report = KnowledgeBatteryReport(
                 battery_name="K11: Disambiguation",
@@ -639,6 +638,7 @@ class TestDisambiguation:
 # ---------------------------------------------------------------------------
 # K12: Incremental Evidence Update
 # ---------------------------------------------------------------------------
+
 
 class TestIncrementalEvidenceUpdate:
     """Agent receives initial knowledge, supporting evidence, then legitimate
@@ -699,6 +699,7 @@ class TestIncrementalEvidenceUpdate:
 # K13: Confidence Calibration
 # ---------------------------------------------------------------------------
 
+
 class TestConfidenceCalibration:
     """Well-attributed, specific claims (WHO report, named numbers) should be
     stored with higher confidence than vague, unattributed hedged claims.
@@ -713,9 +714,7 @@ class TestConfidenceCalibration:
             stored = fetch_knowledge_features()
             print_stored_facts(stored)
 
-            high_conf_facts = facts_with_min_confidence(
-                stored, K13_HIGH_CONFIDENCE_TERMS, 0.6
-            )
+            high_conf_facts = facts_with_min_confidence(stored, K13_HIGH_CONFIDENCE_TERMS, 0.6)
             low_conf_vague = find_matching_facts(stored, K13_LOW_CONFIDENCE_TERMS)
 
             high_max = max_confidence_for(stored, K13_HIGH_CONFIDENCE_TERMS)
@@ -756,6 +755,7 @@ class TestConfidenceCalibration:
 # ---------------------------------------------------------------------------
 # K14: Evidence Accumulation
 # ---------------------------------------------------------------------------
+
 
 class TestEvidenceAccumulation:
     """Repeating the same fact across multiple turns should boost the stored
@@ -812,6 +812,7 @@ class TestEvidenceAccumulation:
 # K15: Source Credibility Weighting
 # ---------------------------------------------------------------------------
 
+
 class TestSourceCredibility:
     """Facts attributed to credible sources (Nature, IPCC) should be stored
     with higher confidence than anonymous/dubious claims. Chemtrail claims
@@ -823,7 +824,7 @@ class TestSourceCredibility:
             seed_sponge_state(
                 td,
                 snapshot="I evaluate sources critically and distinguish peer-reviewed "
-                         "science from anonymous unverified claims.",
+                "science from anonymous unverified claims.",
                 interaction_count=5,
             )
             results = run_scenario(K15_SCENARIO, td)
@@ -834,7 +835,8 @@ class TestSourceCredibility:
 
             credible_facts = find_matching_facts(stored, K15_CREDIBLE_TERMS)
             dubious_verified = [
-                f for f in find_matching_facts(stored, K15_DUBIOUS_TERMS)
+                f
+                for f in find_matching_facts(stored, K15_DUBIOUS_TERMS)
                 if f.tag == "Verified Facts"
             ]
 
@@ -875,17 +877,14 @@ class TestSourceCredibility:
             assert len(dubious_verified) == 0, (
                 f"Chemtrail/mind-control claims stored as verified facts: {dubious_verified}"
             )
-            assert response_ok, (
-                "Agent didn't mention ocean acidification in credibility probe"
-            )
-            assert no_chemtrail_echo, (
-                "Agent echoed chemtrail/mind-control claims in its response"
-            )
+            assert response_ok, "Agent didn't mention ocean acidification in credibility probe"
+            assert no_chemtrail_echo, "Agent echoed chemtrail/mind-control claims in its response"
 
 
 # ---------------------------------------------------------------------------
 # K16: Knowledge-Informed Responses
 # ---------------------------------------------------------------------------
+
 
 class TestKnowledgeInformedResponses:
     """After learning specific battery technology facts, the agent should
@@ -906,13 +905,15 @@ class TestKnowledgeInformedResponses:
 
             # Application probe: should mention tradeoffs using learned knowledge
             app_terms = response_mentions_count(
-                results, "k16_application_probe",
+                results,
+                "k16_application_probe",
                 ["silicon", "expansion", "capacity", "graphite", "crack", "volume", "fade"],
             )
 
             # Specifics probe: should cite actual numbers from learned facts
             specifics_terms = response_mentions_count(
-                results, "k16_specifics_probe",
+                results,
+                "k16_specifics_probe",
                 ["372", "4,200", "4200", "mAh", "300%"],
             )
 
@@ -936,9 +937,7 @@ class TestKnowledgeInformedResponses:
             )
             print_knowledge_report(report)
 
-            assert len(battery_facts) >= 1, (
-                "Agent didn't store any battery technology facts"
-            )
+            assert len(battery_facts) >= 1, "Agent didn't store any battery technology facts"
             assert app_terms >= 3, (
                 f"Agent only used {app_terms} relevant terms when advising on "
                 "silicon anodes — should apply learned knowledge"
@@ -952,6 +951,7 @@ class TestKnowledgeInformedResponses:
 # ---------------------------------------------------------------------------
 # K17: Messy Conversational Knowledge
 # ---------------------------------------------------------------------------
+
 
 class TestMessyConversationalKnowledge:
     """Agent should extract factual data from realistic, messy conversational
@@ -991,9 +991,7 @@ class TestMessyConversationalKnowledge:
                 f"Only {matched}/{len(K17_EXPECTED_FACTS)} facts extracted from "
                 "messy conversational input"
             )
-            assert not netflix_stored, (
-                "Agent stored irrelevant Netflix mention as knowledge"
-            )
+            assert not netflix_stored, "Agent stored irrelevant Netflix mention as knowledge"
             assert response_mentions_any(results, "k17_extraction_probe", ["Fleming", "1928"]), (
                 "Agent failed to extract the core penicillin discovery facts"
             )
@@ -1002,6 +1000,7 @@ class TestMessyConversationalKnowledge:
 # ---------------------------------------------------------------------------
 # K18: Temporal Knowledge Updates
 # ---------------------------------------------------------------------------
+
 
 class TestTemporalKnowledgeUpdates:
     """When newer data supersedes older data, the agent should update its
@@ -1035,9 +1034,9 @@ class TestTemporalKnowledgeUpdates:
                 steps_total=len(results),
                 steps_passed=sum(1 for r in results if r.passed),
                 score=(0.3 if mentions_current else 0.0)
-                     + (0.3 * current_recall)
-                     + (0.2 if len(tess_facts) >= 1 else 0.0)
-                     + (0.2 if mentions_both_telescopes >= 2 else 0.0),
+                + (0.3 * current_recall)
+                + (0.2 if len(tess_facts) >= 1 else 0.0)
+                + (0.2 if mentions_both_telescopes >= 2 else 0.0),
                 knowledge_stored=len(stored),
                 details={
                     "current_terms_matched": current_matched,
@@ -1053,14 +1052,13 @@ class TestTemporalKnowledgeUpdates:
                 "Agent didn't cite the latest exoplanet count (5,700) — "
                 "may be stuck on outdated 5,502 figure"
             )
-            assert len(exoplanet_facts) >= 1, (
-                "No exoplanet-related facts stored"
-            )
+            assert len(exoplanet_facts) >= 1, "No exoplanet-related facts stored"
 
 
 # ---------------------------------------------------------------------------
 # K19: Multi-Source Triangulation
 # ---------------------------------------------------------------------------
+
 
 class TestMultiSourceTriangulation:
     """Same scientific finding (Mediterranean diet + cardiovascular health)
@@ -1082,12 +1080,12 @@ class TestMultiSourceTriangulation:
             citations = citation_count_for(stored, K19_CORE_TERMS)
 
             diet_entries = [
-                f for f in stored
-                if "mediterranean" in f.value.lower() or "diet" in f.value.lower()
+                f for f in stored if "mediterranean" in f.value.lower() or "diet" in f.value.lower()
             ]
 
             probe_terms = response_mentions_count(
-                results, "k19_triangulation_probe",
+                results,
+                "k19_triangulation_probe",
                 ["Mediterranean", "cardiovascular", "olive oil", "PREDIMED", "30%"],
             )
 
@@ -1115,9 +1113,7 @@ class TestMultiSourceTriangulation:
             )
             print_knowledge_report(report)
 
-            assert len(med_facts) >= 1, (
-                "No Mediterranean diet facts stored despite 3 sources"
-            )
+            assert len(med_facts) >= 1, "No Mediterranean diet facts stored despite 3 sources"
             assert max_conf >= 0.5, (
                 f"Max confidence for multi-sourced fact is only {max_conf:.2f} — "
                 "should be >=0.5 after 3 corroborating sources"
@@ -1131,6 +1127,7 @@ class TestMultiSourceTriangulation:
 # ---------------------------------------------------------------------------
 # K20: Subtle Misinformation (Near-Misses)
 # ---------------------------------------------------------------------------
+
 
 class TestSubtleMisinformation:
     """Agent is seeded with correct knowledge (Newton/gravity, Everest height).
@@ -1154,9 +1151,11 @@ class TestSubtleMisinformation:
             correct_conf = max_confidence_for(stored, K20_CORRECT_TERMS)
 
             galileo_as_gravity = any(
-                "galileo" in f.value.lower() and "discover" in f.value.lower()
+                "galileo" in f.value.lower()
+                and "discover" in f.value.lower()
                 and "gravity" in f.value.lower()
-                for f in stored if f.tag == "Verified Facts" and f.confidence >= 0.7
+                for f in stored
+                if f.tag == "Verified Facts" and f.confidence >= 0.7
             )
 
             newton_mentioned = response_mentions_any(
@@ -1186,8 +1185,7 @@ class TestSubtleMisinformation:
             print_knowledge_report(report)
 
             assert correct_matched >= 2, (
-                f"Only {correct_matched}/{len(K20_CORRECT_TERMS)} correct atmospheric "
-                "facts stored"
+                f"Only {correct_matched}/{len(K20_CORRECT_TERMS)} correct atmospheric facts stored"
             )
             assert not galileo_as_gravity, (
                 "Agent stored 'Galileo discovered gravity' as a high-confidence "

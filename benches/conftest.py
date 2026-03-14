@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Generator
 from pathlib import Path
-from typing import Generator, cast
+from typing import cast
 
 import psycopg
 import pytest
@@ -154,7 +155,8 @@ def _clean_neo4j() -> None:
         from neo4j import GraphDatabase
 
         driver = GraphDatabase.driver(
-            config.NEO4J_URL, auth=(config.NEO4J_USER, config.NEO4J_PASSWORD),
+            config.NEO4J_URL,
+            auth=(config.NEO4J_USER, config.NEO4J_PASSWORD),
         )
         with driver.session(database=config.NEO4J_DATABASE) as session:
             result = session.run("MATCH (n) DETACH DELETE n RETURN count(n) AS deleted")

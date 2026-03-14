@@ -25,7 +25,6 @@ from .scenario_contracts import (
     UpdateExpectation,
 )
 
-
 # ── C1: Expert Advisor ─────────────────────────────────────────────────────
 # Realistic scenario: user consults agent about renewable energy policy.
 # Tests: knowledge extraction from dense data → opinion formation →

@@ -206,9 +206,25 @@ MEMORY_STRUCTURE_REQUIRED_PREFIXES: Final[tuple[str, ...]] = (
 )
 MEMORY_STRUCTURE_CONTEXT_ANCHORS: Final[dict[str, tuple[str, ...]]] = {
     "evidence:": (
-        "evidence", "empirical", "data", "support", "reason", "measur", "outcome",
-        "research", "study", "studies", "scientific", "factual", "fact", "verif",
-        "peer", "literature", "analytic", "grounded", "based",
+        "evidence",
+        "empirical",
+        "data",
+        "support",
+        "reason",
+        "measur",
+        "outcome",
+        "research",
+        "study",
+        "studies",
+        "scientific",
+        "factual",
+        "fact",
+        "verif",
+        "peer",
+        "literature",
+        "analytic",
+        "grounded",
+        "based",
     ),
     "governance:": ("governance", "process", "policy", "accountability", "oversight"),
     "safety:": ("safety", "safe", "unsafe", "risk", "harm", "guardrail", "escalat"),
@@ -3547,7 +3563,6 @@ def _extend_pack_risk_rows(
         )
 
 
-
 def _contract_probe_builder(spec: ContractPackSpec) -> ProbeRowBuilder:
     """Build a pack probe-row builder from a contract specification."""
 
@@ -4009,7 +4024,6 @@ def _record_replicate_metric_samples(
     return retry_stats
 
 
-
 def _progress_enabled(progress: BenchProgressLevel, minimum: BenchProgressLevel) -> bool:
     """Return whether configured progress level includes a minimum event level."""
     return _PROGRESS_LEVEL_ORDER[progress] >= _PROGRESS_LEVEL_ORDER[minimum]
@@ -4262,15 +4276,17 @@ def _run_replicates(
             replicates_executed=replicate,
             profile=profile,
         )
-        stop_rule_rows.append({
-            "run_id": run_id,
-            "replicate": replicate,
-            "continue_running": stop_decision.continue_running,
-            "reason": stop_decision.reason,
-            "inconclusive_metrics": list(stop_decision.inconclusive_metrics),
-            "near_boundary_hard_metrics": list(stop_decision.near_boundary_hard_metrics),
-            "ts": datetime.now(UTC).isoformat(),
-        })
+        stop_rule_rows.append(
+            {
+                "run_id": run_id,
+                "replicate": replicate,
+                "continue_running": stop_decision.continue_running,
+                "reason": stop_decision.reason,
+                "inconclusive_metrics": list(stop_decision.inconclusive_metrics),
+                "near_boundary_hard_metrics": list(stop_decision.near_boundary_hard_metrics),
+                "ts": datetime.now(UTC).isoformat(),
+            }
+        )
         elapsed_seconds = (datetime.now(UTC) - replicate_started).total_seconds()
         _emit_progress(
             progress=progress,
@@ -4360,7 +4376,6 @@ def _manifest_run_envelope(packs: tuple[PackDefinition, ...]) -> dict[str, objec
         },
         "rubric_version": RUBRIC_VERSION,
     }
-
 
 
 def _manifest_state_isolation_policy() -> dict[str, object]:

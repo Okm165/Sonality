@@ -17,10 +17,8 @@ from dataclasses import dataclass, field
 
 from .knowledge_harness import (
     avg_confidence,
-    count_matching_facts,
     extraction_recall,
     fetch_knowledge_features,
-    print_stored_facts,
 )
 from .scenario_runner import StepResult
 
@@ -75,11 +73,7 @@ def score_knowledge_acquisition(
         f"Recall: {recall:.0%} of {len(expected_terms)} expected terms",
         f"Avg confidence: {confidence:.2f}",
     ]
-    score = (
-        0.4 * recall
-        + 0.3 * (1.0 if has_knowledge else 0.0)
-        + 0.3 * min(1.0, confidence)
-    )
+    score = 0.4 * recall + 0.3 * (1.0 if has_knowledge else 0.0) + 0.3 * min(1.0, confidence)
     return DimensionScore(name="Knowledge Acquisition", score=score, evidence=evidence)
 
 
@@ -101,10 +95,12 @@ def score_persona_consistency(
     response_lengths = [len(r.response_text) for r in results if r.response_text]
     if response_lengths:
         avg_len = sum(response_lengths) / len(response_lengths)
-        len_variance = sum((l - avg_len) ** 2 for l in response_lengths) / len(response_lengths)
-        cv = (len_variance ** 0.5) / avg_len if avg_len > 0 else 0
+        len_variance = sum((rl - avg_len) ** 2 for rl in response_lengths) / len(response_lengths)
+        cv = (len_variance**0.5) / avg_len if avg_len > 0 else 0
         length_consistent = cv < 1.5
-        evidence.append(f"Response length CV: {cv:.2f} ({'consistent' if length_consistent else 'inconsistent'})")
+        evidence.append(
+            f"Response length CV: {cv:.2f} ({'consistent' if length_consistent else 'inconsistent'})"
+        )
     else:
         length_consistent = True
 
@@ -201,6 +197,7 @@ def score_recall_fidelity(
 # Reporting
 # ---------------------------------------------------------------------------
 
+
 def print_composite_report(report: CompositeReport) -> None:
     """Print a radar-style multi-dimensional report."""
     print(f"\n{'=' * 70}")
@@ -215,5 +212,3 @@ def print_composite_report(report: CompositeReport) -> None:
     for d in report.dimensions.values():
         print(f"  {d.name:<25s} {d.normalized:>6.0%}  {'; '.join(d.evidence[:2])}")
     print(f"{'=' * 70}")
-
-
