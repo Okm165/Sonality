@@ -23,12 +23,6 @@ from .sponge import BeliefMeta, SpongeState
 log = logging.getLogger(__name__)
 
 
-def _append_unique_uid(values: list[str], uid: str) -> None:
-    """Append episode UID once while preserving insertion order."""
-    if uid not in values:
-        values.append(uid)
-
-
 class UpdateMagnitude(StrEnum):
     MAJOR = "MAJOR"
     MINOR = "MINOR"
@@ -147,10 +141,12 @@ async def assess_belief_evidence(
 
     edge_type = EdgeType.SUPPORTS_BELIEF
     if response.direction > 0:
-        _append_unique_uid(meta.supporting_episode_uids, episode_uid)
+        if episode_uid not in meta.supporting_episode_uids:
+            meta.supporting_episode_uids.append(episode_uid)
     else:
         edge_type = EdgeType.CONTRADICTS_BELIEF
-        _append_unique_uid(meta.contradicting_episode_uids, episode_uid)
+        if episode_uid not in meta.contradicting_episode_uids:
+            meta.contradicting_episode_uids.append(episode_uid)
         meta.last_challenged_at = sponge.interaction_count
     # Uncertainty is applied during update_opinion (via staged updates) to keep
     # the Bayesian floor logic in a single place.

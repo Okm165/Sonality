@@ -83,25 +83,26 @@ class DerivativeChunker:
         Returns a list of DerivativeWithEmbedding. On LLM failure, falls back
         to treating the entire text as a single derivative.
         """
-        chunks = self._llm_chunk(text)
-        if not chunks:
-            # Fallback: treat entire text as single chunk
-            chunks = [
-                ChunkItem(
-                    text=text,
-                    key_concept="full_content",
-                    importance=ChunkImportance.MEDIUM,
-                )
-            ]
+        result = llm_call(
+            prompt=CHUNKING_PROMPT.format(text=text),
+            response_model=ChunkingResponse,
+            fallback=ChunkingResponse(chunks=[]),
+        )
+        if result.success:
+            chunks: list[ChunkItem] = result.value.chunks
+        else:
+            log.warning("LLM chunking failed: %s. Using whole text.", result.error)
+            chunks = []
 
-        texts = [c.text for c in chunks]
-        embeddings = self._embedder.embed_documents(texts)
+        if not chunks:
+            chunks = [ChunkItem(text=text, key_concept="full_content")]
+
+        embeddings = self._embedder.embed_documents([c.text for c in chunks])
 
         results: list[DerivativeWithEmbedding] = []
         for i, (chunk, embedding) in enumerate(zip(chunks, embeddings, strict=True)):
-            deriv_uid = f"{episode_uid}_d{i}"
             node = DerivativeNode(
-                uid=deriv_uid,
+                uid=f"{episode_uid}_d{i}",
                 source_episode_uid=episode_uid,
                 text=chunk.text,
                 key_concept=chunk.key_concept,
@@ -111,17 +112,3 @@ class DerivativeChunker:
 
         log.debug("Chunked episode %s into %d derivatives", episode_uid[:8], len(results))
         return results
-
-    def _llm_chunk(self, text: str) -> list[ChunkItem]:
-        """Use LLM to split text into semantic chunks."""
-        prompt = CHUNKING_PROMPT.format(text=text)
-        result = llm_call(
-            prompt=prompt,
-            response_model=ChunkingResponse,
-            fallback=ChunkingResponse(chunks=[]),
-        )
-        if result.success:
-            response = result.value
-            return response.chunks
-        log.warning("LLM chunking failed: %s. Using whole text.", result.error)
-        return []

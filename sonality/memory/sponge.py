@@ -179,9 +179,14 @@ class SpongeState(BaseModel):
         log.debug(
             "BELIEF_TRACE topic=%s | pos=%.3f | conf=%.2f | uncert=%.2f | "
             "ev=%d | support=%d | contra=%d | updates=%s",
-            topic, new, meta.confidence, meta.uncertainty,
-            meta.evidence_count, len(meta.supporting_episode_uids),
-            len(meta.contradicting_episode_uids), meta.recent_updates[-3:],
+            topic,
+            new,
+            meta.confidence,
+            meta.uncertainty,
+            meta.evidence_count,
+            len(meta.supporting_episode_uids),
+            len(meta.contradicting_episode_uids),
+            meta.recent_updates[-3:],
         )
 
     def stage_opinion_update(
@@ -217,7 +222,10 @@ class SpongeState(BaseModel):
         )
         log.debug(
             "STAGED_UPDATE topic=%s | mag=%+.3f | due=%d | prov=%.40s",
-            topic, signed, due, provenance.replace('\n', ' '),
+            topic,
+            signed,
+            due,
+            provenance.replace("\n", " "),
         )
         return due
 
@@ -258,7 +266,8 @@ class SpongeState(BaseModel):
             # Apply the LLM-assessed uncertainty from the most recent staged update.
             # Uses the minimum uncertainty (most confident) among consistent-direction updates.
             valid_uncertainties = [
-                u.new_uncertainty for u in updates
+                u.new_uncertainty
+                for u in updates
                 if u.new_uncertainty >= 0.0
                 and (u.signed_magnitude * net >= 0)  # same direction as net
             ]
@@ -290,22 +299,19 @@ class SpongeState(BaseModel):
         engagement = self.behavioral_signature.topic_engagement
         engagement[topic] = engagement.get(topic, 0) + 1
 
-    def _update_disagreement_rate(self, disagreement_value: float) -> None:
-        """Update running disagreement mean with one observation in [0, 1].
-
-        Assumes `interaction_count` advances monotonically at turn boundaries.
-        """
-        n = self.interaction_count or 1
-        old_rate = self.behavioral_signature.disagreement_rate
-        self.behavioral_signature.disagreement_rate = (old_rate * (n - 1) + disagreement_value) / n
-
     def note_disagreement(self) -> None:
         """Record that the latest interaction structurally disagreed."""
-        self._update_disagreement_rate(1.0)
+        n = self.interaction_count or 1
+        self.behavioral_signature.disagreement_rate = (
+            self.behavioral_signature.disagreement_rate * (n - 1) + 1.0
+        ) / n
 
     def note_agreement(self) -> None:
         """Record that the latest interaction did not structurally disagree."""
-        self._update_disagreement_rate(0.0)
+        n = self.interaction_count or 1
+        self.behavioral_signature.disagreement_rate = (
+            self.behavioral_signature.disagreement_rate * (n - 1)
+        ) / n
 
     def save(self, path: Path, history_dir: Path) -> None:
         """Atomically persist state and archive the previous version.

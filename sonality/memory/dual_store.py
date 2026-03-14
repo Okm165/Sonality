@@ -52,10 +52,6 @@ class DualEpisodeStore:
         self._embedder = embedder
         self._last_episode_uid = ""
 
-    def set_last_episode_uid(self, episode_uid: str) -> None:
-        """Restore prior episode UID for temporal edge continuity."""
-        self._last_episode_uid = episode_uid
-
     async def store(
         self,
         *,
@@ -98,13 +94,20 @@ class DualEpisodeStore:
         log.debug(
             "MEMORY_TRACE episode=%s | user_msg_len=%d | agent_resp_len=%d | "
             "topics=%s | ess=%.3f | segment=%s",
-            episode_uid[:8], len(user_message), len(agent_response),
-            topics[:3], ess_score, segment_id[:8] if segment_id else "none",
+            episode_uid[:8],
+            len(user_message),
+            len(agent_response),
+            topics[:3],
+            ess_score,
+            segment_id[:8] if segment_id else "none",
         )
         for i, d in enumerate(derivatives[:5]):
             log.debug(
                 "MEMORY_TRACE deriv[%d]=%s | concept=%s | text=%.80s...",
-                i, d.node.uid[:8], d.node.key_concept, d.node.text.replace('\n', ' '),
+                i,
+                d.node.uid[:8],
+                d.node.key_concept,
+                d.node.text.replace("\n", " "),
             )
 
         # Phase 2: Neo4j graph writes (ACID transaction)

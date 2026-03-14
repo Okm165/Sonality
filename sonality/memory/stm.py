@@ -86,7 +86,17 @@ class ShortTermMemory:
         """Restore from PostgreSQL persistence."""
         stm = cls(capacity=capacity)
         stm.running_summary = str(data.get("running_summary", ""))
-        stm._buffer.extend(cls._parse_message_buffer(data.get("message_buffer", [])))
+        buffer_data = data.get("message_buffer", [])
+        if isinstance(buffer_data, list):
+            for item in buffer_data:
+                if isinstance(item, dict):
+                    stm._buffer.append(
+                        STMMessage(
+                            role=str(item.get("role", "")),
+                            content=str(item.get("content", "")),
+                            timestamp=str(item.get("timestamp", "")),
+                        )
+                    )
         return stm
 
     async def persist(self, pg_pool: AsyncConnectionPool) -> None:
@@ -124,22 +134,4 @@ class ShortTermMemory:
         except Exception:
             log.exception("Failed to load STM from PostgreSQL; starting fresh")
         return cls()
-
-    @staticmethod
-    def _parse_message_buffer(buffer_data: object) -> list[STMMessage]:
-        """Parse serialized message buffer rows into typed STM messages."""
-        if not isinstance(buffer_data, list):
-            return []
-        parsed: list[STMMessage] = []
-        for item in buffer_data:
-            if not isinstance(item, dict):
-                continue
-            parsed.append(
-                STMMessage(
-                    role=str(item.get("role", "")),
-                    content=str(item.get("content", "")),
-                    timestamp=str(item.get("timestamp", "")),
-                )
-            )
-        return parsed
 
