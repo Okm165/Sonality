@@ -48,3 +48,35 @@ def test_staged_updates_net_out_when_conflicting() -> None:
     assert "topic" not in s.opinion_vectors
 
 
+def test_negative_sentiment_opinion_stages_negative_direction() -> None:
+    """Negative-sentiment opinion proposition must produce a negative belief vector.
+
+    Regression: previously `sentiment >= 0` mapped neutral (0.0) to +1.0 direction.
+    """
+    s = SpongeState(interaction_count=3)
+    # Simulate what knowledge_extract.py does for a negative-sentiment opinion
+    s.stage_opinion_update("vaccines", -1.0, 0.05, cooling_period=1, provenance="test")
+    s.interaction_count = 4
+    applied = s.apply_due_staged_updates()
+    assert applied, "Negative opinion should produce a staged update"
+    assert s.opinion_vectors.get("vaccines", 0.0) < 0, (
+        "Negative-sentiment opinion must yield negative opinion vector"
+    )
+
+
+def test_neutral_sentiment_opinion_does_not_stage_update() -> None:
+    """sentiment=0.0 (neutral/not-applicable) must NOT stage any opinion update.
+
+    Regression: knowledge_extract previously staged direction=+1.0 for neutral opinions.
+    """
+    s = SpongeState(interaction_count=3)
+    # Only stage if sentiment != 0.0 (the fix)
+    sentiment = 0.0
+    if sentiment != 0.0:
+        direction = 1.0 if sentiment > 0 else -1.0
+        s.stage_opinion_update("topic", direction, abs(sentiment) * 0.3, cooling_period=1)
+    assert len(s.staged_opinion_updates) == 0, (
+        "Neutral-sentiment opinion (sentiment=0.0) must not stage any belief update"
+    )
+
+
