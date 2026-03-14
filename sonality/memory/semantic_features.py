@@ -113,29 +113,65 @@ class SemanticIngestionWorker:
 
     def __init__(
         self,
-        pg_pool: AsyncConnectionPool,
+        conninfo: str,
         embedder: ExternalEmbedder,
     ) -> None:
-        self._pg_pool = pg_pool
+        self._conninfo = conninfo
         self._embedder = embedder
+        self._pg_pool: AsyncConnectionPool | None = None
         self._queue: queue.Queue[tuple[str, str]] = queue.Queue()  # (episode_uid, content)
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(target=self._run, name="semantic-ingestion", daemon=True)
         self._stop_event = threading.Event()
 
     def _run_async(self, coro: Coroutine[object, object, _T]) -> _T:
-        """Submit a coroutine to the worker's own dedicated event loop."""
+        """Submit a coroutine to the worker's own dedicated event loop.
+
+        Cancels the underlying asyncio task on timeout to prevent connection
+        pool exhaustion from orphaned coroutines.
+        """
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
-        return future.result(timeout=config.ASYNC_TIMEOUT)
+        try:
+            return future.result(timeout=config.ASYNC_TIMEOUT)
+        except TimeoutError:
+            future.cancel()
+            raise
+
+    async def _open_pool(self) -> None:
+        """Open a dedicated pool on this worker's event loop.
+
+        Each worker gets its own pool so DB coroutines always run on the same
+        event loop that owns the pool — avoiding asyncio cross-loop contention
+        that causes TimeoutErrors when sharing the main agent pool.
+        """
+        from .db import _configure_pgvector  # local import to avoid circular
+
+        self._pg_pool = AsyncConnectionPool(
+            conninfo=self._conninfo,
+            min_size=1,
+            max_size=config.PG_POOL_MAX_SIZE // 2,
+            configure=_configure_pgvector,
+            open=False,
+        )
+        await self._pg_pool.open()
+        await self._pg_pool.wait()
+
+    async def _close_pool(self) -> None:
+        if self._pg_pool is not None:
+            await self._pg_pool.close()
+            self._pg_pool = None
 
     def start(self) -> None:
         """Start the background processing thread and its dedicated event loop."""
         if not self._thread.is_alive():
-            # Spin the dedicated event loop in a separate daemon thread
+            # Spin the dedicated event loop in a separate daemon thread first,
+            # then open the pool on that loop so asyncio primitives are bound
+            # to the correct event loop throughout the worker's lifetime.
             loop_thread = threading.Thread(
                 target=self._loop.run_forever, name="semantic-ingestion-loop", daemon=True
             )
             loop_thread.start()
+            self._run_async(self._open_pool())
             self._thread.start()
         log.info("Semantic ingestion worker started")
 
@@ -144,6 +180,7 @@ class SemanticIngestionWorker:
         self._stop_event.set()
         if self._thread.is_alive():
             self._thread.join(timeout=10.0)
+        self._run_async(self._close_pool())
         self._loop.call_soon_threadsafe(self._loop.stop)
 
     def enqueue(self, episode_uid: str, content: str) -> None:
@@ -267,9 +304,14 @@ class SemanticIngestionWorker:
         )
 
     def _consolidate_features(self, category: str) -> None:
-        """Use LLM to consolidate overlapping semantic features in a category."""
+        """Use LLM to consolidate overlapping semantic features in a category.
+
+        Only runs when the feature set is large enough to warrant an LLM consolidation
+        pass — prevents expensive consolidation calls early in a conversation when
+        duplicate features are unlikely.
+        """
         features = self._run_async(self._load_feature_rows_async(category, limit=40))
-        if len(features) < 2:
+        if len(features) < 8:
             return
         features_text = "\n".join(
             f"- uid={row.uid} | [{row.tag}] {row.feature_name}: {row.value}"
