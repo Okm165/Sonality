@@ -17,8 +17,10 @@ dependencies = [
 dev = [
     "ruff>=0.8.0",
     "pytest>=8.0.0",
+    "pytest-timeout>=2.3.0",
     "mypy>=1.0.0",
     "playwright>=1.58.0",
+    "testcontainers[postgres,neo4j]>=4.0.0",
 ]
 docs = [
     "zensical>=0.0.24",
