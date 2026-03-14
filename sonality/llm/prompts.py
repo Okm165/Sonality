@@ -542,7 +542,7 @@ Output ONLY a JSON object (replace bracket placeholders with actual content from
 type must be: fact, opinion, speculation, or noise.
 confidence: 0.0-1.0 calibrated per Stage 4 rules — source quality determines confidence.
 source_entity: who made the claim (empty string for unattributed claims).
-key_concepts: 1-3 topic labels for embedding and retrieval. For opinion-type propositions, key_concepts[0] must be the concrete subject-matter domain or real-world phenomenon being evaluated (a technology, scientific field, methodology, or object) — NOT the evidential quality, statistical properties, or verification status of the claim itself (e.g., NOT "source details", "sample size", "heterogeneity", "citations").
+key_concepts: 1-3 topic labels for embedding and retrieval. For opinion-type propositions, key_concepts[0] must name the concrete subject-matter domain or real-world phenomenon being evaluated — NOT the evidential properties, verification status, or statistical characteristics of the claim itself. Use the domain being discussed, not how the claim is supported.
 sentiment: opinion stance toward key_concepts[0] — +1.0 = strongly favorable, -1.0 = strongly unfavorable, 0.0 = neutral/not applicable (use 0.0 for facts and speculations)."""
 
 # --- Knowledge Consolidation (Reflection) ---

@@ -97,27 +97,25 @@ User message:
 Agent's current personality snapshot (for novelty assessment only):
 {sponge_snapshot}
 
-Calibration examples (placeholders only — do NOT anchor on specific topics):
-- "Hey, how's it going?" → score: 0.02, type: no_argument
-- "I think [topic] is great" → score: 0.08, type: no_argument (bare assertion)
-- "You're absolutely right to feel that way" → score: 0.03, type: emotional_appeal
-- "Everyone knows X is true" → score: 0.10, type: social_pressure
-- "I'm upset you disagree" → score: 0.05, type: emotional_appeal
-- "My friend said X works well" → score: 0.18, type: anecdotal
-- "[Conspiracy theory or known fabrication]" → score: 0.03, type: debunked_claim (the claimed source/data is fraudulent)
-- "[Retracted study with confirmed fraud] proves Y" → score: 0.03, type: debunked_claim (retracted due to fabrication)
-- "[Unnamed source]" → score: 0.10-0.18, type: anecdotal (vague attribution, not necessarily debunked)
-- "[Topic] is dangerous because [single incident]" → score: 0.20, type: anecdotal (cherry-picking, ignores base rates)
-- "My professor says X, so it must be true" → score: 0.22, type: expert_opinion (credentials alone, no evidence)
-- "A survey of [N] people shows [P]% prefer X" → score: 0.28, type: empirical_data (consensus with numbers but no causal reasoning)
-- "Either we adopt X fully or we stay with Y" → score: 0.15, type: logical_argument (false dichotomy)
-- "Studies show X because Y, contradicting earlier findings Z" → score: 0.55, type: empirical_data (structured counter-evidence)
-- "Meta-analysis of N studies finds pooled effect near zero, challenging prior results" → score: 0.72, type: empirical_data (even when contradicting prior claims)
-- "According to [paper], methodology M on dataset D yields R, contradicting C because..." → score: 0.82, type: empirical_data (rigorous, verifiable)
+Calibration scale (structural patterns — judge structure, not topic):
+- Casual greeting or pleasantry → score: 0.02, type: no_argument
+- Bare assertion with no support ("I think [X] is great") → score: 0.08, type: no_argument
+- Emotional validation or moral endorsement without reasoning → score: 0.03-0.05, type: emotional_appeal
+- Appeal to collective agreement ("everyone knows", "most people agree") → score: 0.10, type: social_pressure
+- Personal anecdote or single unnamed source → score: 0.18, type: anecdotal
+- Claim backed by fabricated or thoroughly discredited source → score: 0.03, type: debunked_claim
+- Vague or unattributed claim ("I read somewhere that maybe...") → score: 0.10-0.18, type: anecdotal
+- Single incident used to generalise a pattern → score: 0.20, type: anecdotal
+- Named credential without supporting evidence ("Dr. X says so") → score: 0.22, type: expert_opinion
+- Numbers present but source unnamed and no causal link → score: 0.28, type: empirical_data
+- Logical structure with a clear flaw (false dichotomy, circular) → score: 0.15, type: logical_argument
+- Named source with specific quantified findings ("According to [named study], [metric] is [N]%") → score: 0.45-0.55, type: empirical_data
+- Multiple named sources with specific numbers and an explicit comparison → score: 0.60-0.72, type: empirical_data
+- Named source + specific quantified result + explicit mechanism or causal reasoning → score: 0.75-0.85, type: empirical_data
 
 Use type debunked_claim ONLY when the message itself relies on fabricated, fraudulent, or thoroughly \
-discredited sources — e.g., conspiracy theories, retracted studies with confirmed data fraud, flat-earth \
-claims. Do NOT use debunked_claim when new evidence contradicts earlier evidence; that is empirical_data. \
+discredited sources — that is, claims whose very basis has been proven false. \
+Do NOT use debunked_claim when new evidence merely contradicts earlier evidence; that is empirical_data. \
 debunked_claim scores near 0.0 (maximum score: 0.07) regardless of how confidently the user states them. \
 A user simply asserting a belief ("I think X") scores below 0.15 regardless \
 of how strongly they feel about it. Emotional validation and moral endorsement \

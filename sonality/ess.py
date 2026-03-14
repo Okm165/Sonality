@@ -185,9 +185,7 @@ ESS_TOOL: Final = {
                     "named or directly asserted in the message — do not add associated, "
                     "downstream, or implied concepts that are not stated. "
                     "Use the actual subject being discussed, not conversational meta-labels "
-                    "describing how the argument is structured "
-                    "(e.g. NOT: 'statistics', 'evidence', 'citation', 'consensus', 'fear', "
-                    "'disagreement')."
+                    "describing argument structure, evidential properties, or emotional register."
                 ),
             },
             "summary": {
@@ -414,7 +412,6 @@ def _to_internal_consistency(value: object) -> tuple[InternalConsistencyStatus, 
             return InternalConsistencyStatus.INCONSISTENT, False
         return InternalConsistencyStatus.CONSISTENT, True
     return InternalConsistencyStatus.CONSISTENT, True
-
 
 
 def _default_severity(defaulted_fields: tuple[str, ...]) -> DefaultSeverity:
