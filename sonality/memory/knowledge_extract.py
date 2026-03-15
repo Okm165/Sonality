@@ -26,12 +26,14 @@ from enum import StrEnum
 from psycopg_pool import AsyncConnectionPool
 from pydantic import BaseModel, Field
 
+from .. import config
 from ..llm.caller import llm_call
 from ..llm.prompts import (
     KNOWLEDGE_CONSOLIDATION_PROMPT,
     KNOWLEDGE_EXTRACTION_PROMPT,
     WINDOW_CONTEXT_SUMMARY_PROMPT,
 )
+from ..provider import chat_completion
 from .embedder import ExternalEmbedder
 from .sponge import SpongeState
 
@@ -64,23 +66,21 @@ class ExtractionResponse(BaseModel):
 
 
 class KnowledgeConsolidation(BaseModel):
-    """LLM consolidation output used during reflection."""
+    """LLM consolidation output used during reflection.
+
+    All references use UIDs, not proposition text, for exact matching.
+    """
 
     contradictions: list[dict[str, str]] = Field(default_factory=list)
     merges: list[dict[str, object]] = Field(default_factory=list)
-    opinion_candidates: list[dict[str, str]] = Field(default_factory=list)
+    weak_uids: list[str] = Field(default_factory=list)
+    # Legacy field — kept for backwards-compat with old prompt format; ignored in processing
     weak_propositions: list[str] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
 # Stage 0: Sliding window with LLM context summaries (SLIDE-inspired)
 # ---------------------------------------------------------------------------
-
-
-class _WindowSummary(BaseModel):
-    """Plain-text summary for inter-window context propagation."""
-
-    summary: str = ""
 
 
 def _split_windows(text: str) -> list[tuple[str, str]]:
@@ -105,12 +105,16 @@ def _split_windows(text: str) -> list[tuple[str, str]]:
         windows.append((window_text, prev_summary))
         if start + WINDOW_SIZE_WORDS >= len(words):
             break
-        summary_result = llm_call(
-            prompt=WINDOW_CONTEXT_SUMMARY_PROMPT.format(text=window_text[:3000]),
-            response_model=_WindowSummary,
-            fallback=_WindowSummary(),
-        )
-        prev_summary = summary_result.value.summary if summary_result.success else ""
+        try:
+            result = chat_completion(
+                model=config.FAST_LLM_MODEL,
+                messages=({"role": "user", "content": WINDOW_CONTEXT_SUMMARY_PROMPT.format(text=window_text[:3000])},),
+                max_tokens=config.FAST_LLM_MAX_TOKENS,
+            )
+            prev_summary = result.text.strip()
+        except Exception:
+            log.debug("Window summary failed; proceeding without context")
+            prev_summary = ""
     return windows
 
 
@@ -203,16 +207,14 @@ def _deduplicate_intrabatch(
     """
     kept: list[tuple[ExtractedProposition, list[float]]] = []
     for prop, emb in zip(propositions, embeddings, strict=True):
-        is_dup = False
-        for kept_prop, kept_emb in kept:
-            if _cosine_similarity(emb, kept_emb) > DEDUP_THRESHOLD_INTRABATCH:
-                if prop.confidence > kept_prop.confidence:
-                    kept.remove((kept_prop, kept_emb))
-                    kept.append((prop, emb))
-                is_dup = True
-                break
-        if not is_dup:
+        match_idx = next(
+            (i for i, (_, ke) in enumerate(kept) if _cosine_similarity(emb, ke) > DEDUP_THRESHOLD_INTRABATCH),
+            None,
+        )
+        if match_idx is None:
             kept.append((prop, emb))
+        elif prop.confidence > kept[match_idx][0].confidence:
+            kept[match_idx] = (prop, emb)
     return kept
 
 
@@ -227,55 +229,44 @@ async def _deduplicate_against_existing(
     When a proposition is semantically similar to an existing one, instead of
     silently dropping it we boost the existing entry's confidence and add the
     episode citation (MMA 2025: evidence accumulation via repeated mentions).
+    Boosts are batched into a single UPDATE per matched entry.
     """
     kept: list[tuple[ExtractedProposition, list[float]]] = []
+    boosts: list[tuple[str, float]] = []  # (value_text, new_confidence)
     for prop, emb in batch:
-        matched_existing_text: str | None = None
-        for existing_text, existing_emb in existing:
-            if _cosine_similarity(emb, existing_emb) > DEDUP_THRESHOLD_EXISTING:
-                matched_existing_text = existing_text
-                break
-        if matched_existing_text:
-            await _boost_existing_confidence(
-                pg_pool, matched_existing_text, prop.confidence, episode_uid
-            )
-            log.debug("Evidence boost for existing: '%s'", matched_existing_text[:60])
+        match = next(
+            (text for text, ex_emb in existing if _cosine_similarity(emb, ex_emb) > DEDUP_THRESHOLD_EXISTING),
+            None,
+        )
+        if match:
+            boosts.append((match, prop.confidence))
+            log.debug("Evidence boost for existing: '%s'", match[:60])
         else:
             kept.append((prop, emb))
-    return kept
 
-
-async def _boost_existing_confidence(
-    pg_pool: AsyncConnectionPool,
-    value_text: str,
-    new_confidence: float,
-    episode_uid: str,
-) -> None:
-    """Update confidence of an existing knowledge feature on repeated evidence.
-
-    Uses the new proposition's LLM-assigned confidence: if the new mention has
-    higher confidence (e.g. from a better source), the stored entry adopts it.
-    Episode citation is always added for provenance tracking.
-    """
-    try:
-        async with pg_pool.connection() as conn, conn.cursor() as cur:
-            await cur.execute(
-                """
-                UPDATE semantic_features
-                SET confidence = GREATEST(confidence, %s),
-                    updated_at = NOW(),
-                    episode_citations = (
-                        SELECT ARRAY(
-                            SELECT DISTINCT citation
-                            FROM unnest(episode_citations || %s::text[]) AS citation
-                        )
+    if boosts:
+        try:
+            async with pg_pool.connection() as conn, conn.cursor() as cur:
+                for value_text, new_confidence in boosts:
+                    await cur.execute(
+                        """
+                        UPDATE semantic_features
+                        SET confidence = GREATEST(confidence, %s),
+                            updated_at = NOW(),
+                            episode_citations = (
+                                SELECT ARRAY(
+                                    SELECT DISTINCT citation
+                                    FROM unnest(episode_citations || %s::text[]) AS citation
+                                )
+                            )
+                        WHERE category = 'knowledge' AND value = %s
+                        """,
+                        (min(0.99, new_confidence), [episode_uid], value_text),
                     )
-                WHERE category = 'knowledge' AND value = %s
-                """,
-                (min(0.99, new_confidence), [episode_uid], value_text),
-            )
-    except Exception:
-        log.debug("Failed to boost confidence for '%s'", value_text[:60], exc_info=True)
+        except Exception:
+            log.debug("Failed to boost confidence for existing entries", exc_info=True)
+
+    return kept
 
 
 # ---------------------------------------------------------------------------
@@ -378,6 +369,14 @@ async def extract_and_store_knowledge(
             len(props),
             ", ".join(f"{p.type}:{p.confidence:.2f}" for p in props),
         )
+        for p in props:
+            log.debug(
+                "  prop[%s conf=%.2f sent=%+.1f] %s",
+                p.type,
+                p.confidence,
+                p.sentiment,
+                p.text[:100],
+            )
         all_propositions.extend(props)
 
     if not all_propositions:
@@ -406,20 +405,37 @@ async def extract_and_store_knowledge(
             continue
 
         combined = abs(prop.sentiment) * prop.confidence
+        is_user_opinion = prop.source_entity.lower() == "user"
         if (
             stage_opinions
             and prop.type == PropositionType.OPINION
             and prop.key_concepts
-            and combined >= 0.15
+            and combined >= 0.20
+            and not is_user_opinion
         ):
             topic = prop.key_concepts[0]
             direction = 1.0 if prop.sentiment > 0 else -1.0
+            magnitude = combined * 0.3
             sponge.stage_opinion_update(
                 topic=topic,
                 direction=direction,
-                magnitude=combined * 0.3,
-                cooling_period=2,
+                magnitude=magnitude,
+                cooling_period=config.OPINION_COOLING_PERIOD,
                 provenance=f"knowledge_extraction: {prop.text[:80]}",
+            )
+            log.debug(
+                "  opinion staged: topic=%s dir=%+.1f mag=%.3f combined=%.3f src=%s",
+                topic,
+                direction,
+                magnitude,
+                combined,
+                prop.source_entity,
+            )
+        elif prop.type == PropositionType.OPINION and is_user_opinion and combined >= 0.20:
+            log.debug(
+                "  opinion skipped (user source): topic=%s combined=%.3f",
+                prop.key_concepts[0] if prop.key_concepts else "?",
+                combined,
             )
 
     intra_dedup = len(all_propositions) - len(batch)
@@ -465,20 +481,11 @@ async def consolidate_knowledge(
     if len(rows) < 2:
         return None
 
-    value_to_uid = {str(row[2]): str(row[0]) for row in rows}
-
-    def _fuzzy_uid(text: str) -> str | None:
-        """Exact match first, then prefix match as fallback for LLM reformulations."""
-        if text in value_to_uid:
-            return value_to_uid[text]
-        text_lower = text.lower().strip()
-        for stored, uid in value_to_uid.items():
-            if stored.lower().strip().startswith(text_lower[:80]):
-                return uid
-        return None
-
+    # UID is the canonical identifier; pass it in the prompt so the LLM
+    # references UIDs instead of paraphrasing proposition text (avoids fuzzy matching).
+    valid_uids = {str(row[0]) for row in rows}
     propositions_text = "\n".join(
-        f"- [{row[1]}] {row[2]} (confidence={row[3]:.2f})" for row in rows
+        f"[{row[0]}] [{row[1]}] {row[2]} (confidence={row[3]:.2f})" for row in rows
     )
 
     result = llm_call(
@@ -494,71 +501,69 @@ async def consolidate_knowledge(
         return None
     consolidation = result.value
 
-    # Apply weak proposition deletions
-    for weak_text in consolidation.weak_propositions:
-        uid = _fuzzy_uid(weak_text)
-        if uid:
-            try:
-                async with pg_pool.connection() as conn, conn.cursor() as cur:
-                    await cur.execute("DELETE FROM semantic_features WHERE uid = %s", (uid,))
-                log.info("Consolidation: pruned weak proposition '%s'", weak_text[:60])
-            except Exception:
-                log.debug("Failed to prune weak proposition", exc_info=True)
+    # Collect all UIDs to delete (weak + contradiction losers), skipping unknown UIDs
+    uids_to_delete: list[str] = []
 
-    # Apply merges: keep the canonical text, delete source duplicates
-    for merge in consolidation.merges:
-        sources = merge.get("sources", [])
-        merged_text = merge.get("merged", "")
-        if not sources or not merged_text or not isinstance(sources, list):
-            continue
-        for source_text in sources:
-            if not isinstance(source_text, str):
-                continue
-            uid = _fuzzy_uid(source_text)
-            if uid:
-                try:
-                    async with pg_pool.connection() as conn, conn.cursor() as cur:
-                        await cur.execute(
-                            """
-                            UPDATE semantic_features
-                            SET value = %s, updated_at = NOW()
-                            WHERE uid = %s
-                            """,
-                            (str(merged_text), uid),
-                        )
-                    log.info("Consolidation: merged '%s' -> canonical", source_text[:50])
-                    break
-                except Exception:
-                    log.debug("Failed to apply merge", exc_info=True)
-
-    # Resolve contradictions: the LLM recommends which to keep via "keep a"
-    # or "keep b" in the resolution text.
-    for contradiction in consolidation.contradictions:
-        a_text = contradiction.get("a", "")
-        b_text = contradiction.get("b", "")
-        resolution = contradiction.get("resolution", "").lower()
-        # Determine which proposition to drop based on LLM recommendation
-        if "keep b" in resolution or "drop a" in resolution:
-            loser = a_text
-        elif "keep a" in resolution or "drop b" in resolution:
-            loser = b_text
+    # Weak propositions referenced by UID
+    for uid in consolidation.weak_uids:
+        if uid in valid_uids:
+            uids_to_delete.append(uid)
         else:
-            log.debug("Ambiguous contradiction resolution, skipping: %s", resolution[:80])
+            log.debug("Consolidation: unknown weak UID skipped: %s", uid)
+
+    # Contradiction losers referenced by UID
+    for contradiction in consolidation.contradictions:
+        keep = contradiction.get("keep", "").lower()
+        a_uid = contradiction.get("a_uid", "")
+        b_uid = contradiction.get("b_uid", "")
+        if keep == "a":
+            loser_uid = b_uid
+        elif keep == "b":
+            loser_uid = a_uid
+        else:
+            log.debug("Ambiguous contradiction keep field, skipping: %s", contradiction)
             continue
-        uid = _fuzzy_uid(loser)
+        if loser_uid in valid_uids:
+            uids_to_delete.append(loser_uid)
+            log.info("Contradiction resolved: pruning uid=%s", loser_uid[:8])
+        else:
+            log.debug("Consolidation: unknown contradiction UID skipped: %s", loser_uid)
+
+    if uids_to_delete:
+        try:
+            async with pg_pool.connection() as conn, conn.cursor() as cur:
+                await cur.execute("DELETE FROM semantic_features WHERE uid = ANY(%s)", (uids_to_delete,))
+            log.info("Consolidation: pruned %d entries (weak + contradictions)", len(uids_to_delete))
+        except Exception:
+            log.debug("Failed to prune entries", exc_info=True)
+
+    # Apply merges: update first valid source UID to the canonical text
+    merge_updates: list[tuple[str, str]] = []  # (merged_text, uid)
+    for merge in consolidation.merges:
+        source_uids = merge.get("source_uids", [])
+        merged_text = merge.get("merged", "")
+        if not source_uids or not merged_text or not isinstance(source_uids, list):
+            continue
+        uid = next((u for u in source_uids if isinstance(u, str) and u in valid_uids), None)
         if uid:
-            try:
-                async with pg_pool.connection() as conn, conn.cursor() as cur:
-                    await cur.execute("DELETE FROM semantic_features WHERE uid = %s", (uid,))
-                log.info("Contradiction resolved: pruned '%s'", loser[:60])
-            except Exception:
-                log.debug("Failed to resolve contradiction", exc_info=True)
+            merge_updates.append((str(merged_text), uid))
+            log.info("Consolidation: merged uid=%s -> '%s'", uid[:8], str(merged_text)[:50])
+    if merge_updates:
+        try:
+            async with pg_pool.connection() as conn, conn.cursor() as cur:
+                for merged_text, uid in merge_updates:
+                    await cur.execute(
+                        "UPDATE semantic_features SET value = %s, updated_at = NOW() WHERE uid = %s",
+                        (merged_text, uid),
+                    )
+        except Exception:
+            log.debug("Failed to apply merges", exc_info=True)
 
     log.info(
         "Knowledge consolidation: %d contradictions resolved, %d merges, %d pruned",
         len(consolidation.contradictions),
         len(consolidation.merges),
-        len(consolidation.weak_propositions),
+        len(uids_to_delete),
     )
     return consolidation
 
@@ -622,16 +627,19 @@ async def retrieve_relevant_knowledge(
     async with pg_pool.connection() as conn, conn.cursor() as cur:
         await cur.execute(
             """
-            SELECT tag, value, confidence,
-                   1 - (embedding <=> %s::vector) AS similarity
-            FROM semantic_features
-            WHERE category = 'knowledge'
-              AND embedding IS NOT NULL
-              AND confidence >= %s
-            ORDER BY embedding <=> %s::vector
-            LIMIT %s
+            WITH ranked AS (
+                SELECT tag, value, confidence,
+                       embedding <=> %s::vector AS dist
+                FROM semantic_features
+                WHERE category = 'knowledge'
+                  AND embedding IS NOT NULL
+                  AND confidence >= %s
+                ORDER BY dist
+                LIMIT %s
+            )
+            SELECT tag, value, confidence, 1 - dist AS similarity FROM ranked
             """,
-            (query_embedding, min_confidence, query_embedding, top_k),
+            (query_embedding, min_confidence, top_k),
         )
         rows = await cur.fetchall()
 
