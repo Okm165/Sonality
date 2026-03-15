@@ -80,7 +80,12 @@ class ChainOfQueryAgent:
             context = "\n\n".join(
                 f"[{ep.created_at}] {ep.summary or ep.content[:200]}" for ep in all_episodes
             )
-            sufficiency = self._check_sufficiency(query, context)
+            _suf = llm_call(
+                prompt=SUFFICIENCY_PROMPT.format(query=query, context=context or "No results found"),
+                response_model=SufficiencyResponse,
+                fallback=SufficiencyResponse(),
+            )
+            sufficiency = _suf.value
 
             if sufficiency.confidence > best_confidence:
                 best_confidence = sufficiency.confidence
@@ -119,13 +124,3 @@ class ChainOfQueryAgent:
             exhausted=True,
         )
 
-    def _check_sufficiency(self, query: str, context: str) -> SufficiencyResponse:
-        prompt = SUFFICIENCY_PROMPT.format(query=query, context=context or "No results found")
-        result = llm_call(
-            prompt=prompt,
-            response_model=SufficiencyResponse,
-            fallback=SufficiencyResponse(),
-        )
-        if result.success:
-            return result.value
-        return SufficiencyResponse()

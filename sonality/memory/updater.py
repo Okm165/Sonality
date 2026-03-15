@@ -23,6 +23,8 @@ _INSIGHT_PLACEHOLDERS: frozenset[str] = frozenset(
         "one sentence describing the reasoning pattern",
         "your insight here",
         "insert insight here",
+        # Current prompt example — guard against lazy LLM copy-paste
+        "prefers structural explanations over anecdotal evidence",
     }
 )
 

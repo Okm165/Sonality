@@ -29,7 +29,7 @@ class ChunkImportance(StrEnum):
 
 class ChunkItem(BaseModel):
     text: str
-    key_concept: str
+    key_concept: str = ""
     importance: ChunkImportance = ChunkImportance.MEDIUM
 
     @field_validator("importance", mode="before")
