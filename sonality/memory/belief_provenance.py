@@ -8,14 +8,15 @@ Links beliefs to supporting/contradicting episodes via graph edges.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from dataclasses import dataclass
 from enum import StrEnum
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, model_validator
 
 from ..llm.caller import llm_call
-from ..llm.prompts import BELIEF_UPDATE_PROMPT
+from ..llm.prompts import BATCH_BELIEF_UPDATE_PROMPT, BELIEF_UPDATE_PROMPT
 from .graph import EdgeType, MemoryGraph
 from .health_trace import trace_belief_provenance
 from .sponge import BeliefMeta, SpongeState
@@ -35,6 +36,7 @@ class ContractionAction(StrEnum):
 
 
 class BeliefUpdateResponse(BaseModel):
+    topic: str = ""
     direction: float = 0.0
     evidence_strength: float = 0.5
     new_uncertainty: float = 0.5
@@ -51,6 +53,18 @@ class BeliefUpdateResponse(BaseModel):
         return v
 
 
+class BatchBeliefUpdateResponse(BaseModel):
+    assessments: list[BeliefUpdateResponse]
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_list(cls, data: object) -> object:
+        """Handle model returning a bare list instead of {assessments: [...]}."""
+        if isinstance(data, list):
+            return {"assessments": data}
+        return data
+
+
 @dataclass(frozen=True, slots=True)
 class ProvenanceUpdate:
     """Result of a belief evidence assessment."""
@@ -62,6 +76,66 @@ class ProvenanceUpdate:
     update_magnitude: UpdateMagnitude
     contraction_action: ContractionAction
     reasoning: str
+
+
+async def _record_provenance(
+    topic: str,
+    response: BeliefUpdateResponse,
+    episode_uid: str,
+    sponge: SpongeState,
+    graph: MemoryGraph,
+) -> ProvenanceUpdate:
+    """Update BeliefMeta, create a graph edge, emit a trace, and return ProvenanceUpdate.
+
+    Shared by both the single-topic and batch belief assessment paths.
+    Uncertainty is intentionally NOT applied here — it is applied during
+    update_opinion (via staged updates) to keep Bayesian floor logic in one place.
+    """
+    meta = sponge.belief_meta.get(topic)
+    if meta is None:
+        meta = BeliefMeta(formed_at=sponge.interaction_count)
+        sponge.belief_meta[topic] = meta
+
+    if response.direction > 0:
+        edge_type = EdgeType.SUPPORTS_BELIEF
+        if episode_uid not in meta.supporting_episode_uids:
+            meta.supporting_episode_uids.append(episode_uid)
+    else:
+        edge_type = EdgeType.CONTRADICTS_BELIEF
+        if episode_uid not in meta.contradicting_episode_uids:
+            meta.contradicting_episode_uids.append(episode_uid)
+        meta.last_challenged_at = sponge.interaction_count
+
+    try:
+        await graph.link_belief(
+            episode_uid, topic,
+            edge_type=edge_type,
+            strength=response.evidence_strength,
+            reasoning=response.reasoning[:200],
+        )
+    except Exception:
+        log.exception("Failed to create belief provenance edge for %s", topic)
+
+    trace_belief_provenance(
+        interaction_num=sponge.interaction_count,
+        topic=topic,
+        episode_uid=episode_uid,
+        edge_type=edge_type.value,
+        strength=response.evidence_strength,
+        direction=response.direction,
+        update_magnitude=response.update_magnitude.value,
+        contraction=response.contraction_action.value,
+        reasoning=response.reasoning,
+    )
+    return ProvenanceUpdate(
+        topic=topic,
+        direction=response.direction,
+        evidence_strength=response.evidence_strength,
+        new_uncertainty=response.new_uncertainty,
+        update_magnitude=response.update_magnitude,
+        contraction_action=response.contraction_action,
+        reasoning=response.reasoning,
+    )
 
 
 async def assess_belief_evidence(
@@ -134,54 +208,102 @@ async def assess_belief_evidence(
         response.reasoning[:100],
     )
 
-    # Update provenance in BeliefMeta
-    if meta is None:
-        meta = BeliefMeta(formed_at=sponge.interaction_count)
-        sponge.belief_meta[topic] = meta
+    return await _record_provenance(topic, response, episode_uid, sponge, graph)
 
-    edge_type = EdgeType.SUPPORTS_BELIEF
-    if response.direction > 0:
-        if episode_uid not in meta.supporting_episode_uids:
-            meta.supporting_episode_uids.append(episode_uid)
-    else:
-        edge_type = EdgeType.CONTRADICTS_BELIEF
-        if episode_uid not in meta.contradicting_episode_uids:
-            meta.contradicting_episode_uids.append(episode_uid)
-        meta.last_challenged_at = sponge.interaction_count
-    # Uncertainty is applied during update_opinion (via staged updates) to keep
-    # the Bayesian floor logic in a single place.
 
-    # Create graph edge for provenance
-    try:
-        await graph.link_belief(
-            episode_uid,
-            topic,
-            edge_type=edge_type,
-            strength=response.evidence_strength,
-            reasoning=response.reasoning[:200],
+async def assess_belief_evidence_batch(
+    *,
+    topics: list[str],
+    episode_uid: str,
+    episode_content: str,
+    ess_score: float,
+    reasoning_type: str,
+    source_reliability: str,
+    sponge: SpongeState,
+    graph: MemoryGraph,
+) -> list[ProvenanceUpdate]:
+    """Batch version of assess_belief_evidence: one LLM call for all topics.
+
+    Falls back to sequential per-topic calls if batch parsing fails. The batch
+    approach reduces N LLM round-trips to 1 when multiple topics need assessment.
+    """
+    if not topics:
+        return []
+    if len(topics) == 1:
+        return [
+            await assess_belief_evidence(
+                topic=topics[0],
+                episode_uid=episode_uid,
+                episode_content=episode_content,
+                ess_score=ess_score,
+                reasoning_type=reasoning_type,
+                source_reliability=source_reliability,
+                sponge=sponge,
+                graph=graph,
+            )
+        ]
+
+    topics_data = [
+        {
+            "topic": t,
+            "current_value": f"{sponge.opinion_vectors.get(t, 0.0):+.2f}",
+            "confidence": f"{sponge.belief_meta[t].confidence:.2f}" if t in sponge.belief_meta else "0.00",
+            "supporting_count": len(sponge.belief_meta[t].supporting_episode_uids) if t in sponge.belief_meta else 0,
+            "contradicting_count": len(sponge.belief_meta[t].contradicting_episode_uids) if t in sponge.belief_meta else 0,
+            "uncertainty": f"{sponge.belief_meta[t].uncertainty:.2f}" if t in sponge.belief_meta else "1.00",
+        }
+        for t in topics
+    ]
+    prompt = BATCH_BELIEF_UPDATE_PROMPT.format(
+        episode_content=episode_content[:1000],
+        ess_score=f"{ess_score:.2f}",
+        reasoning_type=reasoning_type,
+        source_reliability=source_reliability,
+        topics_json=json.dumps(topics_data, indent=2),
+    )
+    fallback = BatchBeliefUpdateResponse(
+        assessments=[
+            BeliefUpdateResponse(topic=t, direction=0.0, evidence_strength=0.0)
+            for t in topics
+        ]
+    )
+    result = await asyncio.to_thread(
+        llm_call,
+        prompt=prompt,
+        response_model=BatchBeliefUpdateResponse,
+        fallback=fallback,
+    )
+    if not result.success:
+        log.warning(
+            "Batch belief assessment failed (%s); falling back to sequential for %d topics",
+            result.error,
+            len(topics),
         )
-    except Exception:
-        log.exception("Failed to create belief provenance edge for %s", topic)
+        return [
+            await assess_belief_evidence(
+                topic=t,
+                episode_uid=episode_uid,
+                episode_content=episode_content,
+                ess_score=ess_score,
+                reasoning_type=reasoning_type,
+                source_reliability=source_reliability,
+                sponge=sponge,
+                graph=graph,
+            )
+            for t in topics
+        ]
 
-    # Emit detailed provenance trace for health analysis
-    trace_belief_provenance(
-        interaction_num=sponge.interaction_count,
-        topic=topic,
-        episode_uid=episode_uid,
-        edge_type=edge_type.value,
-        strength=response.evidence_strength,
-        direction=response.direction,
-        update_magnitude=response.update_magnitude.value,
-        contraction=response.contraction_action.value,
-        reasoning=response.reasoning,
-    )
-
-    return ProvenanceUpdate(
-        topic=topic,
-        direction=response.direction,
-        evidence_strength=response.evidence_strength,
-        new_uncertainty=response.new_uncertainty,
-        update_magnitude=response.update_magnitude,
-        contraction_action=response.contraction_action,
-        reasoning=response.reasoning,
-    )
+    assessments_by_topic = {a.topic: a for a in result.value.assessments}
+    updates: list[ProvenanceUpdate] = []
+    for t in topics:
+        response = assessments_by_topic.get(t)
+        if response is None:
+            log.warning("Batch belief assessment missing result for topic=%s; skipping", t)
+            continue
+        log.debug(
+            "batch_belief_provenance topic=%s: direction=%.2f strength=%.2f uncertainty=%.2f mag=%s",
+            t, response.direction, response.evidence_strength,
+            response.new_uncertainty, response.update_magnitude.value,
+        )
+        updates.append(await _record_provenance(t, response, episode_uid, sponge, graph))
+    return updates

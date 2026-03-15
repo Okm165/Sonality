@@ -5,6 +5,7 @@ from .belief_provenance import (
     ProvenanceUpdate,
     UpdateMagnitude,
     assess_belief_evidence,
+    assess_belief_evidence_batch,
 )
 from .consolidation import ConsolidationEngine, ConsolidationReadinessDecision
 from .db import DatabaseConnections
@@ -87,6 +88,7 @@ __all__ = [
     "TemporalExpansionDecision",
     "UpdateMagnitude",
     "assess_belief_evidence",
+    "assess_belief_evidence_batch",
     "assess_health",
     "consolidate_knowledge",
     "dump_memory_snapshot",
