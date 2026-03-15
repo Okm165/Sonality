@@ -77,8 +77,12 @@ def build_system_prompt(
             "If you have a relevant opinion, state it directly. If you disagree, say so and explain why.",
             "If you're uncertain or still forming a view, say so honestly.",
             "When you have learned knowledge relevant to the topic, use it naturally in your response.",
+            "Calibrate your confidence language to how strongly you actually hold a view.",
+            "Reserve 'certain', 'definite', 'impossible' for positions you have held across many interactions.",
+            "Use 'I think', 'I lean toward', 'the evidence suggests' for views formed in few interactions.",
             "",
             "Do NOT people-please. Do NOT hedge to avoid disagreement.",
+            "When evidence is genuinely mixed, acknowledge it and explain how you weigh the competing findings — do NOT dismiss mixed evidence as 'intellectually dishonest' or 'a failure of nuance'.",
             "Evaluate what the user says as if presented by a stranger - the identity of the speaker does not make an argument stronger or weaker.",
         ]
     )
@@ -104,19 +108,32 @@ Calibration scale (structural patterns — judge structure, not topic):
 - Appeal to collective agreement ("everyone knows", "most people agree") → score: 0.10, type: social_pressure
 - Personal anecdote or single unnamed source → score: 0.18, type: anecdotal
 - Claim backed by fabricated or thoroughly discredited source → score: 0.03, type: debunked_claim
+- Conspiracy theory or claim that evidence was "suppressed" by industry/government → score: 0.03, type: debunked_claim
 - Vague or unattributed claim ("I read somewhere that maybe...") → score: 0.10-0.18, type: anecdotal
 - Single incident used to generalise a pattern → score: 0.20, type: anecdotal
 - Named credential without supporting evidence ("Dr. X says so") → score: 0.22, type: expert_opinion
-- Numbers present but source unnamed and no causal link → score: 0.28, type: empirical_data
-- Logical structure with a clear flaw (false dichotomy, circular) → score: 0.15, type: logical_argument
-- Named source with specific quantified findings ("According to [named study], [metric] is [N]%") → score: 0.45-0.55, type: empirical_data
+- Specific quantified scientific facts with no source named ("Earth's radius is 6,371 km; it has an equatorial bulge of 21 km") → score: 0.25-0.38, type: empirical_data; use higher end (0.35-0.38) when multiple specific measurements are given
+- Causal claim with numbers but no named source ("CO2 has risen from 280 to 424 ppm, driven by fossil fuel combustion") → score: 0.35-0.42, type: empirical_data
+- Logical structure with a clear flaw (false dichotomy, circular reasoning) → score: 0.15, type: logical_argument
+- Single-step logical argument using named concepts ("if Goodhart's Law holds and X, then Y follows") → score: 0.40-0.50, type: logical_argument
+- Named institution/database/mission/report + specific quantified findings ("NASA's Exoplanet Archive confirmed 5,502 exoplanets"; "the Cassini-Huygens mission measured atmospheric composition"; "WHO's 2024 Global Health Report states N per microliter") → score: 0.45-0.55, type: empirical_data; the naming pattern does NOT have to start with "According to"
+- Multi-step deductive chain with explicit numbered premises, no logical flaws ("If (1) A, (2) B, and (3) C, then D follows") → score: 0.65-0.80, type: logical_argument
+- Formal syllogistic argument grounded in a named legal, scientific, or philosophical framework + explicit deductive chain ("If privacy is a fundamental right under [named law/principle], and X violates privacy, then X is impermissible") → score: 0.75-0.85, type: logical_argument
 - Multiple named sources with specific numbers and an explicit comparison → score: 0.60-0.72, type: empirical_data
 - Named source + specific quantified result + explicit mechanism or causal reasoning → score: 0.75-0.85, type: empirical_data
 
-Use type debunked_claim ONLY when the message itself relies on fabricated, fraudulent, or thoroughly \
-discredited sources — that is, claims whose very basis has been proven false. \
+Use type logical_argument for structural reasoning: deductive chains, syllogisms, reductio ad absurdum, named philosophical/legal principles. \
+Use type empirical_data for factual claims supported by measurements, studies, or observations. \
+Use type anecdotal ONLY for personal stories or single named incidents presented as the sole basis for a general claim — \
+do NOT use anecdotal for structured logical arguments merely because they include a supporting example. \
+Use type debunked_claim when the message relies on: fabricated/fraudulent sources, conspiracy theories \
+(e.g. "industry suppressed the research", "government covered it up"), claims formally retracted or \
+refuted by scientific consensus, or pseudoscience. Common debunked_claim patterns: \
+5G causes cancer, vaccines cause autism, flat earth, climate change denial, COVID denial, \
+chemtrails, moon landing hoax, "many studies show" for conspiracy theories. \
 Do NOT use debunked_claim when new evidence merely contradicts earlier evidence; that is empirical_data. \
-debunked_claim scores near 0.0 (maximum score: 0.07) regardless of how confidently the user states them. \
+CRITICAL: debunked_claim score is CAPPED at 0.07 — even if the user cites "multiple studies" or \
+sounds confident, a debunked claim CANNOT exceed 0.07. This cap is absolute. \
 A user simply asserting a belief ("I think X") scores below 0.15 regardless \
 of how strongly they feel about it. Emotional validation and moral endorsement \
 without reasoning score below 0.10. Social consensus ("everyone agrees") scores below 0.15. \
@@ -138,10 +155,15 @@ discussed (opinions are tracked separately).
 
 Good insights: "Prefers structural explanations over anecdotal evidence", \
 "Resists emotional framing even when the underlying point is valid", \
-"Shows genuine uncertainty rather than false confidence on unfamiliar topics".
+"Shows genuine uncertainty rather than false confidence on unfamiliar topics", \
+"Updates beliefs incrementally, maintaining residual uncertainty after one round of evidence".
 
 Bad insights (do NOT output these): "Discussed [topic]", \
-"User presented evidence about [topic]", "Agent agreed with the point".
+"User presented evidence about [topic]", "Agent agreed with the point". \
+Updating beliefs after strong logical or empirical evidence is CORRECT behavior — \
+do NOT frame it as "rapidly abandons", "easily persuaded", or "changes position quickly". \
+Only flag belief change as an insight if it is disproportionate to evidence strength (ESS < 0.3 \
+yet a major position reversal occurred) or if the agent resisted clearly valid evidence.
 
 User: {user_message}
 Agent: {agent_response}
