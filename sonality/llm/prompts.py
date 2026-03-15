@@ -48,7 +48,7 @@ Consider:
 - Is this a continuation/elaboration of the current topic?
 
 Respond with ONLY a JSON object. Example for a topic shift:
-{{"boundary_decision": "BOUNDARY", "confidence": 0.9, "boundary_type": "topic_shift", "reasoning": "User switched from [topic A] to [topic B].", "suggested_segment_label": "[topic B] discussion"}}
+{{"boundary_decision": "BOUNDARY", "confidence": 0.9, "boundary_type": "topic_shift", "reasoning": "User switched from climate policy to nuclear energy.", "suggested_segment_label": "Nuclear energy discussion"}}
 
 Example for continuation:
 {{"boundary_decision": "CONTINUE", "confidence": 0.8, "boundary_type": "none", "reasoning": "User is elaborating on the previous topic.", "suggested_segment_label": ""}}
@@ -273,9 +273,50 @@ Uncertainty calibration (IMPORTANT — do NOT leave uncertainty high when eviden
 Output ONLY a JSON object (fill in YOUR values — do NOT copy this example):
 {{"direction": 0.3, "evidence_strength": 0.6, "new_uncertainty": 0.35, "reasoning": "Well-sourced evidence warrants a modest positive shift; second supporting episode reduces uncertainty.", "update_magnitude": "MINOR", "contraction_action": "NONE"}}
 
-direction: float -1.0 to +1.0 (negative = contradicts belief, positive = supports).
+direction: float -1.0 to +1.0. Positive means the evidence argues FOR this topic being real/important/valid (should push the opinion MORE POSITIVE). Negative means the evidence argues AGAINST this topic being real/important/valid (should push the opinion MORE NEGATIVE). The scale is absolute — not relative to the current_value.
 evidence_strength and new_uncertainty: floats 0.0 to 1.0.
 update_magnitude: MAJOR (large shift ≥0.3), MINOR (small shift <0.3), or NONE (no shift).
+contraction_action: CONTRACT or NONE."""
+
+# --- Batch Belief Evidence Assessment ---
+BATCH_BELIEF_UPDATE_PROMPT: Final = """\
+Assess how this new evidence affects the agent's beliefs on multiple topics.
+
+Episode:
+{episode_content}
+
+Episode Metadata:
+- ESS Score: {ess_score}
+- Reasoning Type: {reasoning_type}
+- Source Reliability: {source_reliability}
+
+Topics to assess (each entry describes current belief state):
+- current_value: current opinion value (-1 to +1, where 0=neutral/unknown)
+- confidence: how confident the agent is in this belief (0=none, 1=certain)
+- supporting_count: number of past episodes that supported this belief
+- contradicting_count: number of past episodes that contradicted this belief
+- uncertainty: current uncertainty (0=certain, 1=completely unknown)
+{topics_json}
+
+For each topic, consider:
+- Does this episode genuinely support or contradict the belief?
+- How strong is this evidence given the ESS score and reasoning type?
+- Is this a true contradiction or just nuance/complexity?
+- Does this warrant AGM-style belief contraction?
+
+Produce one assessment per topic. Output ONLY a JSON array — one entry per topic listed above (copy the exact topic name, fill in YOUR assessed values):
+[{{"topic": "exact-topic-name-from-above", "direction": 0.3, "evidence_strength": 0.6, "new_uncertainty": 0.35, "reasoning": "...", "update_magnitude": "MINOR", "contraction_action": "NONE"}}]
+
+Uncertainty calibration (use supporting_count and contradicting_count from each topic):
+- supporting_count=0 (first evidence): new_uncertainty 0.6–0.9
+- supporting_count≥2, contradicting_count=0: new_uncertainty ≤ 0.5
+- supporting_count≥3, contradicting_count=0: new_uncertainty ≤ 0.3
+- contradicting evidence present: increase uncertainty
+- mixed evidence: new_uncertainty 0.4–0.7
+
+direction: float -1.0 to +1.0. Positive means the evidence argues FOR this topic being real/important/valid (should push opinion MORE POSITIVE). Negative means the evidence argues AGAINST it. Absolute scale — not relative to the current belief.
+evidence_strength and new_uncertainty: floats 0.0 to 1.0.
+update_magnitude: MAJOR (shift ≥0.3), MINOR (shift <0.3), or NONE.
 contraction_action: CONTRACT or NONE."""
 
 # --- Structural Disagreement Detection ---
@@ -297,52 +338,43 @@ Respond with ONLY a JSON object. Example:
 disagreement_verdict must be DISAGREEMENT or NO_DISAGREEMENT.
 disagreement_strength is a float from 0.0 to 1.0."""
 
-# --- Belief Decay Decision ---
-BELIEF_DECAY_PROMPT: Final = """\
-Assess whether this belief should be retained or decayed based on staleness.
+# --- Batch Belief Decay ---
+BATCH_BELIEF_DECAY_PROMPT: Final = """\
+Assess whether each of these beliefs should be retained, decayed, or forgotten based on staleness.
 
-Belief Topic: {topic}
-Current Position: {position}
-Current Confidence: {confidence}
-Evidence Count: {evidence_count}
-Interactions Since Last Reinforced: {gap}
-Total Interactions: {total_interactions}
+Total interactions so far: {total_interactions}
 
-Consider:
-- How central is this belief to the agent's identity?
-- Has enough time passed that this belief might be outdated?
-- Is this a foundational belief that should persist regardless of reinforcement?
-- Would forgetting this create inconsistency?
+Beliefs to assess:
+{beliefs_json}
 
-Output ONLY a JSON object (fill in YOUR values — do NOT copy this example verbatim):
-{{"action": "RETAIN", "new_confidence": 0.72, "reasoning": "Core belief supported by 4 episodes; no contradictory evidence has emerged."}}
+For each belief consider:
+- How central is it to the agent's identity?
+- Has enough time passed (gap) that it might be outdated?
+- Is it foundational and should persist regardless of reinforcement?
 
-Example for decay:
-{{"action": "DECAY", "new_confidence": 0.35, "reasoning": "[N] interactions without reinforcement suggests topic is no longer salient."}}
+Output ONLY a JSON array, one entry per belief:
+[{{"topic": "...", "action": "RETAIN", "new_confidence": 0.72, "reasoning": "..."}}]
 
-action must be exactly one of: RETAIN, DECAY, or FORGET (pick one word, no pipes or alternatives).
-new_confidence must be a decimal number between 0.0 and 1.0."""
+action must be exactly RETAIN, DECAY, or FORGET.
+new_confidence must be 0.0–1.0.
+RETAIN keeps confidence unchanged; DECAY reduces it; FORGET removes the belief entirely."""
 
-# --- Entrenchment Detection ---
-ENTRENCHMENT_DETECTION_PROMPT: Final = """\
-Assess if this belief shows signs of entrenchment (echo chamber effect).
+# --- Batch Entrenchment Detection ---
+BATCH_ENTRENCHMENT_DETECTION_PROMPT: Final = """\
+Assess which of these beliefs show signs of echo-chamber entrenchment.
 
-Belief Topic: {topic}
-Current Position: {position} (-1 to +1)
-Recent Updates: {recent_updates}
-Supporting Episodes: {supporting_count}
-Contradicting Episodes: {contradicting_count}
+Beliefs to assess:
+{beliefs_json}
 
 Signs of entrenchment:
 - Updates consistently agree with current position
 - Few or no contradicting episodes considered
 - High confidence despite limited evidence diversity
 
-Respond with ONLY a JSON object. Example:
-{{"entrenchment_status": "NOT_ENTRENCHED", "confidence": 0.75, "reasoning": "Multiple contradicting episodes have been considered.", "recommendation": "Continue monitoring for evidence diversity."}}
+Output ONLY a JSON array, one entry per entrenched belief (omit non-entrenched ones):
+[{{"topic": "...", "reasoning": "..."}}]
 
-entrenchment_status must be ENTRENCHED or NOT_ENTRENCHED.
-confidence is a float from 0.0 to 1.0."""
+Return an empty array [] if no entrenchment detected."""
 
 # --- Health Assessment ---
 HEALTH_ASSESSMENT_PROMPT: Final = """\
@@ -406,6 +438,13 @@ Valid tags for this category (ONLY use these, no other tags allowed): {tags}
 Existing features in this category:
 {existing_features}
 
+EXTRACTION RULES (strictly enforced):
+- Maximum 4 commands per pass. Prefer updating existing features over adding new ones.
+- Before adding a feature, check if any existing feature already captures the same trait — if yes, issue UPDATE instead of ADD. Duplicate information costs more than it saves.
+- Maintaining an evidence-based position under social pressure, bare assertions, or peer pressure is INTELLECTUAL INTEGRITY, not intellectual rigidity. Do NOT add an "Intellectual Rigidity" feature when the agent correctly resists non-evidential pressure. Only use Intellectual Rigidity if the agent explicitly refuses to engage with a NEW, specific, evidence-backed argument.
+- Do NOT add multiple features for the same underlying trait expressed in different words (e.g., "rejects mixed narratives", "dismisses inconclusive framing", "critical of balanced views" are all the same trait — pick one).
+- Do NOT use negative interpersonal labels (condescending, dismissive, arrogant, cold, harsh, rude, blunt, combative) when the agent is engaging intellectually with arguments, calling out logical fallacies, or firmly disagreeing. Forceful rebuttal of a weak argument is evidence-based engagement, not a personality flaw. Only use these negative labels when the agent explicitly disrespects the USER AS A PERSON rather than challenging their argument.
+
 DELETION RULES (strictly enforced):
 - NEVER issue a delete command unless the current episode contains a direct, new, assertive counter-claim that explicitly contradicts the feature's factual content.
 - A topic shift does NOT justify deletion. If the episode is about [topic A], do NOT delete [topic B] or [topic C] features.
@@ -428,21 +467,23 @@ IMPORTANT: tag must be one of the valid tags listed above."""
 
 # --- Semantic Feature Consolidation ---
 FEATURE_CONSOLIDATION_PROMPT: Final = """\
-You are reviewing semantic features in the "{category}" category to find redundant pairs to merge.
+Review the "{category}" semantic features below for exact duplicates only.
 
 Features to review:
 {features}
 
-Merge ONLY features that describe the exact same trait with different wording. Do NOT merge distinct behaviors.
-Keep the reasoning field to ONE short sentence. Do not analyse individual UIDs in the reasoning field.
-
-Your response must be a single JSON object with this exact structure.
+MERGE RULES (strict):
+- Merge ONLY if two features have value text that is semantically identical — same observation, same trait, same context. Paraphrases count ONLY if every meaningful detail is the same.
+- Do NOT merge features that describe the same general area (e.g. "analytical style" vs "data-driven reasoning") unless the specific behavioral observation is identical.
+- Do NOT merge features that differ in confidence by more than 0.2 — different confidence means different evidence quality, keep both.
+- Maximum 2 merges per pass. If in doubt, SKIP.
+- When merging, set canonical_value to the longer / more detailed of the two value texts.
 
 No-merge example:
-{{"consolidation_decision": "SKIP", "reasoning": "All features are distinct.", "actions": []}}
+{{"consolidation_decision": "SKIP", "reasoning": "Features are distinct observations.", "actions": []}}
 
-Merge example:
-{{"consolidation_decision": "CONSOLIDATE", "reasoning": "Two features describe the same trait.", "actions": [{{"source_uid": "[uid-to-remove]", "target_uid": "[uid-to-keep]", "canonical_tag": "[matching tag]", "canonical_feature": "[canonical name]", "canonical_value": "[best description]", "reason": "duplicate"}}]}}
+Merge example (only when values express exactly the same behavior):
+{{"consolidation_decision": "CONSOLIDATE", "reasoning": "Both values describe the same specific observed behavior word-for-word.", "actions": [{{"source_uid": "[uid-to-remove]", "target_uid": "[uid-to-keep]", "canonical_tag": "[tag]", "canonical_feature": "[name]", "canonical_value": "[longer/more detailed value]", "reason": "duplicate"}}]}}
 
 Respond with the JSON object now:"""
 
@@ -458,7 +499,7 @@ evaluate — just enumerate what was discussed.
 Text:
 {text}
 
-Output ONLY a JSON object: {{"summary": "[your 2-4 sentence summary here]"}}"""
+Output ONLY plain text — no JSON, no formatting, no preamble."""
 
 # --- Knowledge Proposition Extraction ---
 # Five-stage pipeline synthesizing state-of-the-art approaches:
@@ -542,8 +583,16 @@ Output ONLY a JSON object (replace bracket placeholders with actual content from
 type must be: fact, opinion, speculation, or noise.
 confidence: 0.0-1.0 calibrated per Stage 4 rules — source quality determines confidence.
 source_entity: who made the claim (empty string for unattributed claims).
-key_concepts: 1-3 topic labels for embedding and retrieval. For opinion-type propositions, key_concepts[0] must name the concrete subject-matter domain or real-world phenomenon being evaluated — NOT the evidential properties, verification status, or statistical characteristics of the claim itself. Use the domain being discussed, not how the claim is supported.
-sentiment: opinion stance toward key_concepts[0] — +1.0 = strongly favorable, -1.0 = strongly unfavorable, 0.0 = neutral/not applicable (use 0.0 for facts and speculations)."""
+key_concepts: 1-3 topic labels for embedding and retrieval. For opinion-type propositions, key_concepts[0] must name the concrete subject-matter domain or real-world phenomenon being evaluated — NEVER the source institution, policy mechanism, or issuance label. Wrong: "surgeon general advisory", "FDA approval", "WHO guidelines". Correct: "social media", "drug safety", "pandemic response". Use the domain being evaluated, not the vehicle through which the evaluation was expressed.
+sentiment: applies ONLY to opinion-type propositions (use 0.0 for fact and speculation).
+  For opinions: +1.0 = the SOURCE advocates that key_concepts[0] is beneficial/valid/should-be-adopted;
+  -1.0 = the SOURCE argues key_concepts[0] is harmful/invalid/should-be-avoided.
+  Calibration: a source warning that social media harms youth → sentiment=-0.7 for key_concepts[0]="social media".
+  A source endorsing nuclear as clean energy → sentiment=+0.7 for key_concepts[0]="nuclear energy".
+  CRITICAL: institutional issuances (government advisories, scientific advisories, policy statements) that
+  report a verifiable fact ("The surgeon general issued advisory X") are FACT type with sentiment=0.0,
+  not opinion. Only encode sentiment when the proposition expresses an evaluative stance, not when it
+  merely reports that an institution acted."""
 
 # --- Knowledge Consolidation (Reflection) ---
 # Uses EDC-style canonicalization (2025) for merges and FactReasoner-style
@@ -552,6 +601,8 @@ KNOWLEDGE_CONSOLIDATION_PROMPT: Final = """\
 Review these knowledge propositions stored by an AI agent. Identify issues \
 and suggest consolidation actions.
 
+Each proposition is listed as: [UID] [tag] text (confidence=N)
+
 Stored propositions:
 {propositions}
 
@@ -559,32 +610,20 @@ Agent's current personality snapshot:
 {snapshot}
 
 Tasks:
-1. CONTRADICTIONS: Find proposition pairs that cannot both be true \
-   (e.g. two propositions stating different values for the same measurement). \
-   For each pair, determine which has stronger evidence based on source quality \
-   and confidence, and recommend keeping one. State "keep a" or "keep b" \
-   clearly in the resolution.
-2. MERGES: Find propositions that convey the same factoid with different \
-   wording. Before merging, verify they truly mean the same thing — \
-   two paraphrases of the same claim are mergeable; two claims about \
-   the same topic but stating different facts are NOT. Provide a \
-   canonical statement.
-3. OPINION CANDIDATES: Facts the agent should form a stance on based on \
-   accumulated evidence (multiple supporting propositions on the same topic).
-4. WEAK PROPOSITIONS: Claims that are vague, lack concrete details, or \
-   have confidence < 0.25 and no supporting evidence from other propositions.
+1. CONTRADICTIONS: Proposition pairs that cannot both be true (conflicting values \
+   for the same measurement). For each pair state which UID to keep and why.
+2. MERGES: Propositions conveying the identical factoid in different words. \
+   Two paraphrases of the SAME claim → mergeable. Two claims about the same topic \
+   but stating DIFFERENT facts → NOT mergeable. Provide a single canonical statement.
+3. WEAK_UIDS: UIDs of vague propositions lacking concrete detail, or confidence < 0.25 \
+   with no supporting evidence from other propositions.
 
-CRITICAL: Proposition text in your output must be EXACT copies from the list \
-above. Do not paraphrase or modify the stored text — the system matches on \
-exact string equality.
+Reference propositions by their UID only — never quote the proposition text.
 
-Output ONLY a JSON object. The resolution field for contradictions MUST start \
-with exactly "keep a" or "keep b" followed by a dash and reason:
-
-{{"contradictions": [{{"a": "exact text of proposition A", "b": "exact text of proposition B", "resolution": "keep a — stronger source attribution"}}], \
-"merges": [{{"sources": ["exact prop text 1", "exact prop text 2"], "merged": "single canonical statement"}}], \
-"opinion_candidates": [{{"proposition": "exact prop text", "suggested_stance": "brief reasoning"}}], \
-"weak_propositions": ["exact text of weak proposition"]}}
+Output ONLY a JSON object:
+{{"contradictions": [{{"a_uid": "uid-here", "b_uid": "uid-here", "keep": "a", "reason": "stronger source"}}], \
+"merges": [{{"source_uids": ["uid1", "uid2"], "merged": "single canonical statement here"}}], \
+"weak_uids": ["uid-here", "uid-here"]}}
 
 Use empty arrays for categories with no findings."""
 
