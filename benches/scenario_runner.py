@@ -105,31 +105,6 @@ def _capture_step_baseline(agent: SonalityAgent) -> _StepBaseline:
     )
 
 
-def _did_disagree(
-    interaction_before: int,
-    disagreement_before: float,
-    interaction_after: int,
-    disagreement_after: float,
-) -> bool:
-    """Infer disagreement event from disagreement-rate delta semantics."""
-    disagreement_delta = (
-        disagreement_after * interaction_after - disagreement_before * interaction_before
-    )
-    return disagreement_delta >= 0.5
-
-
-def _usage_int(usage: object, field_name: str, default: int) -> int:
-    """Read integer usage counters from runtime usage snapshots."""
-    return int(getattr(usage, field_name, default))
-
-
-def _opinion_vectors_changed(before: dict[str, float], after: dict[str, float]) -> bool:
-    """Return whether opinion-vector keys or values changed this step."""
-    if before.keys() != after.keys():
-        return True
-    return any(abs(after[topic] - before_value) > 1e-9 for topic, before_value in before.items())
-
-
 def _build_step_result(
     step: ScenarioStep,
     agent: SonalityAgent,
@@ -145,7 +120,13 @@ def _build_step_result(
     opinion_vectors_after = dict(sponge.opinion_vectors)
     staged_updates_after = len(sponge.staged_opinion_updates)
     pending_insights_after = len(sponge.pending_insights)
-    opinions_changed = _opinion_vectors_changed(before.opinion_vectors, opinion_vectors_after)
+    opinions_changed = (
+        before.opinion_vectors.keys() != opinion_vectors_after.keys()
+        or any(
+            abs(opinion_vectors_after[t] - v) > 1e-9
+            for t, v in before.opinion_vectors.items()
+        )
+    )
     staged_updates_added = staged_updates_after > before.staged_updates
     staged_updates_committed = staged_updates_after < before.staged_updates
     version_bumped = sponge.version > before.sponge_version
@@ -157,12 +138,21 @@ def _build_step_result(
         or staged_updates_committed
         or pending_insights_added
     )
+    # "write" = new memory content added THIS turn, not just prior staged updates committing.
+    # Version bumps from reflection (which consolidates prior accumulated evidence and
+    # clears pending_insights) are excluded — they are not caused by the current message.
+    # A reflection-only cycle: staged_updates_committed=True, staged_updates_added=False,
+    # pending_insights_added=False → memory_write_observed=False. Correct.
     memory_write_observed = (
-        version_bumped
-        or staged_updates_added
+        staged_updates_added
         or pending_insights_added
         or (opinions_changed and not staged_updates_committed)
     )
+    # Infer disagreement from rate delta (increase of ≥0.5 in rate×count product).
+    did_disagree = (
+        disagreement_after * interaction_after
+        - before.disagreement_rate * before.interaction_count
+    ) >= 0.5
     return StepResult(
         label=step.label,
         ess_score=ess.score if ess else -1.0,
@@ -175,12 +165,7 @@ def _build_step_result(
         snapshot_after=sponge.snapshot,
         disagreement_before=before.disagreement_rate,
         disagreement_after=disagreement_after,
-        did_disagree=_did_disagree(
-            interaction_before=before.interaction_count,
-            disagreement_before=before.disagreement_rate,
-            interaction_after=interaction_after,
-            disagreement_after=disagreement_after,
-        ),
+        did_disagree=did_disagree,
         opinion_vectors=opinion_vectors_after,
         topics_tracked=dict(sponge.behavioral_signature.topic_engagement),
         response_text=response,
@@ -197,12 +182,12 @@ def _build_step_result(
         interaction_count_after=interaction_after,
         episode_count_before=0,
         episode_count_after=0,
-        response_calls=_usage_int(usage, "response_calls", 1),
-        ess_calls=_usage_int(usage, "ess_calls", 1),
-        response_input_tokens=_usage_int(usage, "response_input_tokens", 0),
-        response_output_tokens=_usage_int(usage, "response_output_tokens", 0),
-        ess_input_tokens=_usage_int(usage, "ess_input_tokens", 0),
-        ess_output_tokens=_usage_int(usage, "ess_output_tokens", 0),
+        response_calls=int(getattr(usage, "response_calls", 1)),
+        ess_calls=int(getattr(usage, "ess_calls", 1)),
+        response_input_tokens=int(getattr(usage, "response_input_tokens", 0)),
+        response_output_tokens=int(getattr(usage, "response_output_tokens", 0)),
+        ess_input_tokens=int(getattr(usage, "ess_input_tokens", 0)),
+        ess_output_tokens=int(getattr(usage, "ess_output_tokens", 0)),
         ess_defaulted_fields=ess.defaulted_fields if ess else (),
         ess_default_severity=ess.default_severity if ess else "exception",
     )

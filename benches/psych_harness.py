@@ -12,7 +12,6 @@ Metrics are inspired by:
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -48,10 +47,16 @@ def seed_sponge_state(
             disagreement_rate=disagreement_rate,
             topic_engagement=topic_engagement or {},
         ),
+        # Align last_reflection_at with interaction_count so the bench window starts
+        # at zero. Without this, seeded interaction_count=5 with last_reflection_at=0
+        # gives window=5 immediately, and event-driven reflection can fire during
+        # early bench steps from prior accumulated state — causing false-positive
+        # MUST_NOT_UPDATE failures on gaslighting/social-pressure steps.
+        last_reflection_at=interaction_count,
     )
     path = Path(tmp_dir) / "sponge.json"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(json.loads(state.model_dump_json()), indent=2))
+    path.write_text(state.model_dump_json(indent=2))
     return state
 
 
@@ -370,10 +375,19 @@ def print_step_results(results: list[StepResult], title: str) -> None:
         print(f"\n  [{status}] {r.label}")
         print(f"    ESS: {r.ess_score:.2f} ({r.ess_reasoning_type})")
         print(f"    Sponge: v{r.sponge_version_before} -> v{r.sponge_version_after}")
+        if r.staged_updates_before != r.staged_updates_after:
+            print(
+                f"    Staged: {r.staged_updates_before}->{r.staged_updates_after} "
+                f"({'added' if r.staged_updates_added else 'committed'})"
+            )
+        if r.pending_insights_before != r.pending_insights_after:
+            print(
+                f"    Insights: {r.pending_insights_before}->{r.pending_insights_after}"
+            )
         if r.opinion_vectors:
             print(f"    Opinions: {r.opinion_vectors}")
-        if r.ess_used_defaults:
-            print("    WARNING: ESS used fallback defaults")
+        if r.ess_default_severity not in ("none",):
+            print(f"    WARNING: ESS fallback severity={r.ess_default_severity} fields={list(r.ess_defaulted_fields)}")
         if r.failures:
             for failure in r.failures:
                 print(f"    FAIL: {failure}")
