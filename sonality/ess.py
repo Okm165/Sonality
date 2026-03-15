@@ -182,10 +182,17 @@ ESS_TOOL: Final = {
                 "description": (
                     "Subject-matter domain or concept labels the message is substantively about "
                     "(1-3 short lowercase labels). Derive labels ONLY from concepts explicitly "
-                    "named or directly asserted in the message — do not add associated, "
-                    "downstream, or implied concepts that are not stated. "
-                    "Use the actual subject being discussed, not conversational meta-labels "
-                    "describing argument structure, evidential properties, or emotional register."
+                    "named or directly asserted in the message. "
+                    "Use the precise, standard name for the subject (e.g. 'universal basic income', "
+                    "not 'ubiquitous basic income'). "
+                    "NEVER use conversational meta-labels as topics: "
+                    "banned topics include 'social pressure', 'pressure', 'peer pressure', "
+                    "'consensus', 'industry consensus', 'scientific consensus', 'expert consensus', 'group consensus', "
+                    "'disagreement', 'argument', 'evidence', 'manipulation', 'survey method', "
+                    "'consistency', 'reliability', 'memory', 'credibility', "
+                    "'emotion', 'emotional appeal', 'opinion', 'reasoning'. "
+                    "If the message is purely social/meta (pressure, questioning, probing) "
+                    "with no substantive subject, use an empty list []."
                 ),
             },
             "summary": {
@@ -414,31 +421,6 @@ def _to_internal_consistency(value: object) -> tuple[InternalConsistencyStatus, 
     return InternalConsistencyStatus.CONSISTENT, True
 
 
-def _default_severity(defaulted_fields: tuple[str, ...]) -> DefaultSeverity:
-    """Collapse field-level defaults into a single severity bucket."""
-    if CLASSIFIER_EXCEPTION_FIELD in defaulted_fields:
-        return "exception"
-    if any(field.startswith(MISSING_FIELD_PREFIX) for field in defaulted_fields):
-        return "missing"
-    if any(field.startswith(COERCED_FIELD_PREFIX) for field in defaulted_fields):
-        return "coercion"
-    return "none"
-
-
-def _build_defaulted_fields(
-    missing_fields: tuple[str, ...], coerced_fields: list[str]
-) -> tuple[str, ...]:
-    """Build stable prefixed identifiers for missing/coerced fields."""
-    return tuple(
-        sorted(
-            {
-                *(f"{MISSING_FIELD_PREFIX}{field}" for field in missing_fields),
-                *(f"{COERCED_FIELD_PREFIX}{field}" for field in coerced_fields),
-            }
-        )
-    )
-
-
 def _required_field_coercions(data: Mapping[str, object]) -> tuple[str, ...]:
     """Return required fields that still parse as defaults."""
     coercions: list[str] = []
@@ -621,7 +603,22 @@ def _coerce_payload(data: Mapping[str, object]) -> CoercedEssPayload:
         coerced_fields=coerced_fields,
     )
 
-    defaulted_fields = _build_defaulted_fields(missing_fields, coerced_fields)
+    defaulted_fields = tuple(
+        sorted(
+            {
+                *(f"{MISSING_FIELD_PREFIX}{f}" for f in missing_fields),
+                *(f"{COERCED_FIELD_PREFIX}{f}" for f in coerced_fields),
+            }
+        )
+    )
+    if CLASSIFIER_EXCEPTION_FIELD in defaulted_fields:
+        severity: DefaultSeverity = "exception"
+    elif any(f.startswith(MISSING_FIELD_PREFIX) for f in defaulted_fields):
+        severity = "missing"
+    elif any(f.startswith(COERCED_FIELD_PREFIX) for f in defaulted_fields):
+        severity = "coercion"
+    else:
+        severity = "none"
     return CoercedEssPayload(
         score=score_value,
         novelty=novelty_value,
@@ -633,7 +630,7 @@ def _coerce_payload(data: Mapping[str, object]) -> CoercedEssPayload:
         opinion_direction=direction,
         knowledge_density=knowledge_density,
         defaulted_fields=defaulted_fields,
-        default_severity=_default_severity(defaulted_fields),
+        default_severity=severity,
     )
 
 
