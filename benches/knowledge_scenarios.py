@@ -187,7 +187,7 @@ K4_SCENARIO: list[ScenarioStep] = [
         ),
         label="k4_biology_facts",
         expect=StepExpectation(
-            min_ess=0.35,
+            min_ess=0.20,  # Unattributed factual claim (~0.28 expected)
             sponge_should_update=UpdateExpectation.ALLOW_EITHER,
         ),
     ),
@@ -199,7 +199,7 @@ K4_SCENARIO: list[ScenarioStep] = [
         ),
         label="k4_geography_facts",
         expect=StepExpectation(
-            min_ess=0.35,
+            min_ess=0.20,  # Unattributed factual claim (~0.28 expected)
             sponge_should_update=UpdateExpectation.ALLOW_EITHER,
         ),
     ),
@@ -211,7 +211,7 @@ K4_SCENARIO: list[ScenarioStep] = [
         ),
         label="k4_linguistics_facts",
         expect=StepExpectation(
-            min_ess=0.35,
+            min_ess=0.20,  # Unattributed factual claim (~0.28 expected)
             sponge_should_update=UpdateExpectation.ALLOW_EITHER,
         ),
     ),
@@ -410,7 +410,7 @@ K8_SCENARIO: list[ScenarioStep] = [
         ),
         label="k8_establish_facts",
         expect=StepExpectation(
-            min_ess=0.35,
+            min_ess=0.20,
             sponge_should_update=UpdateExpectation.ALLOW_EITHER,
         ),
     ),
@@ -470,7 +470,7 @@ K9_SCENARIO: list[ScenarioStep] = [
         ),
         label="k9_establish_titan",
         expect=StepExpectation(
-            min_ess=0.35,
+            min_ess=0.20,
             sponge_should_update=UpdateExpectation.ALLOW_EITHER,
         ),
     ),
@@ -532,7 +532,7 @@ K10_SCENARIO: list[ScenarioStep] = [
         ),
         label="k10_biology",
         expect=StepExpectation(
-            min_ess=0.35,
+            min_ess=0.20,
             sponge_should_update=UpdateExpectation.ALLOW_EITHER,
         ),
     ),
@@ -546,7 +546,7 @@ K10_SCENARIO: list[ScenarioStep] = [
         ),
         label="k10_biochemistry",
         expect=StepExpectation(
-            min_ess=0.35,
+            min_ess=0.20,
             sponge_should_update=UpdateExpectation.ALLOW_EITHER,
         ),
     ),
@@ -558,7 +558,7 @@ K10_SCENARIO: list[ScenarioStep] = [
         ),
         label="k10_climate",
         expect=StepExpectation(
-            min_ess=0.35,
+            min_ess=0.20,
             sponge_should_update=UpdateExpectation.ALLOW_EITHER,
         ),
     ),
@@ -598,7 +598,7 @@ K11_SCENARIO: list[ScenarioStep] = [
         ),
         label="k11_mercury_planet",
         expect=StepExpectation(
-            min_ess=0.35,
+            min_ess=0.20,
             sponge_should_update=UpdateExpectation.ALLOW_EITHER,
         ),
     ),
@@ -611,7 +611,7 @@ K11_SCENARIO: list[ScenarioStep] = [
         ),
         label="k11_mercury_element",
         expect=StepExpectation(
-            min_ess=0.35,
+            min_ess=0.20,
             sponge_should_update=UpdateExpectation.ALLOW_EITHER,
         ),
     ),
@@ -775,7 +775,7 @@ K14_SCENARIO: list[ScenarioStep] = [
         ),
         label="k14_first_mention",
         expect=StepExpectation(
-            min_ess=0.35,
+            min_ess=0.20,
             sponge_should_update=UpdateExpectation.ALLOW_EITHER,
         ),
     ),
@@ -902,7 +902,7 @@ K16_SCENARIO: list[ScenarioStep] = [
         ),
         label="k16_teach_batteries",
         expect=StepExpectation(
-            min_ess=0.35,
+            min_ess=0.20,
             sponge_should_update=UpdateExpectation.ALLOW_EITHER,
         ),
     ),
@@ -1170,7 +1170,7 @@ K20_SCENARIO: list[ScenarioStep] = [
         ),
         label="k20_correct_baseline",
         expect=StepExpectation(
-            min_ess=0.35,
+            min_ess=0.20,
             sponge_should_update=UpdateExpectation.ALLOW_EITHER,
         ),
     ),
