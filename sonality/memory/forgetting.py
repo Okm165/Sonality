@@ -75,45 +75,7 @@ class ForgettingEngine:
         if not candidates:
             return ForgettingResult(kept=0, archived=0, total_assessed=0)
 
-        decisions = self._normalize_decisions(
-            candidates,
-            self._batch_assess(candidates, snapshot_excerpt),
-        )
-
-        archived = 0
-        kept = 0
-        for decision in decisions:
-            if decision.action not in {ForgettingAction.ARCHIVE, ForgettingAction.FORGET}:
-                kept += 1
-                continue
-            try:
-                action_label = await self._apply_action(decision.uid, decision.action)
-                archived += 1
-                log.info("%s episode %s: %s", action_label, decision.uid[:8], decision.reason)
-            except Exception:
-                log.exception(
-                    "Failed to %s episode %s", decision.action.value.lower(), decision.uid[:8]
-                )
-                kept += 1
-
-        log.info(
-            "Forgetting cycle: %d assessed, %d kept, %d archived",
-            len(candidates),
-            kept,
-            archived,
-        )
-        return ForgettingResult(
-            kept=kept,
-            archived=archived,
-            total_assessed=len(candidates),
-        )
-
-    def _batch_assess(
-        self,
-        candidates: list[EpisodeNode],
-        snapshot_excerpt: str,
-    ) -> list[ForgettingDecision]:
-        """Use LLM to batch-assess episode importance."""
+        # Batch LLM assessment
         candidates_summary = "\n\n".join(
             f"UID: {ep.uid}\n"
             f"Content: {ep.content[:200]}\n"
@@ -123,76 +85,60 @@ class ForgettingEngine:
             f"Consolidation: L{ep.consolidation_level}"
             for ep in candidates
         )
-
-        prompt = BATCH_FORGETTING_PROMPT.format(
-            candidates_summary=candidates_summary,
-            snapshot_excerpt=snapshot_excerpt or "No snapshot available",
-        )
         result = llm_call(
-            prompt=prompt,
+            prompt=BATCH_FORGETTING_PROMPT.format(
+                candidates_summary=candidates_summary,
+                snapshot_excerpt=snapshot_excerpt or "No snapshot available",
+            ),
             response_model=BatchForgettingResponse,
             fallback=BatchForgettingResponse(
                 decisions=[
-                    ForgettingDecision(
-                        uid=ep.uid,
-                        action=ForgettingAction.KEEP,
-                        reason="Fallback: retain all",
-                    )
+                    ForgettingDecision(uid=ep.uid, action=ForgettingAction.KEEP, reason="Fallback: retain all")
                     for ep in candidates
                 ]
             ),
         )
-        if result.success:
-            return result.value.decisions
-        # Fallback: keep everything
-        return [
-            ForgettingDecision(
-                uid=ep.uid,
-                action=ForgettingAction.KEEP,
-                reason="Assessment failed",
-            )
+        raw_decisions = result.value.decisions if result.success else [
+            ForgettingDecision(uid=ep.uid, action=ForgettingAction.KEEP, reason="Assessment failed")
             for ep in candidates
         ]
 
-    async def _apply_action(self, uid: str, action: ForgettingAction) -> str:
-        """Execute one archive/forget action and return action label."""
-        if action is ForgettingAction.ARCHIVE:
-            await self._graph.archive_episode(uid)
-            await self._store.archive_derivatives(uid)
-            return "Archived"
-        await self._graph.delete_episode(uid)
-        await self._store.delete_derivatives(uid)
-        return "Forgot"
-
-    def _normalize_decisions(
-        self,
-        candidates: list[EpisodeNode],
-        decisions: list[ForgettingDecision],
-    ) -> list[ForgettingDecision]:
-        """Validate decisions against candidate set and fill missing rows."""
-        candidate_uids = {candidate.uid for candidate in candidates}
-        normalized: list[ForgettingDecision] = []
-        seen_uids: set[str] = set()
-        for decision in decisions:
-            uid = decision.uid.strip()
+        # Validate and fill missing decisions
+        candidate_uids = {ep.uid for ep in candidates}
+        seen: set[str] = set()
+        decisions: list[ForgettingDecision] = []
+        for d in raw_decisions:
+            uid = d.uid.strip()
             if uid not in candidate_uids:
                 log.warning("Ignoring forgetting decision for unknown UID: %s", uid)
                 continue
-            normalized.append(
-                ForgettingDecision(
-                    uid=uid,
-                    action=decision.action,
-                    reason=decision.reason.strip(),
-                )
-            )
-            seen_uids.add(uid)
-        for candidate in candidates:
-            if candidate.uid not in seen_uids:
-                normalized.append(
-                    ForgettingDecision(
-                        uid=candidate.uid,
-                        action=ForgettingAction.KEEP,
-                        reason="Missing decision; default keep",
-                    )
-                )
-        return normalized
+            decisions.append(ForgettingDecision(uid=uid, action=d.action, reason=d.reason.strip()))
+            seen.add(uid)
+        for ep in candidates:
+            if ep.uid not in seen:
+                decisions.append(ForgettingDecision(uid=ep.uid, action=ForgettingAction.KEEP, reason="Missing decision; default keep"))
+
+        # Execute actions
+        archived = 0
+        kept = 0
+        for decision in decisions:
+            if decision.action not in {ForgettingAction.ARCHIVE, ForgettingAction.FORGET}:
+                kept += 1
+                continue
+            try:
+                if decision.action is ForgettingAction.ARCHIVE:
+                    await self._graph.archive_episode(decision.uid)
+                    await self._store.archive_derivatives(decision.uid)
+                    label = "Archived"
+                else:
+                    await self._graph.delete_episode(decision.uid)
+                    await self._store.delete_derivatives(decision.uid)
+                    label = "Forgot"
+                archived += 1
+                log.info("%s episode %s: %s", label, decision.uid[:8], decision.reason)
+            except Exception:
+                log.exception("Failed to %s episode %s", decision.action.value.lower(), decision.uid[:8])
+                kept += 1
+
+        log.info("Forgetting cycle: %d assessed, %d kept, %d archived", len(candidates), kept, archived)
+        return ForgettingResult(kept=kept, archived=archived, total_assessed=len(candidates))
