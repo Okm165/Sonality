@@ -12,7 +12,7 @@ import threading
 
 from .. import config
 from ..llm.prompts import SUMMARIZATION_PROMPT
-from ..provider import chat_completion
+from ..provider import chat_completion, llm_semaphore_idle
 from .stm import ShortTermMemory, STMMessage
 
 log = logging.getLogger(__name__)
@@ -40,18 +40,23 @@ class BackgroundSummarizer(threading.Thread):
             try:
                 evictions = self._stm.drain_evictions()
                 if len(evictions) >= self._batch_threshold:
-                    batch = evictions[: self._max_batch_size]
-                    new_summary = self._summarize_batch(batch)
-                    if new_summary:
-                        if self._stm.running_summary:
-                            self._stm.running_summary = self._merge_summaries(
-                                self._stm.running_summary, new_summary
+                    if not llm_semaphore_idle():
+                        # Main interaction thread is active; defer to avoid blocking it.
+                        log.debug("LLM busy; deferring STM summarization (%d msgs)", len(evictions))
+                        self._stm.requeue_evictions(evictions)
+                    else:
+                        batch = evictions[: self._max_batch_size]
+                        new_summary = self._summarize_batch(batch)
+                        if new_summary:
+                            if self._stm.running_summary:
+                                self._stm.running_summary = self._merge_summaries(
+                                    self._stm.running_summary, new_summary
+                                )
+                            else:
+                                self._stm.running_summary = new_summary
+                            log.info(
+                                "Updated running summary (%d chars)", len(self._stm.running_summary)
                             )
-                        else:
-                            self._stm.running_summary = new_summary
-                        log.info(
-                            "Updated running summary (%d chars)", len(self._stm.running_summary)
-                        )
                 elif evictions:
                     # Put them back if not enough for a batch yet
                     self._stm.requeue_evictions(evictions)
