@@ -19,6 +19,21 @@ log = logging.getLogger(__name__)
 # Embedding calls are excluded (different endpoint, much faster).
 _LLM_SEMAPHORE: threading.Semaphore = threading.Semaphore(1)
 
+_LLM_REQUEST_TIMEOUT: int = 60  # seconds; 2 failed retries × 60s ≈ 124s max per call
+
+
+def llm_semaphore_idle() -> bool:
+    """Return True if the LLM semaphore is free (non-blocking probe).
+
+    Background workers (e.g. STM consolidator) use this to avoid preempting
+    the main interaction thread. Subject to TOCTOU races; treat as advisory.
+    """
+    acquired = _LLM_SEMAPHORE.acquire(blocking=False)
+    if acquired:
+        _LLM_SEMAPHORE.release()
+        return True
+    return False
+
 _RETRYABLE_HTTP_STATUSES = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
 _EMPTY_MAPPING: dict[str, object] = {}
 _THINKING_ANSWER_MARKERS = ("Final Output:", "Output:", "Answer:", "Final Answer:", "Response:")
@@ -41,6 +56,8 @@ def _normalize_schema_notation(text: str) -> str:
     # Bare ellipsis between delimiters  →  remove (handles {}, {key:val,...}, [...])
     text = re.sub(r",\s*\.\.\.\s*(?=[}\]])", "", text)  # trailing ", ..."
     text = re.sub(r"(?<=[{,\[])\s*\.\.\.\s*(?=[,}\]])", "", text)  # inner "..."
+    # ", ... "field":" between object fields  →  ", "field":"  (keeps structure valid)
+    text = re.sub(r',\s*\.\.\.\s*(?=")', ", ", text)
     # Standalone "..." value in a string  →  ""
     text = re.sub(r':\s*"\.\.\."', ': ""', text)
     # Quoted ellipsis as a JSON key placeholder  {"..."}  {"...", ...}  →  strip it
@@ -208,7 +225,7 @@ def _post_json(
             method="POST",
         )
         try:
-            with urlopen(request, timeout=90) as response:
+            with urlopen(request, timeout=_LLM_REQUEST_TIMEOUT) as response:
                 decoded = response.read().decode("utf-8")
             parsed = json.loads(decoded)
             if isinstance(parsed, dict):
@@ -294,16 +311,18 @@ def chat_completion(
         "messages": [dict(message) for message in messages],
         "max_tokens": max_tokens,
     }
+    if disable_thinking:
+        # Suppress Qwen3 chain-of-thought via reasoning_budget=0 per-request parameter.
+        # This works with system prompts, unlike /no_think in user message.
+        # chat_template_kwargs alone is broken in llama.cpp without --jinja server flag.
+        payload["reasoning_budget"] = 0
+        payload["chat_template_kwargs"] = {"enable_thinking": False}
     if temperature >= 0.0:
         payload["temperature"] = temperature
     if tools:
         payload["tools"] = [dict(tool) for tool in tools]
     if tool_choice:
         payload["tool_choice"] = dict(tool_choice)
-    if disable_thinking:
-        # Qwen3 and similar thinking models: suppress chain-of-thought so the
-        # JSON answer lands directly in `content` without token budget waste.
-        payload["chat_template_kwargs"] = {"enable_thinking": False}
 
     with _LLM_SEMAPHORE:
         raw = _post_json("/chat/completions", payload)
