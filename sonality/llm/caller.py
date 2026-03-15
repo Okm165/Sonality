@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from dataclasses import dataclass
@@ -14,20 +15,20 @@ from ..provider import chat_completion, extract_last_json_object
 
 log = logging.getLogger(__name__)
 
-_MAX_RETRIES: Final = 2
-_BACKOFF_BASE: Final = 1.5
+_MAX_RETRIES: Final = 3
+_BACKOFF_BASE: Final = 2.0
 _JSON_SYSTEM_PROMPT: Final = (
-    "Output ONLY a valid JSON object. "
+    "Output ONLY valid JSON (object or array). "
     "Do not include any explanation, preamble, markdown fences, or reasoning before or after the JSON. "
     "Do NOT use pipe characters (|), schema type annotations, or placeholder text as values — fill in actual values only. "
-    "Your entire response must be the JSON object and nothing else."
+    "Your entire response must be the JSON and nothing else."
 )
 _JSON_REPAIR_PROMPT: Final = (
     "The following JSON is malformed or does not match the required schema.\n"
     "Fix it so it is valid JSON matching the schema below.\n\n"
     "Schema: {schema}\n\nBroken JSON:\n{broken}\n\n"
     "Validation error: {error}\n\n"
-    "Return ONLY the corrected JSON object, no explanation."
+    "Return ONLY the corrected JSON (object or array), no explanation."
 )
 
 
@@ -63,12 +64,27 @@ def _raw_call(
     return completion.text
 
 
-def _parse_json(text: str) -> dict[str, object]:
-    """Extract a JSON object from LLM response text, tolerating markdown fences."""
+def _parse_json(text: str) -> dict[str, object] | list[object]:
+    """Extract JSON from LLM response text; returns a dict or bare list.
+
+    Tries whole-text parse first so bare JSON arrays (e.g. BatchBeliefUpdateResponse)
+    are returned intact. Falls back to extract_last_json_object which handles
+    markdown fences, trailing prose, multiple JSON blocks, and schema-template notation.
+    """
+    cleaned = text.strip().replace("```json", "").replace("```", "").strip()
+    try:
+        parsed = json.loads(cleaned)
+        if isinstance(parsed, list):
+            log.debug("_parse_json: bare JSON array (%d items)", len(parsed))
+            return parsed
+        if isinstance(parsed, dict):
+            return parsed
+    except json.JSONDecodeError:
+        pass
     result = extract_last_json_object(text)
-    if result is None:
-        raise ValueError(f"No valid JSON object found in LLM response: {text[:120]!r}")
-    return result
+    if result is not None:
+        return result
+    raise ValueError(f"No valid JSON in LLM response: {text[:120]!r}")
 
 
 def llm_call[T: BaseModel](
@@ -133,20 +149,8 @@ def llm_call[T: BaseModel](
                 raw_text=raw_text,
             )
 
-        except ValueError as exc:
-            last_error = f"JSON parse error: {exc}"
-            log.warning(
-                "llm_call attempt %d/%d schema=%s: %s | raw=%.200r",
-                attempt,
-                max_retries,
-                schema_name,
-                last_error,
-                raw_text,
-            )
-            # Log full raw text at debug level for forensic analysis
-            log.debug("llm_call full raw (schema=%s): %s", schema_name, raw_text)
-
         except ValidationError as exc:
+            # Must be before `except ValueError` — pydantic v2 ValidationError IS a ValueError.
             last_error = f"Schema validation: {exc}"
             log.warning(
                 "llm_call attempt %d/%d schema=%s validation failed: %s | raw=%.80r",
@@ -180,6 +184,18 @@ def llm_call[T: BaseModel](
                 )
             except Exception as repair_exc:
                 log.warning("llm_call repair failed schema=%s: %s", schema_name, repair_exc)
+
+        except ValueError as exc:
+            last_error = f"JSON parse error: {exc}"
+            log.warning(
+                "llm_call attempt %d/%d schema=%s: %s | raw=%.200r",
+                attempt,
+                max_retries,
+                schema_name,
+                last_error,
+                raw_text,
+            )
+            log.debug("llm_call full raw (schema=%s): %s", schema_name, raw_text)
 
         except RuntimeError as exc:
             last_error = f"Provider error: {exc}"
