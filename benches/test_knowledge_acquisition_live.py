@@ -20,6 +20,7 @@ from .knowledge_harness import (
     KnowledgeBatteryReport,
     avg_confidence,
     citation_count_for,
+    clear_knowledge_features,
     count_by_tag,
     count_matching_facts,
     extraction_precision,
@@ -336,6 +337,7 @@ class TestDeduplicationFidelity:
 
     def test_k6_deduplication(self) -> None:
         with tempfile.TemporaryDirectory() as td:
+            clear_knowledge_features()
             results = run_scenario(K6_SCENARIO, td)
             print_step_results(results, "K6: Deduplication Fidelity")
 

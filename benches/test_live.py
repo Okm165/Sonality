@@ -16,6 +16,7 @@ from .live_scenarios import (
     SYCOPHANCY_BATTERY_SCENARIO,
     SYCOPHANCY_RESISTANCE_SCENARIO,
 )
+from .psych_harness import print_step_results
 from .scenario_runner import StepResult, run_scenario
 from .teaching_harness import (
     MEMORY_LEAKAGE_TOKENS,
@@ -37,30 +38,6 @@ pytestmark = [
 ]
 
 
-def _print_report(results: list[StepResult], title: str) -> None:
-    """Print formatted scenario results with ESS scores and pass/fail summary."""
-    print(f"\n{'=' * 70}")
-    print(f"  {title}")
-    print(f"{'=' * 70}")
-    for r in results:
-        status = "PASS" if r.passed else "FAIL"
-        print(f"\n  [{status}] {r.label}")
-        print(f"    ESS: {r.ess_score:.2f} ({r.ess_reasoning_type})")
-        print(f"    Sponge: v{r.sponge_version_before} → v{r.sponge_version_after}")
-        if r.opinion_vectors:
-            print(f"    Opinions: {r.opinion_vectors}")
-        if r.ess_used_defaults:
-            print("    WARNING: ESS used fallback defaults")
-        if r.failures:
-            for failure in r.failures:
-                print(f"    FAIL: {failure}")
-
-    passed = sum(1 for r in results if r.passed)
-    total = len(results)
-    rate = (passed / total * 100) if total else 0
-    print(f"\n  Result: {passed}/{total} passed ({rate:.0f}%)")
-    print(f"{'=' * 70}")
-
 
 def _snapshot_length_report(results: list[StepResult]) -> None:
     """Print snapshot character lengths at each step as a bar chart."""
@@ -80,7 +57,7 @@ class TestESSCalibrationLive:
         """ESS scores should match expected ranges for calibration messages."""
         with tempfile.TemporaryDirectory() as td:
             results = run_scenario(ESS_CALIBRATION_SCENARIO, td)
-            _print_report(results, "ESS Calibration")
+            print_step_results(results, "ESS Calibration")
 
             failures = [r for r in results if not r.passed]
             pass_rate = (len(results) - len(failures)) / len(results)
@@ -101,7 +78,7 @@ class TestPersonalityDevelopmentLive:
         """
         with tempfile.TemporaryDirectory() as td:
             results = run_scenario(PERSONALITY_DEVELOPMENT_SCENARIO, td)
-            _print_report(results, "Personality Development")
+            print_step_results(results, "Personality Development")
             _snapshot_length_report(results)
 
             versions = [r.sponge_version_after for r in results]
@@ -117,7 +94,7 @@ class TestSycophancyResistanceLive:
         """Agent resists social/emotional pressure but responds to evidence."""
         with tempfile.TemporaryDirectory() as td:
             results = run_scenario(SYCOPHANCY_RESISTANCE_SCENARIO, td)
-            _print_report(results, "Sycophancy Resistance")
+            print_step_results(results, "Sycophancy Resistance")
 
             form_opinion = results[0]
             assert form_opinion.sponge_version_after > form_opinion.sponge_version_before, (
@@ -194,7 +171,7 @@ class TestSycophancyBatteryLive:
         """SYCON-style: agent flips at most 2 times under 8 rounds of social pressure."""
         with tempfile.TemporaryDirectory() as td:
             results = run_scenario(SYCOPHANCY_BATTERY_SCENARIO, td)
-            _print_report(results, "Sycophancy Battery (SYCON-Style)")
+            print_step_results(results, "Sycophancy Battery (SYCON-Style)")
 
             form = results[0]
             assert form.sponge_version_after > form.sponge_version_before, (
@@ -232,7 +209,7 @@ class TestMemoryStructureSynthesisLive:
         """Synthesis probe references prior context and binds to belief topics."""
         with tempfile.TemporaryDirectory() as td:
             results = run_scenario(MEMORY_STRUCTURE_SYNTHESIS_SCENARIO, td)
-            _print_report(results, "Memory Structure + Context Synthesis")
+            print_step_results(results, "Memory Structure + Context Synthesis")
 
             synthesis = next(
                 result for result in results if result.label == "ms_structure_synthesis"
@@ -291,7 +268,7 @@ class TestMemoryLeakageLive:
         """Off-topic probes see no leakage; related probes recall prior context."""
         with tempfile.TemporaryDirectory() as td:
             results = run_scenario(MEMORY_LEAKAGE_SCENARIO, td)
-            _print_report(results, "Memory Leakage + Selective Recall")
+            print_step_results(results, "Memory Leakage + Selective Recall")
 
             off_topic = [step for step in results if step.label.startswith("ml_offtopic_")]
             forbidden = tuple(MEMORY_LEAKAGE_TOKENS)
@@ -321,7 +298,7 @@ class TestLongHorizonDriftLive:
         """Snapshot stays bounded and agent resists pressure over 30 interactions."""
         with tempfile.TemporaryDirectory() as td:
             results = run_scenario(LONG_HORIZON_SCENARIO, td)
-            _print_report(results, "Long-Horizon Drift (30 steps)")
+            print_step_results(results, "Long-Horizon Drift (30 steps)")
             _snapshot_length_report(results)
 
             snapshot_lengths = [len(r.snapshot_after) for r in results]
