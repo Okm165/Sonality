@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Final
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, model_validator
 
 from . import config
 from .ess import (
@@ -26,9 +26,9 @@ from .ess import (
 )
 from .llm.caller import llm_call
 from .llm.prompts import (
-    BELIEF_DECAY_PROMPT,
+    BATCH_BELIEF_DECAY_PROMPT,
+    BATCH_ENTRENCHMENT_DETECTION_PROMPT,
     DISAGREEMENT_DETECTION_PROMPT,
-    ENTRENCHMENT_DETECTION_PROMPT,
     REFLECTION_GATE_PROMPT,
     TOPIC_CANONICALIZATION_PROMPT,
 )
@@ -56,6 +56,7 @@ from .memory import (
     TemporalExpansionDecision,
     UpdateMagnitude,
     assess_belief_evidence,
+    assess_belief_evidence_batch,
     assess_health,
     consolidate_knowledge,
     dump_memory_snapshot,
@@ -90,9 +91,11 @@ MAX_SINGLE_UPDATE_MAGNITUDE: Final[float] = 0.25
 
 # Minimum ESS score required for empirical-evidence personality updates (insight
 # extraction, belief staging, provenance opinion updates).
-# Chosen to block bare authority claims (~0.08) and weak popularity surveys (~0.28)
-# while allowing genuine empirical arguments (~0.35+).
-MIN_ESS_FOR_EMPIRICAL_UPDATE: Final[float] = 0.30
+# Chosen to block bare authority claims (~0.08) and appeal-to-authority claims (~0.22)
+# while allowing borderline empirical arguments with unnamed sources (~0.25+).
+# Previously 0.30, lowered to capture weak-but-legitimate evidence (named source
+# without explicit mechanism, single-study references) at reduced magnitude.
+MIN_ESS_FOR_EMPIRICAL_UPDATE: Final[float] = 0.25
 
 # Minimum ESS score for logical_argument insight extraction. Lower than the
 # empirical threshold to allow principled reasoning to shape beliefs, but not
@@ -119,11 +122,6 @@ class ReflectionTrigger(StrEnum):
 class DisagreementVerdict(StrEnum):
     DISAGREEMENT = "DISAGREEMENT"
     NO_DISAGREEMENT = "NO_DISAGREEMENT"
-
-
-class EntrenchmentStatus(StrEnum):
-    ENTRENCHED = "ENTRENCHED"
-    NOT_ENTRENCHED = "NOT_ENTRENCHED"
 
 
 class BeliefDecayAction(StrEnum):
@@ -161,21 +159,46 @@ class DisagreementDetectionResponse(BaseModel):
     reasoning: str = ""
 
 
-class BeliefDecayResponse(BaseModel):
-    """Structured response for belief staleness handling."""
+class BeliefDecayDecision(BaseModel):
+    """Single-topic decay decision within a batch response."""
 
+    topic: str
     action: BeliefDecayAction = BeliefDecayAction.RETAIN
     new_confidence: float = 0.0
     reasoning: str = ""
 
 
-class EntrenchmentDetectionResponse(BaseModel):
-    """Structured response for belief entrenchment detection."""
+class BatchBeliefDecayResponse(BaseModel):
+    """Batch decay assessment — list of per-topic decisions."""
 
-    entrenchment_status: EntrenchmentStatus = EntrenchmentStatus.NOT_ENTRENCHED
-    confidence: float = 0.0
+    decisions: list[BeliefDecayDecision] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_list(cls, data: object) -> object:
+        if isinstance(data, list):
+            return {"decisions": data}
+        return data
+
+
+class EntrenchmentDecision(BaseModel):
+    """Single entrenched topic within a batch response."""
+
+    topic: str
     reasoning: str = ""
-    recommendation: str = ""
+
+
+class BatchEntrenchmentResponse(BaseModel):
+    """Batch entrenchment detection — list of entrenched topics only."""
+
+    entrenched: list[EntrenchmentDecision] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_list(cls, data: object) -> object:
+        if isinstance(data, list):
+            return {"entrenched": data}
+        return data
 
 
 class ReflectionGateResponse(BaseModel):
@@ -417,6 +440,8 @@ class SonalityAgent:
         self.conversation.append({"role": "user", "content": user_message})
         self._truncate_conversation()
 
+        _t_retrieval_elapsed = time.perf_counter() - _t0
+        _t_llm = time.perf_counter()
         completion = chat_completion(
             model=self.model,
             max_tokens=config.FAST_LLM_MAX_TOKENS,
@@ -425,6 +450,7 @@ class SonalityAgent:
                 *self.conversation,
             ),
         )
+        _llm_elapsed = time.perf_counter() - _t_llm
         response_input_tokens = completion.input_tokens
         response_output_tokens = completion.output_tokens
         assistant_msg = completion.text
@@ -437,8 +463,12 @@ class SonalityAgent:
 
         log.info("Agent: %.200s", assistant_msg)
         log.debug("Agent (full): %s", assistant_msg)
-        _llm_elapsed = time.perf_counter() - _t0
-        log.info("Interaction #%d LLM: %.1fs", self.sponge.interaction_count + 1, _llm_elapsed)
+        log.info(
+            "Interaction #%d LLM: %.1fs (retrieval=%.1fs)",
+            self.sponge.interaction_count + 1,
+            _llm_elapsed,
+            _t_retrieval_elapsed,
+        )
 
         self._post_process(user_message, assistant_msg)
         _total_elapsed = time.perf_counter() - _t0
@@ -673,6 +703,13 @@ class SonalityAgent:
             "debunked_claim",
             "anecdotal",
         }
+        log.debug(
+            "MUTATION_GATE manipulative=%s type=%s score=%.3f topics=%s",
+            manipulative,
+            ess.reasoning_type,
+            ess.score,
+            list(ess.topics),
+        )
         if manipulative:
             log.info(
                 "Manipulative interaction (%s, score=%.3f): freezing sponge mutation",
@@ -719,13 +756,32 @@ class SonalityAgent:
         self.sponge.interaction_count += 1
 
         if not manipulative:
+            staged_before = len(self.sponge.staged_opinion_updates)
             committed = self.sponge.apply_due_staged_updates()
+            staged_after = len(self.sponge.staged_opinion_updates)
             if committed:
                 log.info("Committed staged beliefs: %s", committed)
+                log.debug(
+                    "STAGED_COMMIT staged=%d→%d committed=%d",
+                    staged_before,
+                    staged_after,
+                    len(committed),
+                )
+                for topic in committed:
+                    pos = self.sponge.opinion_vectors.get(topic, 0.0)
+                    meta = self.sponge.belief_meta.get(topic)
+                    log.debug(
+                        "  COMMIT topic=%s pos=%+.4f conf=%.2f ev=%d",
+                        topic,
+                        pos,
+                        meta.confidence if meta else 0.0,
+                        meta.evidence_count if meta else 0,
+                    )
             else:
                 log.debug(
-                    "No staged beliefs due (pending=%d)",
-                    len(self.sponge.staged_opinion_updates),
+                    "STAGED_COMMIT none due (pending=%d interaction=%d)",
+                    staged_before,
+                    self.sponge.interaction_count,
                 )
             self._log_event(
                 {
@@ -782,13 +838,48 @@ class SonalityAgent:
         canonical = self._normalize_topics_llm(ess.topics)
         return ess if canonical == ess.topics else dataclasses.replace(ess, topics=canonical)
 
+    # Conversational meta-labels that should never become tracked belief topics.
+    # The ESS prompt bans these, but the model occasionally emits them. This is a
+    # second-line filter so they never reach opinion_vectors or belief_meta.
+    _META_TOPIC_BLOCKLIST: Final = frozenset(
+        {
+            "social pressure",
+            "consensus",
+            "industry consensus",
+            "scientific consensus",
+            "expert consensus",
+            "group consensus",
+            "disagreement",
+            "argument",
+            "evidence",
+            "manipulation",
+            "survey method",
+            "consistency",
+            "reliability",
+            "memory",
+            "credibility",
+            "pressure",
+            "peer pressure",
+            "emotion",
+            "emotional appeal",
+            "opinion",
+            "reasoning",
+        }
+    )
+
     def _normalize_topics_llm(self, raw_topics: tuple[str, ...]) -> tuple[str, ...]:
         """Map ESS topic labels to canonical forms already in belief memory.
 
         Prevents topic fragmentation where "nuclear" and "nuclear energy" accumulate
         as separate beliefs. Uses a session-scoped cache to avoid repeated LLM calls
         for topics seen in previous interactions.
+        Strips conversational meta-labels (social_pressure, consensus, etc.) before
+        they pollute belief state.
         """
+        if not raw_topics:
+            return raw_topics
+        # Strip meta-topics before any further processing
+        raw_topics = tuple(t for t in raw_topics if t.strip().lower() not in self._META_TOPIC_BLOCKLIST)
         if not raw_topics:
             return raw_topics
 
@@ -812,9 +903,6 @@ class SonalityAgent:
                 self._topic_canon_cache[lower] = dehyphenated
                 log.debug("Topic hyphen-normalized: '%s' → '%s'", lower, dehyphenated)
                 result.append(dehyphenated)
-            elif not existing:
-                self._topic_canon_cache[lower] = lower
-                result.append(lower)
             else:
                 uncached.append(lower)
 
@@ -876,12 +964,19 @@ class SonalityAgent:
                 unless the reasoning type is score-exempt (e.g. logical_argument).
         """
         if ess.knowledge_density == KnowledgeDensity.NONE:
-            log.debug("Knowledge extraction skipped: density=NONE")
+            log.debug(
+                "KNOWLEDGE_SKIP density=NONE type=%s score=%.2f",
+                ess.reasoning_type,
+                ess.score,
+            )
             return
         log.debug(
-            "Knowledge extraction starting: density=%s stage_opinions=%s",
+            "KNOWLEDGE_EXTRACT density=%s stage_opinions=%s type=%s score=%.2f ep=%s",
             ess.knowledge_density,
             stage_opinions,
+            ess.reasoning_type,
+            ess.score,
+            episode_uid[:8],
         )
         text = f"User: {user_message}\nAssistant: {agent_response}"
         try:
@@ -945,6 +1040,11 @@ class SonalityAgent:
             committed = self.sponge.opinion_vectors.get(topic, 0.0)
             staged = staged_net.get(topic, 0.0)
             pos = committed + staged
+            # Skip LLM call when there's no meaningful position to disagree with,
+            # or when user's claim direction matches the agent's existing stance
+            # (agreement cannot be a disagreement).
+            if abs(pos) < 0.05 or (pos * sign > 0):
+                continue
             prompt = DISAGREEMENT_DETECTION_PROMPT.format(
                 user_message=user_message[:500],
                 topic=topic,
@@ -1043,12 +1143,12 @@ class SonalityAgent:
         if require_topics and not ess.topics:
             return False
         if ess.reasoning_type in self._NO_UPDATE_REASONING:
-            log.info(
+            log.debug(
                 "Skipping %s: reasoning_type=%s is non-substantive", update_kind, ess.reasoning_type
             )
             return False
         if ess.score < MIN_ESS_FOR_EMPIRICAL_UPDATE:
-            log.info(
+            log.debug(
                 "Skipping %s: score=%.3f below min %.2f (type=%s)",
                 update_kind,
                 ess.score,
@@ -1057,7 +1157,7 @@ class SonalityAgent:
             )
             return False
         if not self._ess_reliable(ess):
-            log.info(
+            log.debug(
                 "Skipping %s due to ESS fallback defaults (severity=%s fields=%s)",
                 update_kind,
                 ess.default_severity,
@@ -1082,7 +1182,7 @@ class SonalityAgent:
             else MIN_ESS_FOR_EMPIRICAL_UPDATE
         )
         if ess.score < min_score:
-            log.info(
+            log.debug(
                 "Skipping insight: score=%.3f below min %.2f (type=%s)",
                 ess.score,
                 min_score,
@@ -1090,7 +1190,7 @@ class SonalityAgent:
             )
             return False
         if not self._ess_reliable(ess):
-            log.info(
+            log.debug(
                 "Skipping insight due to ESS fallback defaults (severity=%s fields=%s)",
                 ess.default_severity,
                 ess.defaulted_fields,
@@ -1111,6 +1211,7 @@ class SonalityAgent:
         """Stage one topic update and emit a consistent audit event."""
         if magnitude <= 0.0:
             return
+        prior_pos = self.sponge.opinion_vectors.get(topic, 0.0)
         due = self.sponge.stage_opinion_update(
             topic=topic,
             direction=direction,
@@ -1118,6 +1219,15 @@ class SonalityAgent:
             cooling_period=config.OPINION_COOLING_PERIOD,
             provenance=provenance,
             new_uncertainty=new_uncertainty,
+        )
+        log.debug(
+            "STAGE topic=%s dir=%+.1f mag=%.4f prior_pos=%+.3f due=#%d | %s",
+            topic,
+            direction,
+            magnitude,
+            prior_pos,
+            due,
+            provenance[:80],
         )
         event: dict[str, object] = {
             "event": "opinion_staged",
@@ -1149,22 +1259,23 @@ class SonalityAgent:
         content = f"User: {user_message}\nESS summary: {ess.summary}\nESS score: {ess.score:.2f}"
         fallback_direction = ess.opinion_direction.sign
 
-        for topic in ess.topics:
-            try:
-                update = await assess_belief_evidence(
-                    topic=topic,
-                    episode_uid=episode_uid,
-                    episode_content=content,
-                    ess_score=ess.score,
-                    reasoning_type=str(ess.reasoning_type),
-                    source_reliability=str(ess.source_reliability),
-                    sponge=self.sponge,
-                    graph=self._graph,
-                )
-            except Exception:
-                log.exception("Belief provenance assessment failed for %s", topic)
-                continue
+        try:
+            updates = await assess_belief_evidence_batch(
+                topics=list(ess.topics),
+                episode_uid=episode_uid,
+                episode_content=content,
+                ess_score=ess.score,
+                reasoning_type=str(ess.reasoning_type),
+                source_reliability=str(ess.source_reliability),
+                sponge=self.sponge,
+                graph=self._graph,
+            )
+        except Exception:
+            log.exception("Batch belief provenance assessment failed")
+            updates = []
 
+        for update in updates:
+            topic = update.topic
             direction = update.direction if abs(update.direction) > 1e-6 else fallback_direction
             if abs(direction) < 1e-6:
                 continue
@@ -1179,10 +1290,14 @@ class SonalityAgent:
             raw_mag = max(0.0, min(1.0, update.evidence_strength)) / (confidence + 1.0)
             effective_mag = min(raw_mag, MAX_SINGLE_UPDATE_MAGNITUDE)
             log.debug(
-                "Belief magnitude %s: raw=%.3f effective=%.3f (type=%s)",
+                "BELIEF_MAG topic=%s raw=%.3f effective=%.3f dir=%+.1f "
+                "evidence_strength=%.3f confidence=%.3f type=%s",
                 topic,
                 raw_mag,
                 effective_mag,
+                direction,
+                update.evidence_strength,
+                confidence,
                 ess.reasoning_type,
             )
             self._stage_topic_opinion_update(
@@ -1205,7 +1320,15 @@ class SonalityAgent:
         Avoids lossy per-interaction full snapshot rewrites (ABBEL 2025: belief
         bottleneck). Snapshot only changes during reflection (Park et al. 2023).
         """
-        if not self._ess_allows_insight_update(ess):
+        allows = self._ess_allows_insight_update(ess)
+        log.debug(
+            "INSIGHT_GATE allows=%s type=%s score=%.2f pending=%d",
+            allows,
+            ess.reasoning_type,
+            ess.score,
+            len(self.sponge.pending_insights),
+        )
+        if not allows:
             return
         try:
             insight = extract_insight(
@@ -1458,75 +1581,84 @@ class SonalityAgent:
         )
 
     def _decay_beliefs_with_llm(self) -> list[str]:
-        """Use LLM staleness assessment to retain, decay, or forget beliefs."""
-        dropped: list[str] = []
-        stale_candidates = [
-            (
-                self.sponge.interaction_count - meta.last_reinforced,
-                topic,
-                meta,
-                self.sponge.opinion_vectors.get(topic, 0.0),
-            )
-            for topic, meta in self.sponge.belief_meta.items()
-            if self.sponge.interaction_count - meta.last_reinforced >= 5
-        ]
-        for gap, topic, meta, position in sorted(stale_candidates, reverse=True)[:10]:
-            prompt = BELIEF_DECAY_PROMPT.format(
-                topic=topic,
-                position=f"{position:+.2f}",
-                confidence=f"{meta.confidence:.2f}",
-                evidence_count=meta.evidence_count,
-                gap=gap,
+        """Batch LLM staleness assessment to retain, decay, or forget beliefs."""
+        stale_candidates = sorted(
+            [
+                (self.sponge.interaction_count - meta.last_reinforced, topic, meta)
+                for topic, meta in self.sponge.belief_meta.items()
+                if self.sponge.interaction_count - meta.last_reinforced >= 5
+            ],
+            reverse=True,
+        )[:10]
+        if not stale_candidates:
+            return []
+
+        beliefs_json = json.dumps([
+            {
+                "topic": topic,
+                "position": f"{self.sponge.opinion_vectors.get(topic, 0.0):+.2f}",
+                "confidence": f"{meta.confidence:.2f}",
+                "evidence_count": meta.evidence_count,
+                "gap": gap,
+            }
+            for gap, topic, meta in stale_candidates
+        ])
+        result = llm_call(
+            prompt=BATCH_BELIEF_DECAY_PROMPT.format(
                 total_interactions=self.sponge.interaction_count,
-            )
-            result = llm_call(
-                prompt=prompt,
-                response_model=BeliefDecayResponse,
-                fallback=BeliefDecayResponse(
-                    action=BeliefDecayAction.RETAIN, new_confidence=meta.confidence
-                ),
-            )
-            if not result.success:
+                beliefs_json=beliefs_json,
+            ),
+            response_model=BatchBeliefDecayResponse,
+            fallback=BatchBeliefDecayResponse(decisions=[]),
+        )
+        dropped: list[str] = []
+        decisions_by_topic = {d.topic: d for d in result.value.decisions}
+        for _, topic, meta in stale_candidates:
+            decision = decisions_by_topic.get(topic)
+            if decision is None:
                 continue
-            response = result.value
-            action = response.action
-            if action is BeliefDecayAction.FORGET:
+            if decision.action is BeliefDecayAction.FORGET:
                 dropped.append(topic)
                 del self.sponge.belief_meta[topic]
                 self.sponge.opinion_vectors.pop(topic, None)
-                continue
-            if action is BeliefDecayAction.DECAY:
-                meta.confidence = max(0.0, min(1.0, response.new_confidence))
+            elif decision.action is BeliefDecayAction.DECAY:
+                meta.confidence = max(0.0, min(1.0, decision.new_confidence))
                 meta.uncertainty = 1.0 - meta.confidence
+                log.debug("Belief decay: %s confidence → %.2f (%s)", topic, meta.confidence, decision.reasoning[:60])
         return dropped
 
     def _detect_entrenched_beliefs_llm(self, min_updates: int = 4) -> list[str]:
-        """Use LLM to detect echo-chamber style belief entrenchment (cached per turn)."""
+        """Batch LLM entrenchment detection (cached per turn)."""
         if self._last_entrenched_interaction == self.sponge.interaction_count:
             return list(self._last_entrenched)
-        entrenched: list[str] = []
         candidates = [
             (topic, meta, self.sponge.opinion_vectors.get(topic, 0.0))
             for topic, meta in self.sponge.belief_meta.items()
             if len(meta.recent_updates) >= min_updates
+        ][:10]
+        if not candidates:
+            self._last_entrenched = []
+            self._last_entrenched_interaction = self.sponge.interaction_count
+            return []
+        beliefs_json = json.dumps([
+            {
+                "topic": topic,
+                "position": f"{position:+.2f}",
+                "recent_updates": [f"{u:+.3f}" for u in meta.recent_updates[-8:]],
+                "supporting_count": len(meta.supporting_episode_uids),
+                "contradicting_count": len(meta.contradicting_episode_uids),
+            }
+            for topic, meta, position in candidates
+        ])
+        result = llm_call(
+            prompt=BATCH_ENTRENCHMENT_DETECTION_PROMPT.format(beliefs_json=beliefs_json),
+            response_model=BatchEntrenchmentResponse,
+            fallback=BatchEntrenchmentResponse(entrenched=[]),
+        )
+        valid_topics = {topic for topic, _, _ in candidates}
+        entrenched = [
+            d.topic for d in result.value.entrenched if d.topic in valid_topics
         ]
-        for topic, meta, position in candidates[:10]:
-            prompt = ENTRENCHMENT_DETECTION_PROMPT.format(
-                topic=topic,
-                position=f"{position:+.2f}",
-                recent_updates=", ".join(f"{update:+.3f}" for update in meta.recent_updates[-8:]),
-                supporting_count=len(meta.supporting_episode_uids),
-                contradicting_count=len(meta.contradicting_episode_uids),
-            )
-            result = llm_call(
-                prompt=prompt,
-                response_model=EntrenchmentDetectionResponse,
-                fallback=EntrenchmentDetectionResponse(),
-            )
-            if not result.success:
-                continue
-            if result.value.entrenchment_status is EntrenchmentStatus.ENTRENCHED:
-                entrenched.append(topic)
         self._last_entrenched = entrenched
         self._last_entrenched_interaction = self.sponge.interaction_count
         return entrenched
@@ -1538,6 +1670,14 @@ class SonalityAgent:
         and can erase minority traits from the narrative snapshot.
         """
         gate = self._reflection_gate()
+        log.debug(
+            "REFLECT_GATE trigger=%s label=%s window=%d pending_insights=%d staged=%d",
+            gate.trigger,
+            gate.trigger_label,
+            gate.window_interactions,
+            len(self.sponge.pending_insights),
+            len(self.sponge.staged_opinion_updates),
+        )
         if gate.trigger is ReflectionTrigger.SKIP:
             return
 
@@ -1825,7 +1965,8 @@ class SonalityAgent:
 
         warnings: list[str] = []
 
-        entrenched = self._detect_entrenched_beliefs_llm()
+        # Use cached result from this turn's reflection call to avoid extra LLM call.
+        entrenched = list(self._last_entrenched)
         if entrenched:
             warnings.append("entrenched_beliefs")
         contradictions = self._collect_unresolved_contradictions()
