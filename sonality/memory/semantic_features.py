@@ -122,6 +122,7 @@ class SemanticIngestionWorker:
         self._pg_pool: AsyncConnectionPool | None = None
         self._queue: queue.Queue[tuple[str, str]] = queue.Queue()  # (episode_uid, content)
         self._loop = asyncio.new_event_loop()
+        self._loop_thread: threading.Thread | None = None
         self._thread = threading.Thread(target=self._run, name="semantic-ingestion", daemon=True)
         self._stop_event = threading.Event()
 
@@ -129,8 +130,13 @@ class SemanticIngestionWorker:
         """Submit a coroutine to the worker's own dedicated event loop.
 
         Cancels the underlying asyncio task on timeout to prevent connection
-        pool exhaustion from orphaned coroutines.
+        pool exhaustion from orphaned coroutines. Closes the coroutine if the
+        loop is already stopped (e.g. during agent shutdown) to suppress
+        'coroutine was never awaited' ResourceWarnings.
         """
+        if not self._loop.is_running():
+            coro.close()
+            raise RuntimeError("semantic ingestion loop is not running")
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
         try:
             return future.result(timeout=config.ASYNC_TIMEOUT)
@@ -173,21 +179,45 @@ class SemanticIngestionWorker:
             # Spin the dedicated event loop in a separate daemon thread first,
             # then open the pool on that loop so asyncio primitives are bound
             # to the correct event loop throughout the worker's lifetime.
-            loop_thread = threading.Thread(
+            self._loop_thread = threading.Thread(
                 target=self._loop.run_forever, name="semantic-ingestion-loop", daemon=True
             )
-            loop_thread.start()
+            self._loop_thread.start()
             self._run_async(self._open_pool())
             self._thread.start()
         log.info("Semantic ingestion worker started")
 
+    async def _cancel_all_and_close_pool(self) -> None:
+        """Cancel pending tasks then close the connection pool.
+
+        Must be called from within the worker's own event loop so that
+        asyncio.all_tasks() sees all outstanding coroutines bound to it.
+        """
+        tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        await self._close_pool()
+
     def stop(self) -> None:
-        """Signal the worker to stop and shut down the dedicated event loop."""
+        """Signal the worker to stop, drain pending tasks, shut down the event loop.
+
+        Extends join timeout to 30 s so in-flight batches finish cleanly.
+        Cancels any remaining async tasks before closing the pool to avoid
+        'coroutine was never awaited' RuntimeWarnings during teardown.
+        """
         self._stop_event.set()
         if self._thread.is_alive():
-            self._thread.join(timeout=10.0)
-        self._run_async(self._close_pool())
-        self._loop.call_soon_threadsafe(self._loop.stop)
+            self._thread.join(timeout=30.0)
+        if self._loop.is_running():
+            try:
+                self._run_async(self._cancel_all_and_close_pool())
+            except Exception:
+                log.debug("Error during semantic worker shutdown", exc_info=True)
+            self._loop.call_soon_threadsafe(self._loop.stop)
+        if self._loop_thread is not None and self._loop_thread.is_alive():
+            self._loop_thread.join(timeout=5.0)
 
     def enqueue(self, episode_uid: str, content: str) -> None:
         """Queue an episode for semantic feature extraction."""
@@ -249,8 +279,45 @@ class SemanticIngestionWorker:
             )
             return
         response = result.value
+        if len(response.commands) > 4:
+            log.debug(
+                "Feature extraction: capping %d commands → 4 for category=%s",
+                len(response.commands),
+                category,
+            )
+            response.commands = response.commands[:4]
+        # Deduplicate by tag within same pass — keep last (most refined) command per tag.
+        seen_tags: dict[str, int] = {}
+        for i, cmd in enumerate(response.commands):
+            if cmd.tag:
+                seen_tags[cmd.tag] = i
+        if len(seen_tags) < len(response.commands):
+            dupes = len(response.commands) - len(seen_tags)
+            response.commands = [response.commands[i] for i in sorted(seen_tags.values())]
+            log.debug("Feature extraction: removed %d duplicate-tag commands for category=%s", dupes, category)
 
-        for cmd in response.commands:
+        # Pre-filter commands and batch-embed all UPSERT texts in a single HTTP call.
+        # Previously this made one embed_query call per feature, which serialized 11+
+        # round-trips to Ollama. Batching reduces latency from ~O(n) to ~O(1).
+        upsert_indices = [
+            i
+            for i, cmd in enumerate(response.commands)
+            if cmd.command in {FeatureCommandType.ADD, FeatureCommandType.UPDATE}
+        ]
+        upsert_texts = [
+            response.commands[i].value or response.commands[i].feature for i in upsert_indices
+        ]
+        batch_embeddings: list[list[float]] = []
+        if upsert_texts:
+            try:
+                batch_embeddings = self._embedder.embed_documents(upsert_texts)
+            except Exception:
+                log.warning("Batch embedding failed for %s features in %s", len(upsert_texts), category)
+        embedding_map: dict[int, list[float]] = {
+            idx: emb for idx, emb in zip(upsert_indices, batch_embeddings)
+        }
+
+        for i, cmd in enumerate(response.commands):
             if cmd.command in {FeatureCommandType.ADD, FeatureCommandType.UPDATE}:
                 log.info(
                     "Feature UPSERT: %s/%s/%s = %s (conf=%.2f)",
@@ -280,29 +347,41 @@ class SemanticIngestionWorker:
                 )
             else:
                 continue
-            embedding: list[float] = []
-            if cmd.command in {FeatureCommandType.ADD, FeatureCommandType.UPDATE}:
-                try:
-                    embedding = self._embedder.embed_query(cmd.value or cmd.feature)
-                except Exception:
-                    log.warning(
-                        "Embedding failed for %s/%s/%s; skipping", category, cmd.tag, cmd.feature
-                    )
-                    continue
+            embedding = embedding_map.get(i, [])
+            if cmd.command in {FeatureCommandType.ADD, FeatureCommandType.UPDATE} and not embedding:
+                log.warning("Embedding missing for %s/%s/%s; skipping", category, cmd.tag, cmd.feature)
+                continue
             try:
                 self._run_async(self._persist_command_async(episode_uid, category, cmd, embedding))
-            except Exception:
-                log.exception(
-                    "Feature persistence failed for episode=%s %s/%s/%s",
+            except TimeoutError:
+                # Pool contention under test load — background, non-critical.
+                log.debug(
+                    "Feature persistence timed out (pool contention) episode=%s %s/%s/%s",
                     episode_uid[:8],
                     category,
                     cmd.tag,
                     cmd.feature,
                 )
+            except RuntimeError as exc:
+                log.debug("Feature persistence skipped (shutdown) episode=%s %s/%s/%s: %s",
+                    episode_uid[:8], category, cmd.tag, cmd.feature, exc)
+            except Exception:
+                log.warning(
+                    "Feature persistence failed for episode=%s %s/%s/%s",
+                    episode_uid[:8],
+                    category,
+                    cmd.tag,
+                    cmd.feature,
+                    exc_info=True,
+                )
         try:
             self._consolidate_features(category)
+        except TimeoutError:
+            log.debug("Feature consolidation timed out (pool contention) category=%s", category)
+        except RuntimeError as exc:
+            log.debug("Feature consolidation skipped (shutdown) category=%s: %s", category, exc)
         except Exception:
-            log.exception("Feature consolidation failed for category=%s", category)
+            log.warning("Feature consolidation failed for category=%s", category, exc_info=True)
 
     def _load_existing_features(self, category: str) -> str:
         """Load current category features to give extractor update/delete context."""
@@ -326,8 +405,14 @@ class SemanticIngestionWorker:
         duplicate features are unlikely.
         """
         features = self._run_async(self._load_feature_rows_async(category, limit=40))
-        if len(features) < 8:
+        if len(features) < 15:
+            log.debug(
+                "Skipping consolidation for category=%s: %d features < 15 threshold",
+                category,
+                len(features),
+            )
             return
+        log.debug("Consolidating %d features in category=%s", len(features), category)
         features_text = "\n".join(
             f"- uid={row.uid} | [{row.tag}] {row.feature_name}: {row.value}"
             f" (conf={row.confidence:.2f})"
@@ -352,7 +437,7 @@ class SemanticIngestionWorker:
         if response.consolidation_decision is not FeatureConsolidationDecision.CONSOLIDATE:
             return
         valid_uids = {row.uid for row in features}
-        for action in response.actions:
+        for action in response.actions[:2]:  # cap at 2 merges per consolidation pass
             source_uid = action.source_uid.strip()
             target_uid = action.target_uid.strip()
             if (
@@ -406,14 +491,15 @@ class SemanticIngestionWorker:
             rows: list[tuple[object, object, object, object, object, object]] = await cur.fetchall()
         return [self._row_to_feature(row) for row in rows]
 
-    async def _load_feature_pair_async(
+    async def _merge_features_async(
         self,
         *,
         category: str,
         source_uid: str,
         target_uid: str,
-    ) -> dict[str, SemanticFeatureRow]:
-        """Load exactly two candidate feature rows for a merge action."""
+        action: FeatureConsolidationAction,
+    ) -> None:
+        """Merge one redundant source feature into the target feature row."""
         async with self._pool.connection() as conn, conn.cursor() as cur:
             await cur.execute(
                 """
@@ -424,22 +510,7 @@ class SemanticIngestionWorker:
                 (category, source_uid, target_uid),
             )
             rows: list[tuple[object, object, object, object, object, object]] = await cur.fetchall()
-        return {feature.uid: feature for feature in (self._row_to_feature(row) for row in rows)}
-
-    async def _merge_features_async(
-        self,
-        *,
-        category: str,
-        source_uid: str,
-        target_uid: str,
-        action: FeatureConsolidationAction,
-    ) -> None:
-        """Merge one redundant source feature into the target feature row."""
-        by_uid = await self._load_feature_pair_async(
-            category=category,
-            source_uid=source_uid,
-            target_uid=target_uid,
-        )
+        by_uid = {f.uid: f for f in (self._row_to_feature(r) for r in rows)}
         if source_uid not in by_uid or target_uid not in by_uid:
             return
         source = by_uid[source_uid]
