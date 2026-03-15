@@ -64,17 +64,19 @@ def test_negative_sentiment_opinion_stages_negative_direction() -> None:
     )
 
 
-def test_neutral_sentiment_opinion_does_not_stage_update() -> None:
-    """sentiment=0.0 (neutral/not-applicable) must NOT stage any opinion update.
+def test_apply_due_staged_updates_does_not_bump_version() -> None:
+    """Committing staged updates must not increment sponge.version.
 
-    Regression: knowledge_extract previously staged direction=+1.0 for neutral opinions.
+    Only insight extraction and reflection bump the version; staged commits
+    are not writes attributed to the current turn.
     """
     s = SpongeState(interaction_count=3)
-    # Only stage if sentiment != 0.0 (the fix)
-    sentiment = 0.0
-    if sentiment != 0.0:
-        direction = 1.0 if sentiment > 0 else -1.0
-        s.stage_opinion_update("topic", direction, abs(sentiment) * 0.3, cooling_period=1)
-    assert len(s.staged_opinion_updates) == 0, (
-        "Neutral-sentiment opinion (sentiment=0.0) must not stage any belief update"
+    initial_version = s.version
+    s.stage_opinion_update("climate", 1.0, 0.05, cooling_period=1)
+    s.interaction_count = 4
+    applied = s.apply_due_staged_updates()
+    assert applied, "staged update should have committed"
+    assert s.version == initial_version, (
+        f"apply_due_staged_updates must not bump sponge.version "
+        f"(expected {initial_version}, got {s.version})"
     )

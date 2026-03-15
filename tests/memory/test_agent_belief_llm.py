@@ -19,11 +19,9 @@ def test_decay_beliefs_llm_forgets_topic(
 ) -> None:
     mock_llm_call(
         {
-            "Assess whether this belief should be retained or decayed based on staleness": {
-                "action": "FORGET",
-                "new_confidence": 0.0,
-                "reasoning": "No longer relevant",
-            }
+            "Assess whether each of these beliefs should be retained": [
+                {"topic": "topic", "action": "FORGET", "new_confidence": 0.0, "reasoning": "No longer relevant"}
+            ]
         }
     )
     agent = _minimal_agent()
@@ -43,12 +41,9 @@ def test_entrenchment_detection_llm_flags_topic(
 ) -> None:
     mock_llm_call(
         {
-            "Assess if this belief shows signs of entrenchment": {
-                "entrenchment_status": "ENTRENCHED",
-                "confidence": 0.9,
-                "reasoning": "Echo-chamber pattern",
-                "recommendation": "Seek contradictory evidence",
-            }
+            "Assess which of these beliefs show signs of echo-chamber entrenchment": [
+                {"topic": "policy", "reasoning": "Echo-chamber pattern"},
+            ]
         }
     )
     agent = _minimal_agent()

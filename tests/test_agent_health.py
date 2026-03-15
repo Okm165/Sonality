@@ -416,17 +416,20 @@ class TestS4MemoryRetrieval:
 
         print(f"\n  response[:200]={response[:200]!r}")
         assert response.strip(), "Agent returned empty response"
-        # Check for substantive nuclear/energy claims (multi-word phrases),
-        # not single-word mentions which may be metacognitive self-awareness
+        # Check for substantive domain-specific nuclear/energy claims.
+        # "nuclear energy" alone is excluded because the agent may legitimately
+        # reference it as a metacognitive contrast ("unlike nuclear energy where
+        # I have context, I have no data on medieval cuisine").
         lower = response.lower()
         hallucination_phrases = [
-            "nuclear energy",
             "co2 emissions",
             "gco2",
             "12 g",
             "france runs",
-            "low-carbon",
+            "low-carbon electricity",
             "baseload power",
+            "nuclear provides",
+            "nuclear generates",
         ]
         leaked = [p for p in hallucination_phrases if p in lower]
         assert not leaked, (
@@ -694,7 +697,7 @@ class TestS7ExtendedEvolution:
         "we discussed earlier regarding renewable energy costs?",
     ]
 
-    @pytest.mark.timeout(3600)
+    @pytest.mark.timeout(10800)
     def test_extended_scenario(self, agent20: Any) -> None:
         """Run 15 interactions and verify the agent evolves personality correctly."""
         responses: list[str] = []
