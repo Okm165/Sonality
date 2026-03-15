@@ -84,7 +84,7 @@ class BackgroundSummarizer(threading.Thread):
             )
             return completion.text.strip()
         except Exception:
-            log.exception("Summarization LLM call failed")
+            log.warning("Summarization LLM call failed (non-critical, will retry next cycle)")
             # Divide and conquer on failure (could be context overflow)
             if len(messages) > 1:
                 mid = len(messages) // 2
@@ -109,5 +109,5 @@ class BackgroundSummarizer(threading.Thread):
             )
             return completion.text.strip()
         except Exception:
-            log.exception("Summary merge failed; concatenating")
+            log.warning("Summary merge failed; concatenating as fallback")
             return f"{existing}\n\n{new}"
