@@ -3,7 +3,7 @@
 Sonality is a personality-evolving agent built on:
 
 - one OpenAI-compatible provider abstraction (`chat` + `embeddings`)
-- dual memory storage (Neo4j + PostgreSQL/pgvector)
+- dual memory storage (Neo4j + Qdrant)
 - LLM-first routing, belief updates, and reflection
 
 ## Architecture Snapshot
@@ -13,7 +13,7 @@ flowchart TD
     U[User Message] --> A[SonalityAgent]
     A --> R[LLM Router + Retrieval]
     R --> G[Neo4j Graph Traversal]
-    R --> V[pgvector Search]
+    R --> V[Qdrant Search]
     A --> C[Chat Completion]
     A --> E[ESS + Belief Updates]
     A --> S[Dual Store Write]

@@ -20,7 +20,12 @@ def test_decay_beliefs_llm_forgets_topic(
     mock_llm_call(
         {
             "Assess whether each of these beliefs should be retained": [
-                {"topic": "topic", "action": "FORGET", "new_confidence": 0.0, "reasoning": "No longer relevant"}
+                {
+                    "topic": "topic",
+                    "action": "FORGET",
+                    "new_confidence": 0.0,
+                    "reasoning": "No longer relevant",
+                }
             ]
         }
     )

@@ -19,7 +19,7 @@ log = logging.getLogger(__name__)
 # Embedding calls are excluded (different endpoint, much faster).
 _LLM_SEMAPHORE: threading.Semaphore = threading.Semaphore(1)
 
-_LLM_REQUEST_TIMEOUT: int = 60  # seconds; 2 failed retries × 60s ≈ 124s max per call
+_LLM_REQUEST_TIMEOUT: int = 60  # seconds; 2 failed retries x 60s = ~124s max per call
 
 
 def llm_semaphore_idle() -> bool:
@@ -34,9 +34,12 @@ def llm_semaphore_idle() -> bool:
         return True
     return False
 
+
 _RETRYABLE_HTTP_STATUSES = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
 _EMPTY_MAPPING: dict[str, object] = {}
 _THINKING_ANSWER_MARKERS = ("Final Output:", "Output:", "Answer:", "Final Answer:", "Response:")
+_THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.IGNORECASE | re.DOTALL)
+_THINK_CODE_BLOCK_RE = re.compile(r"```(?:thinking|thought|reasoning)[\s\S]*?```", re.IGNORECASE)
 
 
 def _normalize_schema_notation(text: str) -> str:
@@ -53,15 +56,20 @@ def _normalize_schema_notation(text: str) -> str:
     instead of filling in actual values.  We normalize these to the first
     concrete option or a sensible default so downstream parsing succeeds.
     """
+    # Standalone "..." value and {"..."} key placeholder  →  neutralize first so that
+    # later comma-insertion rules don't accidentally corrupt them.
+    text = re.sub(r':\s*"\.\.\."', ': ""', text)
+    text = re.sub(r'\{\s*"\.\.\."(?:\s*,)?\s*', "{", text)
     # Bare ellipsis between delimiters  →  remove (handles {}, {key:val,...}, [...])
     text = re.sub(r",\s*\.\.\.\s*(?=[}\]])", "", text)  # trailing ", ..."
     text = re.sub(r"(?<=[{,\[])\s*\.\.\.\s*(?=[,}\]])", "", text)  # inner "..."
     # ", ... "field":" between object fields  →  ", "field":"  (keeps structure valid)
     text = re.sub(r',\s*\.\.\.\s*(?=")', ", ", text)
-    # Standalone "..." value in a string  →  ""
-    text = re.sub(r':\s*"\.\.\."', ': ""', text)
-    # Quoted ellipsis as a JSON key placeholder  {"..."}  {"...", ...}  →  strip it
-    text = re.sub(r'\{\s*"\.\.\."(?:\s*,)?\s*', "{", text)
+    # "value"... "key": pattern — model omits comma before ellipsis  →  "value", "key":
+    # Only matches after a string-closing " that is NOT an opening quote of a placeholder.
+    text = re.sub(r'"\s*\.\.\.\s*(?=")', '", ', text)
+    # " ..."  before closing brace (no comma, after string value)
+    text = re.sub(r"\s+\.\.\.\s*(?=[}\]])", "", text)
     # Array placeholder  [...]  →  []
     text = re.sub(r"\[\s*\.\.\.\s*\]", "[]", text)
     # Angle-bracket placeholders  <float>  <string>  <int>  →  sensible defaults
@@ -89,6 +97,8 @@ def _normalize_schema_notation(text: str) -> str:
     text = re.sub(r":\s*[-+]?\d+\.?\d*\s*(?:to|-)\s*[-+]?\d+\.?\d*(?=[,}\s])", ": 0.5", text)
     # trailing ellipsis after a digit  0.3...  →  0.3  (template placeholder in numbers)
     text = re.sub(r"(\d)\.\.\.", r"\1", text)
+    # bare ellipsis as a numeric value  :  ...  →  : 0.0
+    text = re.sub(r":\s*\.\.\.\s*(?=[,}])", ": 0.0", text)
     return text
 
 
@@ -100,6 +110,7 @@ def extract_last_json_object(text: str) -> dict[str, object] | None:
     parse means a model self-correction ("actually: {...}") produces the corrected value.
     Handles markdown fences, trailing prose, nested braces, and multiple JSON blocks.
     Also normalizes common schema-template patterns output by quantized thinking models.
+    Returns None if no valid JSON object is found.
     """
     stripped = text.strip()
     # Strip markdown code fences
@@ -110,7 +121,8 @@ def extract_last_json_object(text: str) -> dict[str, object] | None:
     decoder = json.JSONDecoder()
 
     def _try_parse(source: str) -> dict[str, object] | None:
-        last_good: dict[str, object] | None = None
+        # Track (start, end, obj) for all complete JSON objects found.
+        candidates: list[tuple[int, int, dict[str, object]]] = []
         i = 0
         while i < len(source):
             if source[i] != "{":
@@ -119,21 +131,26 @@ def extract_last_json_object(text: str) -> dict[str, object] | None:
             try:
                 obj, end = decoder.raw_decode(source, i)
                 if isinstance(obj, dict):
-                    last_good = obj
+                    candidates.append((i, end, obj))
                 i = end
             except json.JSONDecodeError:
                 i += 1
-        return last_good
+        if not candidates:
+            return None
+        # Prefer the object spanning the most characters — it's most complete.
+        # When multiple full objects of equal span exist (self-correction), the
+        # last one wins (model corrected itself). When a truncated outer object
+        # can't be parsed but inner items can, the largest inner item is returned.
+        return max(candidates, key=lambda c: c[1] - c[0])[2]
 
     result = _try_parse(cleaned)
     if result is not None:
         return result
-    # Second pass: normalize schema-template notation and retry
     normalized = _normalize_schema_notation(cleaned)
     if normalized != cleaned:
         result = _try_parse(normalized)
-    if result is not None:
-        return result
+        if result is not None:
+            return result
     # Third pass: bare integer array → {"ranking": [...]} for listwise reranker
     try:
         arr = json.loads(cleaned)
@@ -156,32 +173,41 @@ def _extract_answer_from_reasoning(reasoning: str) -> str:
     2. Last JSON object or array block in the reasoning
     3. Last non-empty line (plain-text fallback)
     """
+    cleaned_reasoning = _strip_thinking_trace(reasoning)
+
     # 1. Marker-based extraction — take everything after the last marker
     for marker in _THINKING_ANSWER_MARKERS:
-        idx = reasoning.lower().rfind(marker.lower())
+        idx = cleaned_reasoning.lower().rfind(marker.lower())
         if idx != -1:
-            answer = reasoning[idx + len(marker) :].strip()
+            answer = cleaned_reasoning[idx + len(marker) :].strip()
             if answer:
                 return answer
     # 2. Last balanced JSON object/array in the reasoning
     for opener, closer in (("{", "}"), ("[", "]")):
-        end = reasoning.rfind(closer)
+        end = cleaned_reasoning.rfind(closer)
         if end != -1:
             depth = 0
             for i in range(end, -1, -1):
-                if reasoning[i] == closer:
+                if cleaned_reasoning[i] == closer:
                     depth += 1
-                elif reasoning[i] == opener:
+                elif cleaned_reasoning[i] == opener:
                     depth -= 1
                     if depth == 0:
-                        candidate = reasoning[i : end + 1].strip()
+                        candidate = cleaned_reasoning[i : end + 1].strip()
                         if len(candidate) > 2:
                             return candidate
     # 3. Last non-empty line
-    for line in reversed(reasoning.strip().splitlines()):
+    for line in reversed(cleaned_reasoning.strip().splitlines()):
         if line.strip():
             return line.strip()
     return ""
+
+
+def _strip_thinking_trace(text: str) -> str:
+    """Remove chain-of-thought traces from model-visible output."""
+    stripped = _THINK_BLOCK_RE.sub("", text)
+    stripped = _THINK_CODE_BLOCK_RE.sub("", stripped)
+    return stripped.strip()
 
 
 @dataclass(frozen=True, slots=True)
@@ -251,6 +277,11 @@ def _post_json(
                 detail = "<failed to read error payload>"
             raise RuntimeError(f"Provider HTTP {status}: {detail}") from exc
         except URLError as exc:
+            reason = str(exc.reason) if hasattr(exc, "reason") else str(exc)
+            # DNS failures won't resolve in seconds — fail immediately so the
+            # caller's retry loop can decide whether to re-attempt.
+            if "name resolution" in reason.lower() or "errno -3" in reason.lower():
+                raise RuntimeError(f"Provider network error: {exc}") from exc
             if attempt < max_attempts:
                 wait = 1.5**attempt
                 log.warning(
@@ -304,19 +335,14 @@ def chat_completion(
     temperature: float = -1.0,
     tools: Sequence[Mapping[str, object]] = (),
     tool_choice: Mapping[str, object] = _EMPTY_MAPPING,
-    disable_thinking: bool = True,
 ) -> ChatResult:
     payload: dict[str, object] = {
         "model": model,
         "messages": [dict(message) for message in messages],
         "max_tokens": max_tokens,
     }
-    if disable_thinking:
-        # Suppress Qwen3 chain-of-thought via reasoning_budget=0 per-request parameter.
-        # This works with system prompts, unlike /no_think in user message.
-        # chat_template_kwargs alone is broken in llama.cpp without --jinja server flag.
-        payload["reasoning_budget"] = 0
-        payload["chat_template_kwargs"] = {"enable_thinking": False}
+    # Keep model reasoning enabled, but strip chain-of-thought from returned text.
+    payload["chat_template_kwargs"] = {"enable_thinking": True}
     if temperature >= 0.0:
         payload["temperature"] = temperature
     if tools:
@@ -333,7 +359,7 @@ def chat_completion(
         if isinstance(first, dict):
             message = first.get("message")
             if isinstance(message, dict):
-                text = _message_content_text(message.get("content", ""))
+                text = _strip_thinking_trace(_message_content_text(message.get("content", "")))
                 if not text:
                     reasoning = message.get("reasoning_content")
                     if isinstance(reasoning, str) and reasoning:
@@ -396,7 +422,10 @@ def parse_json_object(text: str) -> dict[str, object]:
             return parsed
     except json.JSONDecodeError:
         pass
-    return extract_last_json_object(stripped) or {}
+    try:
+        return extract_last_json_object(stripped)
+    except ValueError:
+        return {}
 
 
 def extract_tool_call_arguments(

@@ -3,34 +3,11 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 from typing import cast
+from unittest.mock import AsyncMock
 
 from sonality.memory.dual_store import DualEpisodeStore
 from sonality.memory.forgetting import ForgettingEngine, ForgettingResult
 from sonality.memory.graph import EpisodeNode, MemoryGraph
-
-
-class _FakeGraph:
-    def __init__(self) -> None:
-        self.archived: list[str] = []
-        self.deleted: list[str] = []
-
-    async def archive_episode(self, episode_uid: str) -> None:
-        self.archived.append(episode_uid)
-
-    async def delete_episode(self, episode_uid: str) -> None:
-        self.deleted.append(episode_uid)
-
-
-class _FakeStore:
-    def __init__(self) -> None:
-        self.archived: list[str] = []
-        self.deleted: list[str] = []
-
-    async def archive_derivatives(self, episode_uid: str) -> None:
-        self.archived.append(episode_uid)
-
-    async def delete_derivatives(self, episode_uid: str) -> None:
-        self.deleted.append(episode_uid)
 
 
 def _candidate(uid: str) -> EpisodeNode:
@@ -46,8 +23,8 @@ def _candidate(uid: str) -> EpisodeNode:
 
 
 def _assess(
-    graph: _FakeGraph,
-    store: _FakeStore,
+    graph: MemoryGraph,
+    store: DualEpisodeStore,
     candidates: list[EpisodeNode],
 ) -> ForgettingResult:
     return asyncio.run(
@@ -59,6 +36,20 @@ def _assess(
             snapshot_excerpt="snapshot",
         )
     )
+
+
+def _graph_mock() -> MemoryGraph:
+    graph = AsyncMock(spec=MemoryGraph)
+    graph.archive_episode = AsyncMock()
+    graph.delete_episode = AsyncMock()
+    return cast(MemoryGraph, graph)
+
+
+def _store_mock() -> DualEpisodeStore:
+    store = AsyncMock(spec=DualEpisodeStore)
+    store.archive_derivatives = AsyncMock()
+    store.delete_derivatives = AsyncMock()
+    return cast(DualEpisodeStore, store)
 
 
 def test_forgetting_uses_full_uid_and_hard_delete_path(
@@ -83,14 +74,14 @@ def test_forgetting_uses_full_uid_and_hard_delete_path(
         }
     )
 
-    graph = _FakeGraph()
-    store = _FakeStore()
+    graph = _graph_mock()
+    store = _store_mock()
     result = _assess(graph, store, [_candidate("episode-aaa"), _candidate("episode-bbb")])
 
-    assert graph.deleted == ["episode-aaa"]
-    assert store.deleted == ["episode-aaa"]
-    assert graph.archived == []
-    assert store.archived == []
+    cast(AsyncMock, graph.delete_episode).assert_awaited_once_with("episode-aaa")
+    cast(AsyncMock, store.delete_derivatives).assert_awaited_once_with("episode-aaa")
+    cast(AsyncMock, graph.archive_episode).assert_not_awaited()
+    cast(AsyncMock, store.archive_derivatives).assert_not_awaited()
     assert result.archived == 1
     assert result.kept == 1
 
@@ -111,10 +102,10 @@ def test_forgetting_does_not_use_foundational_substring_heuristic(
             }
         }
     )
-    graph = _FakeGraph()
-    store = _FakeStore()
+    graph = _graph_mock()
+    store = _store_mock()
     result = _assess(graph, store, [_candidate("episode-aaa")])
-    assert graph.archived == ["episode-aaa"]
-    assert store.archived == ["episode-aaa"]
+    cast(AsyncMock, graph.archive_episode).assert_awaited_once_with("episode-aaa")
+    cast(AsyncMock, store.archive_derivatives).assert_awaited_once_with("episode-aaa")
     assert result.archived == 1
     assert result.kept == 0

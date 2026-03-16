@@ -8,7 +8,7 @@ Levels (run in order, each depends on the previous passing):
   L2   Structured parsing     — llm_call schema extraction + ESS classify
   L2r  Repeatability          — same schema consistent across 3 calls
   L2x  Per-prompt parsing     — each prompt template tested in isolation
-  L3   Memory primitives      — postgres vector insert/search, similarity ordering
+  L3   Memory primitives      — Qdrant vector insert/search, similarity ordering
   L3x  Memory store/retrieve  — full DualEpisodeStore write + vector recall
 
 For full agent behavioral tests (anti-sycophancy, memory retrieval, personality
@@ -467,21 +467,22 @@ class TestL2rRepeatability:
 
 
 # ---------------------------------------------------------------------------
-# L3 — Memory primitives (requires Postgres + Ollama)
+# L3 — Memory primitives (requires Qdrant + Ollama)
 # ---------------------------------------------------------------------------
 
 
 @pytest.fixture
-def pg_url() -> str:
-    return config.POSTGRES_URL
+def qdrant_url() -> str:
+    return config.QDRANT_URL
 
 
 class TestL3MemoryPrimitives:
     """Verify vector storage and semantic retrieval work at the primitive level."""
 
-    def test_postgres_vector_insert_and_exact_retrieval(self, pg_url: str) -> None:
+    def test_qdrant_vector_insert_and_exact_retrieval(self, qdrant_url: str) -> None:
         """Insert one embedding row, retrieve it by UID, verify it round-trips."""
-        import psycopg
+        from qdrant_client import QdrantClient
+        from qdrant_client.models import PointStruct
 
         t = time.perf_counter()
         embedder = ExternalEmbedder()
@@ -489,25 +490,30 @@ class TestL3MemoryPrimitives:
         vec = embedder.embed_documents([text])[0]
 
         uid = "test-grad-001"
-        with psycopg.connect(pg_url, autocommit=True) as conn:
-            conn.execute(
-                "DELETE FROM derivatives WHERE uid = %s",
-                (uid,),
-            )
-            conn.execute(
-                "INSERT INTO derivatives (uid, episode_uid, text, key_concept, embedding) "
-                "VALUES (%s, %s, %s, %s, %s::vector)",
-                (uid, "ep-test-001", text, "fox", vec),
-            )
-            row = conn.execute(
-                "SELECT text, embedding::text FROM derivatives WHERE uid = %s",
-                (uid,),
-            ).fetchone()
-            conn.execute("DELETE FROM derivatives WHERE uid = %s", (uid,))
+        client = QdrantClient(url=qdrant_url)
+
+        client.upsert(
+            collection_name="derivatives",
+            points=[
+                PointStruct(
+                    id=uid,
+                    vector={"dense": vec},
+                    payload={
+                        "episode_uid": "ep-test-001",
+                        "text": text,
+                        "key_concept": "fox",
+                    },
+                )
+            ],
+        )
+        results = client.retrieve(collection_name="derivatives", ids=[uid], with_payload=True)
+        client.delete(collection_name="derivatives", points_selector=[uid])
+        client.close()
 
         elapsed = _elapsed(t)
-        assert row is not None, "Inserted row not found on read-back"
-        print(f"\n  text={row[0]!r}  vec_preview={row[1][:40]}...  ({elapsed})")
+        assert results, "Inserted point not found on read-back"
+        point = results[0]
+        print(f"\n  text={point.payload['text']!r}  ({elapsed})")
 
     def test_embedding_semantic_ordering(self) -> None:
         """Two semantically similar sentences should be closer than a dissimilar one."""
@@ -530,9 +536,10 @@ class TestL3MemoryPrimitives:
             f"Semantic ordering wrong: similar={sim_close:.4f} should > dissimilar={sim_far:.4f}"
         )
 
-    def test_vector_search_returns_nearest_neighbour(self, pg_url: str) -> None:
+    def test_vector_search_returns_nearest_neighbour(self, qdrant_url: str) -> None:
         """Insert two rows; query with a paraphrase of doc1 — doc1 should rank first."""
-        import psycopg
+        from qdrant_client import QdrantClient
+        from qdrant_client.models import PointStruct
 
         embedder = ExternalEmbedder()
         docs = [
@@ -545,26 +552,30 @@ class TestL3MemoryPrimitives:
         vecs = embedder.embed_documents([d[2] for d in docs])
         query_vec = embedder.embed_query(query)
 
-        with psycopg.connect(pg_url, autocommit=True) as conn:
-            for (uid, ep, text), vec in zip(docs, vecs, strict=True):
-                conn.execute("DELETE FROM derivatives WHERE uid = %s", (uid,))
-                conn.execute(
-                    "INSERT INTO derivatives (uid, episode_uid, text, key_concept, embedding) "
-                    "VALUES (%s, %s, %s, %s, %s::vector)",
-                    (uid, ep, text, "test", vec),
-                )
+        client = QdrantClient(url=qdrant_url)
 
-            rows = conn.execute(
-                "SELECT uid FROM derivatives WHERE uid = ANY(%s) "
-                "ORDER BY embedding <=> %s::vector LIMIT 2",
-                ([d[0] for d in docs], query_vec),
-            ).fetchall()
+        points = [
+            PointStruct(
+                id=uid,
+                vector={"dense": vec},
+                payload={"episode_uid": ep, "text": text, "key_concept": "test"},
+            )
+            for (uid, ep, text), vec in zip(docs, vecs, strict=True)
+        ]
+        client.upsert(collection_name="derivatives", points=points)
 
-            for uid, _, _ in docs:
-                conn.execute("DELETE FROM derivatives WHERE uid = %s", (uid,))
+        results = client.search(
+            collection_name="derivatives",
+            query_vector=("dense", query_vec),
+            limit=2,
+        )
+
+        for uid, _, _ in docs:
+            client.delete(collection_name="derivatives", points_selector=[uid])
+        client.close()
 
         elapsed = _elapsed(t)
-        top_uid = rows[0][0] if rows else None
+        top_uid = results[0].id if results else None
         print(f"\n  top_result={top_uid}  expected=test-grad-nn-1  ({elapsed})")
 
         assert top_uid == "test-grad-nn-1", (
@@ -840,41 +851,60 @@ class TestL2xPerPromptParsing:
         )
 
     def test_belief_decay_prompt_parses_correctly(self) -> None:
-        """BELIEF_DECAY_PROMPT → action field with valid value."""
+        """BATCH_BELIEF_DECAY_PROMPT → decisions list with valid action values."""
+        import json
+
         from pydantic import BaseModel
 
-        from sonality.llm.prompts import BELIEF_DECAY_PROMPT
+        from sonality.llm.prompts import BATCH_BELIEF_DECAY_PROMPT
 
-        class BeliefDecayResponse(BaseModel):
-            action: str
+        class BeliefDecayDecision(BaseModel):
+            topic: str = ""
+            action: str = "RETAIN"
             new_confidence: float = 0.5
             reasoning: str = ""
 
+        class BeliefDecayResponse(BaseModel):
+            decisions: list[BeliefDecayDecision] = []
+
+            @classmethod
+            def __get_validators__(cls):  # type: ignore[override]
+                yield cls._normalize
+
+            @classmethod
+            def _normalize(cls, v: object) -> "BeliefDecayResponse":
+                if isinstance(v, list):
+                    return cls(decisions=[BeliefDecayDecision(**d) if isinstance(d, dict) else d for d in v])
+                return cls.model_validate(v)
+
+        beliefs_json = json.dumps([{
+            "topic": "nuclear_energy",
+            "position": 0.6,
+            "confidence": "0.70",
+            "evidence_count": 3,
+            "gap": 50,
+        }])
         t = time.perf_counter()
-        prompt = BELIEF_DECAY_PROMPT.format(
-            topic="nuclear_energy",
-            position=0.6,
-            confidence=0.7,
-            evidence_count=3,
-            gap=50,
+        prompt = BATCH_BELIEF_DECAY_PROMPT.format(
             total_interactions=120,
+            beliefs_json=beliefs_json,
         )
         result: LLMCallResult[BeliefDecayResponse] = llm_call(
             prompt=prompt,
             response_model=BeliefDecayResponse,
-            fallback=BeliefDecayResponse(action="RETAIN"),
+            fallback=BeliefDecayResponse(),
         )
         elapsed = _elapsed(t)
 
-        print(
-            f"\n  success={result.success}  action={result.value.action!r}  "
-            f"confidence={result.value.new_confidence:.2f}  ({elapsed})"
-        )
+        first = result.value.decisions[0] if result.value.decisions else None
+        action_str = repr(first.action) if first else "N/A"
+        print(f"\n  success={result.success}  action={action_str}  ({elapsed})")
         assert result.success, (
             f"BELIEF_DECAY parse failed: {result.error}\nraw: {result.raw_text!r}"
         )
-        assert result.value.action in {"RETAIN", "DECAY", "FORGET"}, (
-            f"Invalid action: {result.value.action!r}"
+        assert first is not None, "Expected at least one decision in response"
+        assert first.action in {"RETAIN", "DECAY", "FORGET"}, (
+            f"Invalid action: {first.action!r}"
         )
 
 
@@ -916,11 +946,12 @@ class TestL3xMemoryStoreRetrieve:
         )
         assert all(d.node.text.strip() for d in results), "Some derivatives have empty text"
 
-    def test_full_store_and_vector_recall(self, pg_url: str) -> None:
+    def test_full_store_and_vector_recall(self, qdrant_url: str) -> None:
         """Store a distinctive episode then verify vector search returns it top-1."""
         import uuid
 
-        import psycopg
+        from qdrant_client import QdrantClient
+        from qdrant_client.models import PointStruct
 
         from sonality.memory.derivatives import DerivativeChunker
         from sonality.memory.embedder import ExternalEmbedder
@@ -939,41 +970,50 @@ class TestL3xMemoryStoreRetrieve:
         t = time.perf_counter()
         derivatives = chunker.chunk_and_embed(content, episode_uid=ep_uid)
 
-        with psycopg.connect(pg_url, autocommit=True) as conn:
-            for d in derivatives:
-                conn.execute(
-                    "INSERT INTO derivatives (uid, episode_uid, text, key_concept, embedding) "
-                    "VALUES (%s, %s, %s, %s, %s::vector)",
-                    (
-                        d.node.uid,
-                        d.node.source_episode_uid,
-                        d.node.text,
-                        d.node.key_concept,
-                        d.embedding,
-                    ),
-                )
+        client = QdrantClient(url=qdrant_url)
 
-            query_vec = embedder.embed_query(query)
-            rows = conn.execute(
-                "SELECT episode_uid, text, 1 - (embedding <=> %s::vector) AS similarity "
-                "FROM derivatives WHERE NOT archived "
-                "ORDER BY embedding <=> %s::vector LIMIT 3",
-                (query_vec, query_vec),
-            ).fetchall()
+        points = [
+            PointStruct(
+                id=d.node.uid,
+                vector={"dense": d.embedding},
+                payload={
+                    "episode_uid": d.node.source_episode_uid,
+                    "text": d.node.text,
+                    "key_concept": d.node.key_concept,
+                    "archived": False,
+                },
+            )
+            for d in derivatives
+        ]
+        client.upsert(collection_name="derivatives", points=points)
 
-            # Cleanup
-            conn.execute("DELETE FROM derivatives WHERE episode_uid = %s", (ep_uid,))
+        query_vec = embedder.embed_query(query)
+        results = client.search(
+            collection_name="derivatives",
+            query_vector=("dense", query_vec),
+            limit=3,
+        )
+
+        client.delete(
+            collection_name="derivatives",
+            points_selector=[d.node.uid for d in derivatives],
+        )
+        client.close()
 
         elapsed = _elapsed(t)
 
-        print(f"\n  stored={len(derivatives)} derivatives  query_results={len(rows)}  ({elapsed})")
-        for ep, text, sim in rows:
-            print(f"    sim={sim:.4f}  ep={ep}  text={text[:60]!r}")
-
-        assert rows, "Vector search returned no results"
-        assert rows[0][0] == ep_uid, (
-            f"Top result is ep={rows[0][0]!r}, expected {ep_uid!r}. Similarity={rows[0][2]:.4f}"
+        print(
+            f"\n  stored={len(derivatives)} derivatives  query_results={len(results)}  ({elapsed})"
         )
-        assert rows[0][2] >= 0.6, (
-            f"Top similarity {rows[0][2]:.4f} too low — retrieval quality concern"
+        for r in results:
+            print(
+                f"    score={r.score:.4f}  ep={r.payload['episode_uid']}  text={r.payload['text'][:60]!r}"
+            )
+
+        assert results, "Vector search returned no results"
+        assert results[0].payload["episode_uid"] == ep_uid, (
+            f"Top result is ep={results[0].payload['episode_uid']!r}, expected {ep_uid!r}. Score={results[0].score:.4f}"
+        )
+        assert results[0].score >= 0.6, (
+            f"Top score {results[0].score:.4f} too low — retrieval quality concern"
         )

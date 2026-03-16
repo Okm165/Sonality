@@ -93,15 +93,23 @@ class ForgettingEngine:
             response_model=BatchForgettingResponse,
             fallback=BatchForgettingResponse(
                 decisions=[
-                    ForgettingDecision(uid=ep.uid, action=ForgettingAction.KEEP, reason="Fallback: retain all")
+                    ForgettingDecision(
+                        uid=ep.uid, action=ForgettingAction.KEEP, reason="Fallback: retain all"
+                    )
                     for ep in candidates
                 ]
             ),
         )
-        raw_decisions = result.value.decisions if result.success else [
-            ForgettingDecision(uid=ep.uid, action=ForgettingAction.KEEP, reason="Assessment failed")
-            for ep in candidates
-        ]
+        raw_decisions = (
+            result.value.decisions
+            if result.success
+            else [
+                ForgettingDecision(
+                    uid=ep.uid, action=ForgettingAction.KEEP, reason="Assessment failed"
+                )
+                for ep in candidates
+            ]
+        )
 
         # Validate and fill missing decisions
         candidate_uids = {ep.uid for ep in candidates}
@@ -116,7 +124,13 @@ class ForgettingEngine:
             seen.add(uid)
         for ep in candidates:
             if ep.uid not in seen:
-                decisions.append(ForgettingDecision(uid=ep.uid, action=ForgettingAction.KEEP, reason="Missing decision; default keep"))
+                decisions.append(
+                    ForgettingDecision(
+                        uid=ep.uid,
+                        action=ForgettingAction.KEEP,
+                        reason="Missing decision; default keep",
+                    )
+                )
 
         # Execute actions
         archived = 0
@@ -137,8 +151,12 @@ class ForgettingEngine:
                 archived += 1
                 log.info("%s episode %s: %s", label, decision.uid[:8], decision.reason)
             except Exception:
-                log.exception("Failed to %s episode %s", decision.action.value.lower(), decision.uid[:8])
+                log.exception(
+                    "Failed to %s episode %s", decision.action.value.lower(), decision.uid[:8]
+                )
                 kept += 1
 
-        log.info("Forgetting cycle: %d assessed, %d kept, %d archived", len(candidates), kept, archived)
+        log.info(
+            "Forgetting cycle: %d assessed, %d kept, %d archived", len(candidates), kept, archived
+        )
         return ForgettingResult(kept=kept, archived=archived, total_assessed=len(candidates))

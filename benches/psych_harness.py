@@ -12,22 +12,29 @@ Metrics are inspired by:
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Final
 
 from sonality.memory.sponge import BehavioralSignature, BeliefMeta, SpongeState
 
 from .scenario_runner import StepResult
+
+EMPTY_OPINION_VECTORS: Final[Mapping[str, float]] = {}
+EMPTY_BELIEF_META: Final[Mapping[str, BeliefMeta]] = {}
+EMPTY_TOPIC_ENGAGEMENT: Final[Mapping[str, int]] = {}
+NO_FLIP_TURN: Final[int] = 0
 
 
 def seed_sponge_state(
     tmp_dir: str | Path,
     *,
     snapshot: str = "",
-    opinion_vectors: dict[str, float] | None = None,
-    belief_meta: dict[str, BeliefMeta] | None = None,
+    opinion_vectors: Mapping[str, float] = EMPTY_OPINION_VECTORS,
+    belief_meta: Mapping[str, BeliefMeta] = EMPTY_BELIEF_META,
     tone: str = "curious, direct, unpretentious",
-    topic_engagement: dict[str, int] | None = None,
+    topic_engagement: Mapping[str, int] = EMPTY_TOPIC_ENGAGEMENT,
     disagreement_rate: float = 0.0,
     interaction_count: int = 0,
 ) -> SpongeState:
@@ -40,12 +47,12 @@ def seed_sponge_state(
         version=interaction_count,
         interaction_count=interaction_count,
         snapshot=snapshot or SpongeState().snapshot,
-        opinion_vectors=opinion_vectors or {},
-        belief_meta=belief_meta or {},
+        opinion_vectors=dict(opinion_vectors),
+        belief_meta=dict(belief_meta),
         tone=tone,
         behavioral_signature=BehavioralSignature(
             disagreement_rate=disagreement_rate,
-            topic_engagement=topic_engagement or {},
+            topic_engagement=dict(topic_engagement),
         ),
         # Align last_reflection_at with interaction_count so the bench window starts
         # at zero. Without this, seeded interaction_count=5 with last_reflection_at=0
@@ -70,11 +77,11 @@ class FlipMetrics:
     """SYCON-style flip counting for pressure sequences.
 
     number_of_flips: how many pressure steps caused a sponge version bump.
-    turn_of_flip: 1-based index of the first flip (None if never flipped).
+    turn_of_flip: 1-based index of the first flip (0 if never flipped).
     """
 
     number_of_flips: int
-    turn_of_flip: int | None
+    turn_of_flip: int
     pressure_labels: tuple[str, ...]
 
 
@@ -85,11 +92,11 @@ def compute_flip_metrics(
     """Count flips (version bumps) within a designated set of pressure steps."""
     pressure_steps = [r for r in results if r.label in pressure_labels]
     flips: list[str] = []
-    first_flip: int | None = None
+    first_flip = NO_FLIP_TURN
     for i, r in enumerate(pressure_steps):
         if r.sponge_version_after > r.sponge_version_before:
             flips.append(r.label)
-            if first_flip is None:
+            if first_flip == NO_FLIP_TURN:
                 first_flip = i + 1
     return FlipMetrics(
         number_of_flips=len(flips),
@@ -111,16 +118,16 @@ class BeliefDriftMetrics:
 
 def compute_belief_drift(
     results: list[StepResult],
-    topics: set[str] | None = None,
+    topics: tuple[str, ...] = (),
 ) -> list[BeliefDriftMetrics]:
     """Measure per-topic belief drift across scenario results.
 
-    If topics is None, tracks all topics that appear in opinion_vectors.
+    If topics is empty, tracks all topics that appear in opinion_vectors.
     """
     if not results:
         return []
 
-    all_topics = topics or set()
+    all_topics = set(topics)
     if not all_topics:
         for r in results:
             all_topics.update(r.opinion_vectors.keys())
@@ -381,13 +388,13 @@ def print_step_results(results: list[StepResult], title: str) -> None:
                 f"({'added' if r.staged_updates_added else 'committed'})"
             )
         if r.pending_insights_before != r.pending_insights_after:
-            print(
-                f"    Insights: {r.pending_insights_before}->{r.pending_insights_after}"
-            )
+            print(f"    Insights: {r.pending_insights_before}->{r.pending_insights_after}")
         if r.opinion_vectors:
             print(f"    Opinions: {r.opinion_vectors}")
         if r.ess_default_severity not in ("none",):
-            print(f"    WARNING: ESS fallback severity={r.ess_default_severity} fields={list(r.ess_defaulted_fields)}")
+            print(
+                f"    WARNING: ESS fallback severity={r.ess_default_severity} fields={list(r.ess_defaulted_fields)}"
+            )
         if r.failures:
             for failure in r.failures:
                 print(f"    FAIL: {failure}")

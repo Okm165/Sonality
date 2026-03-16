@@ -75,10 +75,21 @@ class EventBoundaryDetector:
         Returns BoundaryResult with boundary_decision=BOUNDARY and a new segment_id
         if a significant boundary is detected.
         """
-        recent_context = (
-            "\n".join(self._recent_messages) if self._recent_messages else "No previous context"
-        )
+        # First interaction is trivially a new segment — skip LLM call.
+        if not self._recent_messages:
+            self._recent_messages.append(message)
+            self._segment_counter += 1
+            self._current_segment_id = f"segment_{self._segment_counter}"
+            log.debug("Boundary: first message, starting segment_%d", self._segment_counter)
+            return BoundaryResult(
+                boundary_decision=BoundaryDecision.BOUNDARY,
+                segment_id=self._current_segment_id,
+                label="",
+                boundary_type=BoundaryType.NONE,
+                reasoning="",
+            )
 
+        recent_context = "\n".join(self._recent_messages)
         prompt = BOUNDARY_DETECTION_PROMPT.format(
             recent_context=recent_context,
             current_message=message,

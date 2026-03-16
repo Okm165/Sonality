@@ -40,6 +40,14 @@ class ReasoningType(StrEnum):
     SOCIAL_PRESSURE = "social_pressure"
     EMOTIONAL_APPEAL = "emotional_appeal"
     NO_ARGUMENT = "no_argument"
+    NEWS_REPORT = "news_report"
+    AGGREGATED_SENTIMENT = "aggregated_sentiment"
+
+
+class UrgencyLevel(StrEnum):
+    IMMEDIATE = "immediate"
+    STANDARD = "standard"
+    LOW = "low"
 
 
 class OpinionDirection(StrEnum):
@@ -87,6 +95,21 @@ REASONING_TYPE_ALIASES: Final[dict[str, ReasoningType]] = {
     "pressure": ReasoningType.SOCIAL_PRESSURE,
     "emotional": ReasoningType.EMOTIONAL_APPEAL,
     "none": ReasoningType.NO_ARGUMENT,
+    "news": ReasoningType.NEWS_REPORT,
+    "report": ReasoningType.NEWS_REPORT,
+    "newsreport": ReasoningType.NEWS_REPORT,
+    "sentiment": ReasoningType.AGGREGATED_SENTIMENT,
+    "aggregated": ReasoningType.AGGREGATED_SENTIMENT,
+    "aggregatedsentiment": ReasoningType.AGGREGATED_SENTIMENT,
+}
+URGENCY_LEVEL_ALIASES: Final[dict[str, UrgencyLevel]] = {
+    "immediate": UrgencyLevel.IMMEDIATE,
+    "urgent": UrgencyLevel.IMMEDIATE,
+    "breaking": UrgencyLevel.IMMEDIATE,
+    "standard": UrgencyLevel.STANDARD,
+    "normal": UrgencyLevel.STANDARD,
+    "low": UrgencyLevel.LOW,
+    "background": UrgencyLevel.LOW,
 }
 OPINION_DIRECTION_ALIASES: Final[dict[str, OpinionDirection]] = {
     "support": OpinionDirection.SUPPORTS,
@@ -102,6 +125,10 @@ SOURCE_RELIABILITY_ALIASES: Final[dict[str, SourceReliability]] = {
     "notapplicable": SourceReliability.NOT_APPLICABLE,
     "na": SourceReliability.NOT_APPLICABLE,
     "n_a": SourceReliability.NOT_APPLICABLE,
+    # Legacy prompt values (model used to output these before prompt was fixed)
+    "low": SourceReliability.UNVERIFIED_CLAIM,
+    "medium": SourceReliability.INFORMED_OPINION,
+    "high": SourceReliability.ESTABLISHED_EXPERT,
 }
 KNOWLEDGE_DENSITY_ALIASES: Final[dict[str, KnowledgeDensity]] = {
     "high": KnowledgeDensity.HIGH,
@@ -137,6 +164,7 @@ SOURCE_RELIABILITY_VALUES: Final[tuple[str, ...]] = tuple(_enum_values(SourceRel
 OPINION_DIRECTION_VALUES: Final[tuple[str, ...]] = tuple(_enum_values(OpinionDirection))
 INTERNAL_CONSISTENCY_VALUES: Final[tuple[str, ...]] = tuple(_enum_values(InternalConsistencyStatus))
 KNOWLEDGE_DENSITY_VALUES: Final[tuple[str, ...]] = tuple(_enum_values(KnowledgeDensity))
+URGENCY_LEVEL_VALUES: Final[tuple[str, ...]] = tuple(_enum_values(UrgencyLevel))
 RETRY_ALLOWED_VALUES_NOTE: Final = (
     f"{RETRY_REQUIRED_FIELD_NOTE} Allowed reasoning_type values: "
     f"{', '.join(REASONING_TYPE_VALUES)}. Allowed opinion_direction values: "
@@ -209,6 +237,25 @@ ESS_TOOL: Final = {
                 "enum": list(KNOWLEDGE_DENSITY_VALUES),
                 "description": "Density of learnable factual/conceptual content: high (multiple verifiable claims or detailed exposition), moderate (some facts mixed with opinion/filler), low (mostly opinion or social), none (greetings, chitchat).",
             },
+            "belief_update_recommended": {
+                "type": "boolean",
+                "description": (
+                    "Whether this evidence warrants updating the agent's beliefs. Set true when "
+                    "the input contains substantive claims backed by identifiable evidence, named "
+                    "sources, or verifiable data. Set false for greetings, bare opinions without "
+                    "reasoning, social pressure, emotional appeals, or debunked content."
+                ),
+            },
+            "urgency": {
+                "type": "string",
+                "enum": list(URGENCY_LEVEL_VALUES),
+                "description": (
+                    "Time-sensitivity of this information. 'immediate' for breaking events with "
+                    "time-sensitive consequences (surprise policy decisions, natural disasters, "
+                    "military actions). 'standard' for routine reports and analysis. 'low' for "
+                    "historical analysis or background context."
+                ),
+            },
         },
         "required": [
             "score",
@@ -220,6 +267,8 @@ ESS_TOOL: Final = {
             "summary",
             "opinion_direction",
             "knowledge_density",
+            "belief_update_recommended",
+            "urgency",
         ],
     },
 }
@@ -286,6 +335,8 @@ class ESSResult:
     summary: str
     opinion_direction: OpinionDirection = OpinionDirection.NEUTRAL
     knowledge_density: KnowledgeDensity = KnowledgeDensity.NONE
+    belief_update_recommended: bool = False
+    urgency: UrgencyLevel = UrgencyLevel.STANDARD
     defaulted_fields: tuple[str, ...] = ()
     default_severity: DefaultSeverity = "none"
     attempt_count: int = 1
@@ -296,6 +347,13 @@ class ESSResult:
     def used_defaults(self) -> bool:
         """Return whether classifier defaults/coercions were applied."""
         return bool(self.defaulted_fields)
+
+    @property
+    def cooling_period(self) -> int:
+        """Map urgency level to belief update cooling period."""
+        return {UrgencyLevel.IMMEDIATE: 1, UrgencyLevel.STANDARD: 2, UrgencyLevel.LOW: 3}[
+            self.urgency
+        ]
 
 
 @dataclass(frozen=True, slots=True)
@@ -321,6 +379,8 @@ class CoercedEssPayload:
     summary: str
     opinion_direction: OpinionDirection
     knowledge_density: KnowledgeDensity
+    belief_update_recommended: bool
+    urgency: UrgencyLevel
     defaulted_fields: tuple[str, ...]
     default_severity: DefaultSeverity
 
@@ -335,6 +395,8 @@ def classifier_exception_fallback(user_message: str) -> ESSResult:
         novelty=0.0,
         topics=(),
         summary=user_message[:120],
+        belief_update_recommended=False,
+        urgency=UrgencyLevel.STANDARD,
         defaulted_fields=(CLASSIFIER_EXCEPTION_FIELD,),
         default_severity="exception",
         attempt_count=0,
@@ -383,15 +445,19 @@ def _to_float(value: object, default: float = 0.0) -> tuple[float, bool]:
 
 
 def _to_topics(value: object) -> tuple[tuple[str, ...], bool]:
-    """Parse topic labels from list-like or comma/newline-delimited strings."""
+    """Parse topic labels from list-like or comma/newline-delimited strings, deduplicating."""
     if not isinstance(value, (list, tuple)):
         if isinstance(value, str):
             parsed = tuple(
-                token.strip() for token in value.replace("\n", ",").split(",") if token.strip()
+                dict.fromkeys(
+                    token.strip() for token in value.replace("\n", ",").split(",") if token.strip()
+                )
             )
             return parsed, False
         return (), True
-    topics = tuple(item.strip() for item in value if isinstance(item, str) and item.strip())
+    topics = tuple(
+        dict.fromkeys(item.strip() for item in value if isinstance(item, str) and item.strip())
+    )
     return topics, False
 
 
@@ -453,11 +519,17 @@ def _run_classification_attempts(
     attempts_executed = 0
     total_input_tokens = 0
     total_output_tokens = 0
+    bad_fields: set[str] = set()
     for attempt in range(MAX_ESS_RETRIES):
         attempts_executed = attempt + 1
-        prompt_with_retry_guidance = (
-            prompt if attempt == 0 else f"{prompt}\n\n{RETRY_ALLOWED_VALUES_NOTE}"
-        )
+        if attempt == 0:
+            prompt_with_retry_guidance = prompt
+        else:
+            bad_list = ", ".join(sorted(bad_fields)) if bad_fields else "required fields"
+            prompt_with_retry_guidance = (
+                f"{prompt}\n\nPrevious response was missing or invalid for: {bad_list}. "
+                f"{RETRY_ALLOWED_VALUES_NOTE}"
+            )
         if client is not PROVIDER_CLIENT:
             response = client.messages.create(
                 model=model,
@@ -498,6 +570,7 @@ def _run_classification_attempts(
         required_coercions = _required_field_coercions(data) if not missing else ()
         if not missing and not required_coercions:
             break
+        bad_fields = missing | set(required_coercions)
         log.warning(
             "ESS attempt %d/%d missing fields %s malformed_required %s",
             attempt + 1,
@@ -603,6 +676,25 @@ def _coerce_payload(data: Mapping[str, object]) -> CoercedEssPayload:
         coerced_fields=coerced_fields,
     )
 
+    belief_update_raw = data.get("belief_update_recommended", False)
+    if isinstance(belief_update_raw, bool):
+        belief_update_recommended = belief_update_raw
+    elif isinstance(belief_update_raw, str):
+        belief_update_recommended = belief_update_raw.lower() in ("true", "yes", "1")
+    else:
+        belief_update_recommended = False
+        if "belief_update_recommended" in data:
+            coerced_fields.append("belief_update_recommended")
+
+    urgency = _coerce_enum_field(
+        cls=UrgencyLevel,
+        data=data,
+        field="urgency",
+        default=UrgencyLevel.STANDARD,
+        aliases=URGENCY_LEVEL_ALIASES,
+        coerced_fields=coerced_fields,
+    )
+
     defaulted_fields = tuple(
         sorted(
             {
@@ -629,6 +721,8 @@ def _coerce_payload(data: Mapping[str, object]) -> CoercedEssPayload:
         summary=summary,
         opinion_direction=direction,
         knowledge_density=knowledge_density,
+        belief_update_recommended=belief_update_recommended,
+        urgency=urgency,
         defaulted_fields=defaulted_fields,
         default_severity=severity,
     )
@@ -672,6 +766,8 @@ def classify(
         summary=payload.summary,
         opinion_direction=payload.opinion_direction,
         knowledge_density=payload.knowledge_density,
+        belief_update_recommended=payload.belief_update_recommended,
+        urgency=payload.urgency,
         defaulted_fields=payload.defaulted_fields,
         default_severity=payload.default_severity,
         attempt_count=max(attempts.attempts_executed, 1),
@@ -679,11 +775,13 @@ def classify(
         output_tokens=attempts.output_tokens,
     )
     log.info(
-        "ESS: score=%.2f type=%s dir=%s novelty=%.2f topics=%s",
+        "ESS: score=%.2f type=%s dir=%s novelty=%.2f update=%s urgency=%s topics=%s",
         result.score,
         result.reasoning_type,
         result.opinion_direction,
         result.novelty,
+        result.belief_update_recommended,
+        result.urgency,
         result.topics,
     )
     return result

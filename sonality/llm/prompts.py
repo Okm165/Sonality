@@ -28,8 +28,8 @@ Rules:
 - Maximum 15 chunks
 - importance: high (key claim/fact), medium (supporting detail), low (context only)
 
-Output ONLY a JSON object in this exact format (replace placeholders with actual chunks from the text above):
-{{"chunks": [{{"text": "[First key claim or factoid from the text]", "key_concept": "[2-4 word topic label]", "importance": "high"}}, {{"text": "[A supporting detail from the text]", "key_concept": "[2-4 word topic label]", "importance": "medium"}}]}}"""
+Output ONLY a JSON object with real chunks from the text above. NEVER output "..." or bracket placeholders as values.
+Example format: {{"chunks": [{{"text": "The Eiffel Tower was completed in 1889 and stands 330 meters tall.", "key_concept": "Eiffel Tower construction", "importance": "high"}}, {{"text": "It was the tallest man-made structure in the world for 41 years.", "key_concept": "Eiffel Tower records", "importance": "medium"}}]}}"""
 
 # --- Event Boundary Detection ---
 BOUNDARY_DETECTION_PROMPT: Final = """\
@@ -47,10 +47,12 @@ Consider:
 - Did the user explicitly shift to a different subject?
 - Is this a continuation/elaboration of the current topic?
 
-Respond with ONLY a JSON object. Example for a topic shift:
+Your response must end with ONLY a JSON object (no markdown, no explanation after it).
+
+Topic shift example:
 {{"boundary_decision": "BOUNDARY", "confidence": 0.9, "boundary_type": "topic_shift", "reasoning": "User switched from climate policy to nuclear energy.", "suggested_segment_label": "Nuclear energy discussion"}}
 
-Example for continuation:
+Continuation example:
 {{"boundary_decision": "CONTINUE", "confidence": 0.8, "boundary_type": "none", "reasoning": "User is elaborating on the previous topic.", "suggested_segment_label": ""}}
 
 boundary_decision must be BOUNDARY or CONTINUE.
@@ -60,56 +62,58 @@ boundary_type must be: topic_shift, goal_change, explicit_transition, or none.""
 REFLECTION_GATE_PROMPT: Final = """\
 Decide whether the agent should run reflection this turn.
 
-Current interaction: {interaction_count}
-Interactions since last reflection: {window_interactions}
-Target cadence: every ~{target_cadence} interactions
-Pending insights: {pending_insights}
-Pending staged belief updates: {staged_updates}
-Recent shift magnitude since last reflection: {recent_shift_magnitude}
-Current disagreement rate: {disagreement_rate}
-Tracked belief count: {belief_count}
+window_interactions={window_interactions} (interactions since last reflection)
+target_cadence={target_cadence}
+pending_insights={pending_insights}
+staged_updates={staged_updates}
+recent_shift_magnitude={recent_shift_magnitude}
+disagreement_rate={disagreement_rate}
+belief_count={belief_count}
 
-HARD RULE: Return SKIP if window_interactions < 5, regardless of other factors.
-EVENT_DRIVEN is only valid when window_interactions >= 5 AND pending_insights >= 3 AND recent_shift_magnitude >= 0.5.
-PERIODIC is valid when window_interactions >= target_cadence.
+Rules:
+- SKIP if window_interactions < 5 (hard rule)
+- EVENT_DRIVEN only if window_interactions >= 5 AND pending_insights >= 3 AND recent_shift_magnitude >= 0.5
+- PERIODIC if window_interactions >= target_cadence
 
-Choose:
-- SKIP: window < 5, or no meaningful new synthesis needed
-- PERIODIC: enough elapsed context to do a maintenance reflection
-- EVENT_DRIVEN: significant accumulation (see HARD RULE above)
-
-Respond with ONLY a JSON object. Example:
-{{"trigger": "SKIP", "reasoning": "Only 3 interactions since last reflection, below the minimum threshold."}}
+Your response must end with ONLY a JSON object:
+{{"trigger": "SKIP", "reasoning": "Only 3 interactions since last reflection."}}
 
 trigger must be exactly SKIP, PERIODIC, or EVENT_DRIVEN."""
 
 # --- Query Routing ---
 QUERY_ROUTING_PROMPT: Final = """\
-Classify this query to determine the optimal memory retrieval strategy.
+Classify this query to choose the optimal memory retrieval strategy.
 
 Query: {query}
 Recent conversation context: {context}
 
-Categories:
-1. NONE - No memory retrieval needed (greetings, acknowledgments, chitchat only)
-2. SIMPLE - Single fact lookup, recent context likely sufficient
-3. TEMPORAL - Requires historical/chronological information
-4. MULTI_ENTITY - Compares or relates multiple subjects/people/topics
-5. AGGREGATION - Needs synthesis across multiple episodes
-6. BELIEF_QUERY - Asks about agent's own opinions/beliefs
+Categories (pick the MOST SPECIFIC match):
+1. NONE - Pure chitchat, greetings, acknowledgments with zero factual content
+2. SIMPLE - Single topic lookup: "what do you know about X?", "tell me about X", "do you remember X?" — use this for most knowledge questions
+3. TEMPORAL - Needs chronological ordering: "what happened first?", "how has X changed over time?", "what did we discuss before Y?" — only for true timeline queries
+4. MULTI_ENTITY - Explicit comparison of 2+ distinct entities: "compare X and Y", "how do X and Y differ?"
+5. AGGREGATION - Cross-conversation synthesis: "summarize everything about X", "what patterns have you noticed?" — only for synthesis tasks spanning many episodes
+6. BELIEF_QUERY - Explicitly asking about the agent's own view: "what do you think about X?", "what's your opinion on X?", "do you believe X?"
+
+Key distinctions:
+- "What do you know about X?" → SIMPLE (single lookup), NOT TEMPORAL
+- "What's your view on X?" → BELIEF_QUERY, NOT SIMPLE
+- "What did we discuss earlier?" → TEMPORAL (needs chronological order)
+- Presenting factual claims for the agent to respond to → NONE (no retrieval needed)
 
 Also determine:
-- Retrieval depth: MINIMAL (1-2), MODERATE (5-7), DEEP (10-15)
-- Needs temporal expansion: Should we fetch adjacent episodes for context?
-- Search semantic memory: Should we query belief/profile data?
+- depth: MINIMAL (1-2 episodes), MODERATE (5-7), DEEP (10-15)
+- temporal_expansion: EXPAND only for true TEMPORAL queries; NO_EXPAND for everything else
+- semantic_memory: SEARCH if the query touches on personality/beliefs/preferences; SKIP otherwise
 
-Respond with ONLY a JSON object (fill in YOUR values — do NOT copy this example verbatim):
-{{"category": "TEMPORAL", "depth": "MODERATE", "temporal_expansion": "EXPAND", "semantic_memory": "SKIP", "reasoning": "User is asking about events from a previous session."}}
+Respond with ONLY a JSON object (fill in YOUR values, not this example):
+{{"category": "SIMPLE", "depth": "MODERATE", "temporal_expansion": "NO_EXPAND", "semantic_memory": "SKIP", "reasoning": "Single topic lookup — what does the agent know about X."}}
 
 category must be: NONE, SIMPLE, TEMPORAL, MULTI_ENTITY, AGGREGATION, or BELIEF_QUERY.
 depth must be: MINIMAL, MODERATE, or DEEP.
 temporal_expansion must be: EXPAND or NO_EXPAND.
-semantic_memory must be: SEARCH or SKIP."""
+semantic_memory must be: SEARCH or SKIP.
+Your response must end with ONLY the JSON object."""
 
 # --- Sufficiency Checking (ChainOfQueryAgent) ---
 SUFFICIENCY_PROMPT: Final = """\
@@ -131,7 +135,8 @@ Respond with ONLY a JSON object. Example for sufficient context:
 Example for insufficient context:
 {{"sufficiency_decision": "INSUFFICIENT", "confidence": 0.4, "reasoning": "Missing information about the timeline.", "suggested_refinement": "When did the user first mention this topic?"}}
 
-sufficiency_decision must be SUFFICIENT or INSUFFICIENT."""
+sufficiency_decision must be SUFFICIENT or INSUFFICIENT.
+Your response must end with ONLY the JSON object."""
 
 # --- Query Decomposition (SplitQueryAgent) ---
 DECOMPOSITION_PROMPT: Final = """\
@@ -146,9 +151,10 @@ Guidelines:
 - Each should retrieve distinct information
 
 Respond with ONLY a JSON object. Example:
-{{"sub_queries": ["What did the user say about [topic A]?", "What is the agent's position on [topic B]?"], "aggregation_strategy": "merge"}}
+{{"sub_queries": ["What did the user say about climate change?", "What is the agent's position on nuclear energy?"], "aggregation_strategy": "merge"}}
 
-aggregation_strategy must be: merge, compare, or timeline."""
+aggregation_strategy must be: merge, compare, or timeline.
+Your response must end with ONLY the JSON object."""
 
 # --- LLM Listwise Reranking ---
 RERANK_PROMPT: Final = """\
@@ -168,7 +174,8 @@ Consider:
 Respond with ONLY a JSON object. Example (if 3 candidates, ranking by relevance):
 {{"ranking": [3, 1, 2], "reasoning": "Candidate 3 is most directly relevant; candidate 1 provides useful context; candidate 2 is tangential."}}
 
-ranking must list every candidate index exactly once."""
+ranking must list every candidate index exactly once.
+Your response must end with ONLY the JSON object."""
 
 # --- Consolidation Readiness ---
 CONSOLIDATION_READINESS_PROMPT: Final = """\
@@ -191,7 +198,8 @@ Respond with ONLY a JSON object. Example:
 {{"readiness_decision": "READY", "confidence": 0.8, "reasoning": "The topic has reached a natural conclusion with no unresolved threads.", "suggested_summary_focus": "Focus on the key arguments and evidence discussed"}}
 
 readiness_decision must be READY or NOT_READY.
-suggested_summary_focus should be null if not ready."""
+suggested_summary_focus should be null if not ready.
+Your response must end with ONLY the JSON object."""
 
 # --- Consolidation Summarization ---
 SUMMARIZATION_PROMPT: Final = """\
@@ -276,7 +284,8 @@ Output ONLY a JSON object (fill in YOUR values — do NOT copy this example):
 direction: float -1.0 to +1.0. Positive means the evidence argues FOR this topic being real/important/valid (should push the opinion MORE POSITIVE). Negative means the evidence argues AGAINST this topic being real/important/valid (should push the opinion MORE NEGATIVE). The scale is absolute — not relative to the current_value.
 evidence_strength and new_uncertainty: floats 0.0 to 1.0.
 update_magnitude: MAJOR (large shift ≥0.3), MINOR (small shift <0.3), or NONE (no shift).
-contraction_action: CONTRACT or NONE."""
+contraction_action: CONTRACT or NONE.
+Your response must end with ONLY the JSON object."""
 
 # --- Batch Belief Evidence Assessment ---
 BATCH_BELIEF_UPDATE_PROMPT: Final = """\
@@ -304,8 +313,8 @@ For each topic, consider:
 - Is this a true contradiction or just nuance/complexity?
 - Does this warrant AGM-style belief contraction?
 
-Produce one assessment per topic. Output ONLY a JSON array — one entry per topic listed above (copy the exact topic name, fill in YOUR assessed values):
-[{{"topic": "exact-topic-name-from-above", "direction": 0.3, "evidence_strength": 0.6, "new_uncertainty": 0.35, "reasoning": "...", "update_magnitude": "MINOR", "contraction_action": "NONE"}}]
+Produce one assessment per topic. Output ONLY a JSON object with an "assessments" array — one entry per topic listed above (copy the exact topic name, fill in YOUR assessed values):
+{{"assessments": [{{"topic": "exact-topic-name-from-above", "direction": 0.3, "evidence_strength": 0.6, "new_uncertainty": 0.35, "reasoning": "Evidence moderately supports the belief with a credible source and specific data.", "update_magnitude": "MINOR", "contraction_action": "NONE"}}]}}
 
 Uncertainty calibration (use supporting_count and contradicting_count from each topic):
 - supporting_count=0 (first evidence): new_uncertainty 0.6–0.9
@@ -317,23 +326,26 @@ Uncertainty calibration (use supporting_count and contradicting_count from each 
 direction: float -1.0 to +1.0. Positive means the evidence argues FOR this topic being real/important/valid (should push opinion MORE POSITIVE). Negative means the evidence argues AGAINST it. Absolute scale — not relative to the current belief.
 evidence_strength and new_uncertainty: floats 0.0 to 1.0.
 update_magnitude: MAJOR (shift ≥0.3), MINOR (shift <0.3), or NONE.
-contraction_action: CONTRACT or NONE."""
+contraction_action: CONTRACT or NONE.
+Your response must end with ONLY the JSON object."""
 
-# --- Structural Disagreement Detection ---
+# --- Structural Disagreement Detection (batch — all relevant topics in one call) ---
 DISAGREEMENT_DETECTION_PROMPT: Final = """\
-Determine if the user's message structurally disagrees with the agent's position.
+Determine if the user's message structurally disagrees with any of the agent's current positions.
 
 User Message: {user_message}
-Agent Position on Topic "{topic}": {position_value} (-1 to +1 scale)
-User Opinion Direction: {opinion_direction}
+User Opinion Direction: {opinion_direction} (sign: +1=supports topic, -1=opposes topic)
+
+Agent's current positions on relevant topics (scale -1 to +1, negative=against, positive=for):
+{topics_and_positions}
 
 Consider:
-- Is the user presenting an argument against the agent's position?
+- Is the user presenting an argument against ANY of these positions?
 - Is this genuine disagreement or simply different emphasis?
 - Does the user provide evidence or reasoning for their opposing view?
 
-Respond with ONLY a JSON object. Example:
-{{"disagreement_verdict": "DISAGREEMENT", "disagreement_strength": 0.7, "reasoning": "User directly challenges agent's position with a counter-argument."}}
+Your response must end with ONLY a JSON object:
+{{"disagreement_verdict": "DISAGREEMENT", "disagreement_strength": 0.7, "reasoning": "User directly challenges nuclear energy position with a counter-argument."}}
 
 disagreement_verdict must be DISAGREEMENT or NO_DISAGREEMENT.
 disagreement_strength is a float from 0.0 to 1.0."""
@@ -353,11 +365,12 @@ For each belief consider:
 - Is it foundational and should persist regardless of reinforcement?
 
 Output ONLY a JSON array, one entry per belief:
-[{{"topic": "...", "action": "RETAIN", "new_confidence": 0.72, "reasoning": "..."}}]
+[{{"topic": "nuclear_energy", "action": "RETAIN", "new_confidence": 0.72, "reasoning": "Belief is well-supported and recently reinforced; no staleness detected."}}]
 
 action must be exactly RETAIN, DECAY, or FORGET.
 new_confidence must be 0.0–1.0.
-RETAIN keeps confidence unchanged; DECAY reduces it; FORGET removes the belief entirely."""
+RETAIN keeps confidence unchanged; DECAY reduces it; FORGET removes the belief entirely.
+Your response must end with ONLY the JSON array."""
 
 # --- Batch Entrenchment Detection ---
 BATCH_ENTRENCHMENT_DETECTION_PROMPT: Final = """\
@@ -372,9 +385,10 @@ Signs of entrenchment:
 - High confidence despite limited evidence diversity
 
 Output ONLY a JSON array, one entry per entrenched belief (omit non-entrenched ones):
-[{{"topic": "...", "reasoning": "..."}}]
+[{{"topic": "nuclear_energy", "reasoning": "All 5 updates agreed with the existing stance; no contradictory episodes considered."}}]
 
-Return an empty array [] if no entrenchment detected."""
+Return an empty array [] if no entrenchment detected.
+Your response must end with ONLY the JSON array."""
 
 # --- Health Assessment ---
 HEALTH_ASSESSMENT_PROMPT: Final = """\
@@ -415,7 +429,8 @@ Respond with ONLY a JSON object. Example:
 }}
 
 overall_health must be: healthy, concerning, or unhealthy.
-All metric scores are floats from 0.0 to 1.0."""
+All metric scores are floats from 0.0 to 1.0.
+Your response must end with ONLY the JSON object."""
 
 # Valid tags per category — restricts LLM from cross-pollinating category names.
 FEATURE_TAGS: Final[dict[str, str]] = {
@@ -453,17 +468,18 @@ DELETION RULES (strictly enforced):
 - When ESS line shows emotional_appeal, social_pressure, debunked_claim, or anecdotal: issue NO delete commands. Only add or update communication-style features.
 - If deleting, you MUST fill the "reason" field with the exact new assertive phrase from the episode that contradicts the feature.
 
-Your response must be ONLY this JSON object with actual values filled in (no {{"..."}}, no placeholders):
+Your response must be ONLY this JSON object with actual values from the episode (no placeholders, no brackets):
 {{
   "commands": [
-    {{"command": "add", "tag": "[valid tag]", "feature": "[feature_name]", "value": "[description from episode]", "confidence": 0.8, "reason": ""}},
-    {{"command": "update", "tag": "[valid tag]", "feature": "[feature_name]", "value": "[updated value from episode]", "confidence": 0.9, "reason": ""}},
-    {{"command": "delete", "tag": "[valid tag]", "feature": "[feature_name]", "value": "", "confidence": 0.9, "reason": "[exact contradicting phrase from episode]"}}
+    {{"command": "add", "tag": "Domain", "feature": "Climate Science", "value": "Cites IPCC AR6 reports to support claims about temperature anomalies.", "confidence": 0.8, "reason": ""}},
+    {{"command": "update", "tag": "Technical Skills", "feature": "Data Analysis", "value": "Corrects statistical methodology errors in user-cited studies.", "confidence": 0.9, "reason": ""}},
+    {{"command": "delete", "tag": "Stance", "feature": "Nuclear Skepticism", "value": "", "confidence": 0.9, "reason": "Agent states nuclear power is now the safest low-carbon option per updated safety data."}}
   ]
 }}
 If no features should be added/updated/deleted, return: {{"commands": []}}
 command must be add, update, or delete. confidence is a float from 0.0 to 1.0.
-IMPORTANT: tag must be one of the valid tags listed above."""
+IMPORTANT: tag must be one of the valid tags listed above.
+IMPORTANT: value must be one concise sentence (max 20 words). Do not use multi-sentence values."""
 
 # --- Semantic Feature Consolidation ---
 FEATURE_CONSOLIDATION_PROMPT: Final = """\
@@ -483,9 +499,9 @@ No-merge example:
 {{"consolidation_decision": "SKIP", "reasoning": "Features are distinct observations.", "actions": []}}
 
 Merge example (only when values express exactly the same behavior):
-{{"consolidation_decision": "CONSOLIDATE", "reasoning": "Both values describe the same specific observed behavior word-for-word.", "actions": [{{"source_uid": "[uid-to-remove]", "target_uid": "[uid-to-keep]", "canonical_tag": "[tag]", "canonical_feature": "[name]", "canonical_value": "[longer/more detailed value]", "reason": "duplicate"}}]}}
+{{"consolidation_decision": "CONSOLIDATE", "reasoning": "Both values describe the same specific observed behavior word-for-word.", "actions": [{{"source_uid": "abc12345-abcd-abcd-abcd-abcdef012345", "target_uid": "def67890-abcd-abcd-abcd-abcdef012345", "canonical_tag": "Stance", "canonical_feature": "Nuclear Position", "canonical_value": "Consistently frames nuclear energy as necessary for decarbonization based on lifecycle CO2 data.", "reason": "duplicate"}}]}}
 
-Respond with the JSON object now:"""
+Your response must end with ONLY the JSON object:"""
 
 # --- Window Context Summary (SLIDE-inspired) ---
 # Generates a brief factual summary of the preceding window so the next window
@@ -514,20 +530,44 @@ Output ONLY plain text — no JSON, no formatting, no preamble."""
 # to represent exactly one factoid, and context-rich enough to avoid the
 # "context collapse" problem identified by PropRAG (EMNLP 2025).
 KNOWLEDGE_EXTRACTION_PROMPT: Final = """\
-You are a knowledge extraction system. Process this text through five stages.
+You are a knowledge extraction system. The input is a conversation excerpt formatted as \
+"User: [message]\\nAssistant: [reply]". Process through five stages.
 
-STAGE 1 — SELECT: Read the entire text and identify sentences containing \
-learnable information (facts, data, mechanisms, attributed opinions, \
-scientific claims). SKIP: greetings, filler, meta-commentary ("by the way"), \
-emotional expressions, rhetorical questions with no factual content.
+STAGE 1 — SELECT: Identify sentences containing learnable information (facts, data, \
+mechanisms, attributed opinions, scientific claims). Extract from the User's message. \
+SKIP: greetings, filler, meta-commentary ("by the way"), emotional expressions, \
+rhetorical questions with no factual content.
 
-STAGE 2 — DECONTEXTUALIZE: For each selected sentence, make it fully \
-standalone by replacing ALL pronouns, references, and implicit subjects \
-with their explicit referents from the surrounding text. \
+INDIRECT ATTRIBUTION (e.g., "my friend told me X", "she said Y", "I heard that Z"): \
+Extract the factual claim if it is specific and verifiable. Attribute it as: \
+"According to [role/relation given] (reported by user), [claim]." Set confidence 0.25-0.45 \
+to reflect the indirect attribution. Do NOT skip facts just because they are relayed through \
+a third party — hearsay with specific, verifiable details is worth storing at low confidence.
+
+CRITICAL PRE-FILTER — Before extraction, scan the Agent/Assistant reply for CORRECTIONS:
+If the Agent's reply explicitly REBUTS, CORRECTS, or CONTRADICTS a SPECIFIC claim from the \
+User's message (e.g., "that's incorrect", "actually X is Y", "the real measurement is", \
+"contrary to your claim", "X did not discover Y", "that is a misconception"), mark ONLY \
+that specific rebutted claim with `type="speculation"`, `confidence ≤ 0.15`, and \
+`negation=true`. The Agent's rebuttal is evidence the claim is FALSE — a rebutted claim \
+MUST NEVER be stored as type="fact" with confidence > 0.20, regardless of how the user \
+framed it. Apply this ONLY to the specific claims rebutted, NOT to other claims in the \
+same message that the Agent did not correct.
+
+Do NOT extract propositions attributed to "Assistant" or "Agent" (first-person agent \
+statements). The Agent's own analysis, corrections, and commentary are not new factual \
+inputs from external sources. Only extract from named external sources (User, named \
+researchers, institutions, publications, etc.).
+
+STAGE 2 — DECONTEXTUALIZE: For each selected sentence, make it fully standalone by \
+replacing ALL pronouns with their explicit referents from surrounding context. \
 "It was discovered in [year]" → "[Named entity from context] was discovered in [year]." \
-"They reported a [N]% increase" → "[Named researchers/institution] reported a [N]% increase in [specific metric]." \
-"The experiment showed…" → "[Author]'s [year] experiment at [institution] showed…" \
-If the referent cannot be determined from context, SKIP the sentence entirely.
+"She told me that [X]" → "[X] (according to [speaker's role/name if given])." \
+For informal/conversational text: resolve "she/he/they" from the immediately preceding \
+sentence's subject. Be AGGRESSIVE about resolving pronouns — if the referent is clearly \
+implied (even loosely) by context, resolve it. Only discard if truly impossible to infer. \
+When the user recounts what someone told them, the claim should be expressed as: \
+"[Claim text] (according to [the person's role, e.g., microbiologist friend of user])."
 
 STAGE 3 — DECOMPOSE into molecular propositions. Each proposition must:
 - Be self-contained: a reader with NO access to the original text can understand it
@@ -543,15 +583,23 @@ STAGE 4 — CLASSIFY and calibrate confidence for each proposition:
 Types:
 - fact: objectively verifiable claim with concrete details (names, numbers, dates, mechanisms)
 - opinion: subjective judgment or preference — ALWAYS attribute to its source ("The user believes...", "According to X...")
-- speculation: hedged/uncertain claim ("might", "could", "potentially", "is expected to")
+- speculation: hedged/uncertain claim ("might", "could", "potentially", "is expected to"), OR a User claim the Agent explicitly rebutted
 - noise: filler, non-substantive content (EXCLUDE these)
 
-Confidence calibration — based SOLELY on evidence quality in the text:
+Confidence calibration — based SOLELY on the INDIVIDUAL CLAIM'S evidence quality:
 - 0.85-0.95: Named reputable source (journal, institution, named report) + concrete data
 - 0.65-0.84: Specific and verifiable but source informal or partially named
 - 0.40-0.64: General knowledge claim without specific attribution or data
 - 0.15-0.39: Vague, hedged, or from anonymous/dubious sources ("someone told me", "I read somewhere")
-- 0.01-0.14: Extraordinary claims without any supporting evidence in the text
+- 0.01-0.14: Extraordinary claims without supporting evidence, OR claims the Agent explicitly rebutted
+
+CRITICAL: Evaluate each claim's confidence INDEPENDENTLY based on ITS OWN specificity and \
+verifiability — NOT the overall credibility of the message. False claims co-occurring in \
+the same message do NOT reduce confidence for true claims in the same message. If the user \
+says both X (true and specific) and Y (false), claim X still gets its normal confidence \
+based on its own evidence quality. A factual scientific constant (speed of light, atomic \
+number, physical law) stated by the user with a citation to established physics should be \
+0.65-0.84 confidence even if the same message also contains false claims.
 
 STAGE 5 — QUALITY GATE: Before including ANY proposition, run this checklist:
 □ SUBJECT: Does it name a specific entity, person, or thing? \
@@ -572,18 +620,28 @@ CRITICAL RULES:
 - Propositions with unresolved pronouns FAIL the quality gate — fix or drop them
 - Maximum 15 propositions — prefer fewer high-quality over many low-quality
 - Every output proposition MUST pass ALL four quality gate checks above
+- Do NOT extract propositions where the source is "Assistant" or "the Agent"
+- If Agent's reply explicitly corrects a User claim: mark that claim negation=true, type=speculation, confidence ≤ 0.15
 
-Output ONLY a JSON object (replace bracket placeholders with actual content from the text):
+Output ONLY a JSON object with real extracted propositions from the text above.
+
+<output_format_example>
 {{"propositions": [\
-{{"text": "[Subject] [verb] [specific measurement with units] according to [Named Source, Year].", "type": "fact", "confidence": 0.88, "source_entity": "[source name]", "key_concepts": ["[topic1]", "[topic2]", "[topic3]"], "sentiment": 0.0}}, \
-{{"text": "The user believes [subject] is [positive judgment].", "type": "opinion", "confidence": 0.40, "source_entity": "user", "key_concepts": ["[topic]"], "sentiment": 0.8}}, \
-{{"text": "The user believes [subject] is [negative judgment].", "type": "opinion", "confidence": 0.40, "source_entity": "user", "key_concepts": ["[topic]"], "sentiment": -0.7}}, \
-{{"text": "[Subject] [verb] approximately [value] [units].", "type": "fact", "confidence": 0.50, "source_entity": "", "key_concepts": ["[topic1]", "[topic2]"], "sentiment": 0.0}}]}}
+{{"text": "ExampleCorp released product X-7 in January 2020 according to their annual report.", "type": "fact", "confidence": 0.88, "source_entity": "ExampleCorp", "key_concepts": ["product launch", "corporate timeline"], "sentiment": 0.0, "negation": false}}, \
+{{"text": "The user believes renewable energy is the most practical long-term solution for Region Y.", "type": "opinion", "confidence": 0.40, "source_entity": "user", "key_concepts": ["renewable energy"], "sentiment": 0.8, "negation": false}}, \
+{{"text": "Perpetual motion as a viable energy source has been repeatedly disproven by peer review.", "type": "fact", "confidence": 0.75, "source_entity": "scientific consensus", "key_concepts": ["perpetual motion", "thermodynamics"], "sentiment": 0.0, "negation": true}}, \
+{{"text": "City Z population grew by approximately 3% annually between 2010 and 2020.", "type": "fact", "confidence": 0.50, "source_entity": "", "key_concepts": ["urbanization", "population growth"], "sentiment": 0.0, "negation": false}}]}}
+</output_format_example>
+
+CRITICAL: Output ONLY real propositions extracted from the text above. NEVER output "..." as a value. Fill every field with actual content.
 
 type must be: fact, opinion, speculation, or noise.
 confidence: 0.0-1.0 calibrated per Stage 4 rules — source quality determines confidence.
-source_entity: who made the claim (empty string for unattributed claims).
-key_concepts: 1-3 topic labels for embedding and retrieval. For opinion-type propositions, key_concepts[0] must name the concrete subject-matter domain or real-world phenomenon being evaluated — NEVER the source institution, policy mechanism, or issuance label. Wrong: "surgeon general advisory", "FDA approval", "WHO guidelines". Correct: "social media", "drug safety", "pandemic response". Use the domain being evaluated, not the vehicle through which the evaluation was expressed.
+source_entity: who made the claim (empty string for unattributed claims). Never "Assistant" or "Agent".
+key_concepts: 1-3 topic labels for embedding and retrieval.
+  - For causal statements (A causes B, A leads to B), include BOTH the cause and effect topics.
+  - For correlative statements (A increases with B, A is inversely related to B), include BOTH correlated topics.
+  - For opinion-type propositions, key_concepts[0] must name the concrete subject-matter domain or real-world phenomenon being evaluated — NEVER the source institution, policy mechanism, or issuance label. Wrong: "surgeon general advisory", "FDA approval", "WHO guidelines". Correct: "social media", "drug safety", "pandemic response". Use the domain being evaluated, not the vehicle through which the evaluation was expressed.
 sentiment: applies ONLY to opinion-type propositions (use 0.0 for fact and speculation).
   For opinions: +1.0 = the SOURCE advocates that key_concepts[0] is beneficial/valid/should-be-adopted;
   -1.0 = the SOURCE argues key_concepts[0] is harmful/invalid/should-be-avoided.
@@ -592,7 +650,12 @@ sentiment: applies ONLY to opinion-type propositions (use 0.0 for fact and specu
   CRITICAL: institutional issuances (government advisories, scientific advisories, policy statements) that
   report a verifiable fact ("The surgeon general issued advisory X") are FACT type with sentiment=0.0,
   not opinion. Only encode sentiment when the proposition expresses an evaluative stance, not when it
-  merely reports that an institution acted."""
+  merely reports that an institution acted.
+negation: true if the speaker is DENYING, REBUTTING, or REFUTING this claim (e.g., "X is false",
+  "Y has been debunked", "Z is a myth"), OR if the Agent's reply explicitly rebutted this User claim.
+  false if asserting it. Rebuttals should still extract the underlying claim but mark negation=true.
+
+Your response must end with ONLY the JSON object — no trailing explanation. If nothing qualifies, output: {{"propositions": []}}"""
 
 # --- Knowledge Consolidation (Reflection) ---
 # Uses EDC-style canonicalization (2025) for merges and FactReasoner-style
@@ -651,4 +714,40 @@ a part-whole relationship, or a difference in specificity/scope — those must s
 When uncertain, keep them separate.
 
 Output ONLY a JSON object mapping every new topic to its canonical form:
-{{"mappings": {{"new_topic": "canonical_name"}}}}"""
+{{"mappings": {{"new_topic": "canonical_name"}}}}
+Your response must end with ONLY the JSON object."""
+
+
+# --- Correlation Detection ---
+# Identifies causal, correlative, or anti-correlative relationships between
+# belief topics based on accumulated knowledge. Uses propositional evidence
+# rather than LLM parametric knowledge.
+CORRELATION_DETECTION_PROMPT: Final = """\
+Analyze these knowledge propositions to identify correlations between belief topics.
+
+Stored knowledge:
+{propositions}
+
+Topics under analysis:
+{topics}
+
+For each pair of topics, determine if the evidence establishes:
+- CORRELATES_WITH: Topics move together (evidence suggests when one increases/occurs, the other does too)
+- ANTI_CORRELATES_WITH: Topics move inversely (when one increases, the other decreases)
+- CAUSALLY_LINKED: One topic directly causes changes in the other (A→B, with mechanism stated)
+- NO_CORRELATION: Insufficient evidence or no meaningful relationship
+
+CRITICAL: Base conclusions ONLY on the stored knowledge provided. Do not use external knowledge.
+The strength (0.0-1.0) reflects confidence based on evidence quality:
+- 0.8-1.0: Multiple propositions with named sources directly state the relationship
+- 0.5-0.79: Single strong source or multiple indirect sources imply the relationship
+- 0.2-0.49: Weak or indirect evidence, relationship inferred but not stated
+- 0.0-0.19: Highly speculative, almost no evidence
+
+Output ONLY a JSON object:
+{{"correlations": [
+  {{"topic_a": "nuclear energy", "topic_b": "climate change", "type": "CORRELATES_WITH", "strength": 0.75, "reasoning": "Multiple propositions with IPCC citations establish that nuclear reduces CO2 emissions relevant to climate goals."}}
+]}}
+
+Use empty array if no correlations found. Only include relationships with strength >= 0.3.
+Your response must end with ONLY the JSON object."""

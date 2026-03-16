@@ -76,6 +76,19 @@ StepProgressEvent = Literal["start", "end"]
 StepProgressCallback = Callable[[StepProgressEvent, int, int, ScenarioStep, object], None]
 
 
+def _noop_step_progress(
+    event: StepProgressEvent,
+    step_index: int,
+    total_steps: int,
+    step: ScenarioStep,
+    payload: object,
+) -> None:
+    _ = (event, step_index, total_steps, step, payload)
+
+
+NO_STEP_PROGRESS: Final[StepProgressCallback] = _noop_step_progress
+
+
 @dataclass(frozen=True, slots=True)
 class _StepBaseline:
     """Pre-step sponge state used to build one step result."""
@@ -120,12 +133,8 @@ def _build_step_result(
     opinion_vectors_after = dict(sponge.opinion_vectors)
     staged_updates_after = len(sponge.staged_opinion_updates)
     pending_insights_after = len(sponge.pending_insights)
-    opinions_changed = (
-        before.opinion_vectors.keys() != opinion_vectors_after.keys()
-        or any(
-            abs(opinion_vectors_after[t] - v) > 1e-9
-            for t, v in before.opinion_vectors.items()
-        )
+    opinions_changed = before.opinion_vectors.keys() != opinion_vectors_after.keys() or any(
+        abs(opinion_vectors_after[t] - v) > 1e-9 for t, v in before.opinion_vectors.items()
     )
     staged_updates_added = staged_updates_after > before.staged_updates
     staged_updates_committed = staged_updates_after < before.staged_updates
@@ -148,10 +157,9 @@ def _build_step_result(
         or pending_insights_added
         or (opinions_changed and not staged_updates_committed)
     )
-    # Infer disagreement from rate delta (increase of ≥0.5 in rate×count product).
+    # Infer disagreement from rate delta (increase of >=0.5 in rate*count product).
     did_disagree = (
-        disagreement_after * interaction_after
-        - before.disagreement_rate * before.interaction_count
+        disagreement_after * interaction_after - before.disagreement_rate * before.interaction_count
     ) >= 0.5
     return StepResult(
         label=step.label,
@@ -197,7 +205,7 @@ def run_scenario(
     scenario: Sequence[ScenarioStep],
     tmp_dir: str,
     session_split_at: int = NO_SESSION_SPLIT,
-    step_progress: StepProgressCallback | None = None,
+    step_progress: StepProgressCallback = NO_STEP_PROGRESS,
     ess_min_slack: float = 0.0,
     ess_max_slack: float = 0.0,
 ) -> list[StepResult]:
@@ -226,8 +234,7 @@ def run_scenario(
 
             for idx, step in enumerate(scenario):
                 step_index = idx + 1
-                if step_progress:
-                    step_progress("start", step_index, scenario_len, step, "start")
+                step_progress("start", step_index, scenario_len, step, "start")
                 if idx == split_index:
                     agent.shutdown()
                     agent = SonalityAgent()
@@ -248,8 +255,7 @@ def run_scenario(
                     raise RuntimeError(
                         f"Scenario step failed ({step_index}/{scenario_len}, label='{step.label}')"
                     ) from exc
-                if step_progress:
-                    step_progress("end", step_index, scenario_len, step, result)
+                step_progress("end", step_index, scenario_len, step, result)
                 results.append(result)
 
             return results

@@ -107,10 +107,12 @@ def _show_beliefs(agent: SonalityAgent) -> None:
     if not agent.sponge.opinion_vectors:
         print("  No beliefs formed yet.")
         return
-    for topic, pos in sorted(agent.sponge.opinion_vectors.items(), key=lambda x: -abs(x[1])):
-        meta = agent.sponge.belief_meta.get(topic)
-        conf = f"conf={meta.confidence:.2f} ev={meta.evidence_count}" if meta else "no meta"
-        print(f"  {topic:30s} {pos:+.3f}  ({conf})")
+    for topic in sorted(
+        agent.sponge.opinion_vectors, key=lambda t: -abs(agent.sponge.opinion_vectors[t])
+    ):
+        b = agent.sponge.get_belief(topic)
+        meta = f"conf={b.confidence:.2f} ev={b.evidence_count}" if b.has_evidence else "no meta"
+        print(f"  {topic:30s} {b.position:+.3f}  ({meta})")
 
 
 def _show_insights(agent: SonalityAgent) -> None:

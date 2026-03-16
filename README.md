@@ -16,7 +16,7 @@ flowchart TD
         ID["Core identity (immutable)"]
         SNAP["Personality snapshot (~500 tokens, mutable)"]
         TRAITS["Structured traits and opinions"]
-        MEM["Retrieved memory context (Neo4j + pgvector)"]
+        MEM["Retrieved memory context (Neo4j + Qdrant)"]
     end
 
     CTX --> GEN["LLM response generation"]
@@ -51,14 +51,14 @@ Conditionally (when ESS reliability gates pass):
 7. **Insight extraction** — one-sentence personality observation extracted when evidence quality is reliable
 
 **Async background (non-blocking):**
-8. **Episodic memory storage** — LLM semantic chunking (typically 5–12 chunks per episode) + Ollama embedding for pgvector storage
+8. **Episodic memory storage** — LLM semantic chunking (typically 5–12 chunks per episode) + Ollama embedding for Qdrant storage
 9. **Semantic feature extraction** — LLM extracts persistent personality features across 4 categories (personality, preferences, knowledge, relationships); consolidates near-duplicates
 10. **STM segment consolidation** — background worker periodically summarizes and consolidates episode segments
 
 **Key implementation details:**
-- **All** LLM calls (both JSON extraction and plain text generation) use `chat_template_kwargs: {"enable_thinking": false}` via `disable_thinking=True`. Without this, Qwen3.5 and similar thinking models burn their entire `max_tokens` budget (~4096 tokens, ~100 seconds) on chain-of-thought reasoning before producing output — making the system unusably slow. Applied to: main conversation response, reflection snapshot, STM summarization, consolidation summaries, ESS classification, all JSON extraction calls.
+- **All** LLM calls keep model reasoning enabled (`chat_template_kwargs: {"enable_thinking": true}`), but returned text is scrubbed of chain-of-thought. This preserves reasoning quality while preventing thinking traces from appearing in user-visible output.
 - A `threading.Semaphore(1)` serializes all LLM HTTP calls to prevent overwhelming single-threaded local inference servers.
-- `SemanticIngestionWorker` runs on its own dedicated `asyncio` event loop in a background thread with its own `AsyncConnectionPool`, eliminating cross-loop contention. Embeddings are computed synchronously in the worker thread before submitting the DB write to the async path.
+- `SemanticIngestionWorker` runs on its own dedicated `asyncio` event loop in a background thread with its own async Qdrant client, eliminating cross-loop contention. Embeddings are computed synchronously in the worker thread before submitting the DB write to the async path.
 - **Per-reasoning-type magnitude caps** (aligned with AGM minimal change principle): empirical_data ≤ 0.20, expert_opinion ≤ 0.14, logical_argument ≤ 0.10, anecdotal ≤ 0.06, debunked_claim = 0.0, social_pressure ≤ 0.02 per update. Prevents a single high-ESS turn from jumping opinion vectors by 0.8+.
 - **`debunked_claim` ESS category**: conclusively-refuted conspiracy theories (Climategate, vaccine-autism fabrication, moon landing, etc.) are classified as `debunked_claim` (score ≈ 0.0–0.07) rather than `anecdotal`. They freeze sponge mutation (staged updates not committed, insight extraction skipped) and have zero belief update magnitude. Backed by FactCheck.org, RefuteClaim (ACL 2024), and HKS Misinformation Review.
 - **Manipulative reasoning type filter**: messages classified as `social_pressure`, `emotional_appeal`, `debunked_claim`, or `anecdotal` trigger a sponge freeze — staged updates are not committed, insight extraction and reflection are skipped. Knowledge extraction still runs to capture factual claims, but opinion-type propositions are not staged as belief updates (only fact/speculation propositions are stored). This prevents coercive rhetoric or emotional appeals from shifting belief vectors while still learning facts stated within those turns.
@@ -66,7 +66,7 @@ Conditionally (when ESS reliability gates pass):
 - **Bayesian confidence floor**: belief confidence cannot stay at zero as evidence accumulates. After 2 consistent updates: uncertainty ≤ 0.50. After 3+: uncertainty ≤ 0.30. Applied at both belief creation (when `evidence_increment >= 2` from staged updates) and on each update in the `else` branch. The LLM-assessed `new_uncertainty` from the belief provenance evaluation is threaded through `StagedOpinionUpdate` → `apply_due_staged_updates` → `update_opinion`, so the Bayesian floor is applied after (not instead of) the LLM's own uncertainty estimate. Prevents oscillation caused by the belief update LLM returning `new_uncertainty=1.0` indefinitely despite multiple supporting episodes.
 - **Semantic feature tag validation**: each category has a fixed set of valid tags (e.g. `personality` → Communication Style, Values, Behavioral Traits, Temperament, Cognitive Style). LLM is told these in the extraction prompt, preventing cross-category tag contamination.
 - **Contradiction-only feature deletion**: semantic features are never deleted due to topic shifts, empathetic language, or paraphrased recalls of previous discussions. The extraction prompt mandates a direct new assertive counter-claim in the `reason` field; the runtime guard skips any DELETE command with `reason=""`. When ESS type is manipulative (emotional_appeal, social_pressure, etc.) the extraction prompt explicitly prohibits DELETE commands. This prevents personality erosion when users switch topics or the agent expresses empathy. Research-backed: FadeMem (2025), MemGPT, and PersonaAgent all show that topic silence ≠ trait contradiction.
-- **Hybrid BM25+vector retrieval**: derivative search uses RRF (Reciprocal Rank Fusion) of dense vector cosine similarity and sparse PostgreSQL full-text search (`tsvector` GIN index). This improves recall on exact-term queries (specific study names, statistics) where pure semantic search underperforms. Formula: `RRF(d) = Σ 1/(60 + rank_r(d))`, fusing vector and FTS ranked lists.
+- **Hybrid BM25+vector retrieval**: derivative search uses RRF (Reciprocal Rank Fusion) of dense vector cosine similarity and sparse BM25 text search via Qdrant's built-in text indexing. This improves recall on exact-term queries (specific study names, statistics) where pure semantic search underperforms. Formula: `RRF(d) = Σ 1/(60 + rank_r(d))`, fusing vector and text ranked lists server-side.
 
 Periodically (every ~20 interactions): **reflection** — consolidates accumulated insights into the personality narrative, decays unreinforced beliefs, validates snapshot integrity.
 
@@ -138,7 +138,7 @@ make run
 
 ```bash
 # Start databases
-docker compose up -d neo4j postgres
+docker compose up -d neo4j qdrant
 
 # Pull embedding model into your local Ollama
 ollama pull nomic-embed-text
@@ -152,7 +152,7 @@ SONALITY_EMBEDDING_BASE_URL=http://localhost:11434/v1
 SONALITY_EMBEDDING_SEND_DIMENSIONS=false
 SONALITY_FAST_LLM_MAX_TOKENS=4096            # thinking models need more tokens
 SONALITY_ASYNC_TIMEOUT=300                   # slow local models need longer timeout
-SONALITY_POSTGRES_URL=postgresql://sonality:sonality_password@localhost:5433/sonality
+SONALITY_QDRANT_URL=http://localhost:6333
 EOF
 
 make run
@@ -167,7 +167,7 @@ docker compose run --rm sonality
 
 ## Database Setup
 
-**Infrastructure:** Neo4j 5 (graph memory) + PostgreSQL 16 with pgvector (vector search).
+**Infrastructure:** Neo4j 5 (graph memory + state) + Qdrant (vector search + hybrid BM25).
 
 Schema definitions are centralized in `sonality/schema.py` as the single source of truth for both Docker Compose and test containers.
 
@@ -175,8 +175,8 @@ Schema definitions are centralized in `sonality/schema.py` as the single source 
 
 | Database | Method | Details |
 |---|---|---|
-| PostgreSQL | `/docker-entrypoint-initdb.d/` | Standard Docker pattern — SQL scripts run automatically on first container start |
-| Neo4j | Application-level | Schema (constraints + indexes) created by `sonality.memory.db` on first connection. This is the [recommended Neo4j pattern](https://neo4j.com/docs/operations-manual/5/docker/operations/) since Neo4j lacks an automatic init script mechanism |
+| Qdrant | Application-level | Collections created by `sonality.schema.init_qdrant_collections()` on first connection |
+| Neo4j | Application-level | Schema (constraints + indexes) created by `sonality.memory.db` on first connection |
 
 **Common commands:**
 
@@ -186,10 +186,9 @@ make db-down        # Stop containers
 make db-reset       # Delete all data and restart (fresh state)
 make db-clear       # Clear data, preserve schema
 make db-init-neo4j  # Manually run Neo4j schema script
-make schema-scripts # Regenerate init scripts from schema.py
 ```
 
-**Schema regeneration:** If you modify `sonality/schema.py`, run `make schema-scripts` to regenerate `scripts/init_postgres.sql` and `scripts/init_neo4j.cypher`.
+**Schema regeneration:** If you modify `sonality/schema.py`, run `make schema-scripts` to regenerate `scripts/init_neo4j.cypher`. Qdrant collections are initialized at runtime.
 
 ## REPL Commands
 
@@ -232,7 +231,7 @@ Set in `.env` (see `.env.example`):
 
 If live runs fail, use `make preflight-live-probe` to validate endpoint/model/policy access with a tiny real request before launching long benchmarks.
 
-**Thinking model support:** For models with chain-of-thought reasoning (Qwen3, Mistral-3.1, DeepSeek-R1, etc.), the system disables thinking for **all** LLM calls via `chat_template_kwargs: {"enable_thinking": false}`. Without this, thinking models exhaust their entire `max_tokens` budget (~4096 tokens, ~100 seconds) on internal chain-of-thought before producing any output — making each interaction take 5-8 minutes instead of 30-60 seconds. Applied to every `chat_completion` call site in the codebase. No configuration needed.
+**Thinking model support:** For models with chain-of-thought reasoning (Qwen3, Mistral-3.1, DeepSeek-R1, etc.), the system leaves thinking enabled and strips chain-of-thought from final output. This keeps answer quality high while ensuring users only see the final response.
 
 Runtime model overrides (no `.env` edit required):
 
@@ -283,7 +282,7 @@ Related work: Hase et al. (2024) "Fundamental Problems With Model Editing" ident
 
 **LLM-first belief updates** — provenance, contradiction handling, contraction, confidence shifts, and decay decisions are generated by structured LLM assessments instead of static formulas.
 
-**Dual-store memory** — every episode is written to Neo4j + pgvector derivatives, with graph edges (`SUPPORTS_BELIEF`, `CONTRADICTS_BELIEF`, temporal links, segments) and vector retrieval combined during reranked recall.
+**Dual-store memory** — every episode is written to Neo4j + Qdrant derivatives, with graph edges (`SUPPORTS_BELIEF`, `CONTRADICTS_BELIEF`, temporal links, segments) and vector retrieval combined during reranked recall.
 
 **Bootstrap dampening** — first 10 interactions get 0.5× update magnitude, preventing "first-impression dominance" from the Deffuant bounded confidence model.
 
@@ -502,9 +501,9 @@ sonality/
 │   │   └── prompts.py          Memory-subsystem LLM prompt templates
 │   └── memory/
 │       ├── sponge.py           SpongeState model, staged updates, persistence
-│       ├── dual_store.py       Episode storage coordinator (Neo4j + pgvector)
+│       ├── dual_store.py       Episode storage coordinator (Neo4j + Qdrant)
 │       ├── graph.py            Neo4j graph traversal, provenance edges, belief nodes
-│       ├── db.py               Database connection pool (Neo4j + PostgreSQL/pgvector)
+│       ├── db.py               Database connection pool (Neo4j + Qdrant)
 │       ├── derivatives.py      LLM-based semantic chunking → vector derivatives
 │       ├── embedder.py         Embedding calls (Ollama or any OpenAI-compatible endpoint)
 │       ├── semantic_features.py Async personality feature extraction and consolidation
@@ -534,5 +533,5 @@ sonality/
 ├── pyproject.toml              Dependencies and tool config
 ├── Makefile                    Dev workflows
 ├── Dockerfile                  Container build
-└── docker-compose.yml          Neo4j + PostgreSQL orchestration
+└── docker-compose.yml          Neo4j + Qdrant orchestration
 ```

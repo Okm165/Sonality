@@ -81,9 +81,9 @@ def _parse_json(text: str) -> dict[str, object] | list[object]:
             return parsed
     except json.JSONDecodeError:
         pass
-    result = extract_last_json_object(text)
-    if result is not None:
-        return result
+    obj = extract_last_json_object(text)
+    if obj is not None:
+        return obj
     raise ValueError(f"No valid JSON in LLM response: {text[:120]!r}")
 
 
@@ -199,7 +199,15 @@ def llm_call[T: BaseModel](
 
         except RuntimeError as exc:
             last_error = f"Provider error: {exc}"
-            if attempt < max_retries:
+            error_str = str(exc).lower()
+            # Transport errors and network errors are already retried inside provider._post_json.
+            # Re-retrying them here compounds the timeout — treat them as terminal.
+            is_exhausted = (
+                "name resolution" in error_str
+                or "network error" in error_str
+                or "transport error" in error_str
+            )
+            if attempt < max_retries and not is_exhausted:
                 wait = _BACKOFF_BASE**attempt
                 log.warning(
                     "LLM provider error on attempt %d/%d schema=%s: %s; retrying in %.1fs",
@@ -218,6 +226,8 @@ def llm_call[T: BaseModel](
                 schema_name,
                 exc,
             )
+            if is_exhausted:
+                break  # No point retrying — provider already exhausted its own retries
 
         except Exception as exc:
             last_error = f"Unexpected: {exc}"

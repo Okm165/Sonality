@@ -109,8 +109,8 @@ Selection rule:
 
 Sonality uses one embedding model through the unified provider abstraction for:
 
-- derivative vector retrieval in PostgreSQL/pgvector,
-- semantic feature embeddings in PostgreSQL.
+- derivative vector retrieval in Qdrant,
+- semantic feature embeddings in Qdrant.
 
 The default is `Qwen/Qwen3-Embedding-8B` (configurable via `SONALITY_EMBEDDING_MODEL`).
 Embedding quality directly affects retrieval relevance.

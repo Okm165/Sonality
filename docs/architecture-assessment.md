@@ -1,7 +1,7 @@
 # Architecture Assessment
 
 > Status note: this assessment includes pre-Path-A alternatives retained for
-> historical context. Production runtime uses Path A only (Neo4j + pgvector).
+> historical context. Production runtime uses Path A only (Neo4j + Qdrant).
 
 Research-backed architecture and training blueprint for Sonality under hard constraints:
 
@@ -29,7 +29,7 @@ This document is intentionally implementation-oriented: each recommendation is t
   - Typed vector memory + quality rerank + lightweight relational signals: high impact, low complexity.
 - **What to replace/remove (historical recommendation; superseded in runtime)**
   - Legacy recommendation kept a single vector store and avoided secondary graph persistence.
-  - Current runtime supersedes this with Path A dual-store (`Neo4j + PostgreSQL/pgvector`).
+  - Current runtime supersedes this with Path A dual-store (`Neo4j + Qdrant`).
 - **Minimal implementation**
   - Keep typed retrieval (`semantic` then `episodic`).
   - Add optional relation hints in metadata (`related_topics`, `stance_sign`) and apply small rerank bonuses for causally adjacent memories.

@@ -3,19 +3,28 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 from typing import cast
+from unittest.mock import AsyncMock
 
 from sonality.memory.dual_store import DualEpisodeStore
 from sonality.memory.graph import EpisodeNode, MemoryGraph
 from sonality.memory.retrieval.split import AggregationStrategy, SplitQueryAgent, SplitResult
 
 
-class _FakeStore:
-    async def vector_search(self, query: str, top_k: int = 10) -> list[tuple[str, str, float]]:
+def _store_mock() -> DualEpisodeStore:
+    store = AsyncMock(spec=DualEpisodeStore)
+
+    async def _vector_search(query: str, top_k: int = 10) -> list[tuple[str, str, float]]:
+        _ = top_k
         return [("d1", f"{query}-ep", 0.1)]
 
+    store.vector_search = AsyncMock(side_effect=_vector_search)
+    return cast(DualEpisodeStore, store)
 
-class _FakeGraph:
-    async def get_episodes(self, uids: list[str]) -> list[EpisodeNode]:
+
+def _graph_mock() -> MemoryGraph:
+    graph = AsyncMock(spec=MemoryGraph)
+
+    async def _get_episodes(uids: list[str]) -> list[EpisodeNode]:
         return [
             EpisodeNode(
                 uid=uid,
@@ -31,12 +40,15 @@ class _FakeGraph:
             for uid in uids
         ]
 
+    graph.get_episodes = AsyncMock(side_effect=_get_episodes)
+    return cast(MemoryGraph, graph)
+
 
 def _retrieve(query: str) -> SplitResult:
     return asyncio.run(
         SplitQueryAgent(
-            cast(DualEpisodeStore, _FakeStore()),
-            cast(MemoryGraph, _FakeGraph()),
+            _store_mock(),
+            _graph_mock(),
         ).retrieve(query)
     )
 

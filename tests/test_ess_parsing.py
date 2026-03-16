@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import cast
 
 from sonality.ess import (
@@ -16,48 +16,20 @@ from sonality.ess import (
 )
 
 
-@dataclass(slots=True)
-class _FakeUsage:
-    input_tokens: int = 11
-    output_tokens: int = 7
+def _make_client(payload: Mapping[str, object] | list[Mapping[str, object]]) -> _ClientProtocol:
+    payloads = [payload] if isinstance(payload, Mapping) else payload
+    state = {"calls": 0}
 
+    def create(**_: object) -> object:
+        index = min(state["calls"], len(payloads) - 1)
+        state["calls"] += 1
+        return SimpleNamespace(
+            content=[SimpleNamespace(type="tool_use", input=payloads[index])],
+            usage=SimpleNamespace(input_tokens=11, output_tokens=7),
+        )
 
-@dataclass(slots=True)
-class _FakeBlock:
-    input: Mapping[str, object]
-    type: str = "tool_use"
-
-
-class _FakeResponse:
-    content: list[_FakeBlock]
-    usage: _FakeUsage
-
-    def __init__(self, payload: Mapping[str, object]) -> None:
-        """Test helper for init."""
-        self.content = [_FakeBlock(input=payload)]
-        self.usage = _FakeUsage()
-
-
-class _FakeMessages:
-    def __init__(self, payloads: list[Mapping[str, object]]) -> None:
-        """Test helper for init."""
-        self._payloads = payloads
-        self.calls = 0
-
-    def create(self, **_: object) -> _FakeResponse:
-        """Test helper for create."""
-        index = min(self.calls, len(self._payloads) - 1)
-        self.calls += 1
-        return _FakeResponse(self._payloads[index])
-
-
-class _FakeClient:
-    messages: _FakeMessages
-
-    def __init__(self, payload: Mapping[str, object] | list[Mapping[str, object]]) -> None:
-        """Test helper for init."""
-        payloads = [payload] if isinstance(payload, Mapping) else payload
-        self.messages = _FakeMessages(payloads)
+    messages = SimpleNamespace(create=create)
+    return cast(_ClientProtocol, SimpleNamespace(messages=messages))
 
 
 def test_classify_normalizes_labels_and_boolean_strings() -> None:
@@ -72,7 +44,7 @@ def test_classify_normalizes_labels_and_boolean_strings() -> None:
         "summary": "Structured governance evidence.",
         "opinion_direction": "Support",
     }
-    result = classify(cast(_ClientProtocol, _FakeClient(payload)), "message", "snapshot")
+    result = classify(_make_client(payload), "message", "snapshot")
     assert result.score == 0.72
     assert result.novelty == 0.35
     assert result.reasoning_type == ReasoningType.LOGICAL_ARGUMENT
@@ -100,7 +72,7 @@ def test_classify_marks_defaults_on_invalid_fields() -> None:
         "summary": "Unreliable claim",
         "opinion_direction": "mixedish",
     }
-    result = classify(cast(_ClientProtocol, _FakeClient(payload)), "message", "snapshot")
+    result = classify(_make_client(payload), "message", "snapshot")
     assert result.score == 0.0
     assert result.novelty == 0.0
     assert result.reasoning_type == ReasoningType.NO_ARGUMENT
@@ -140,7 +112,7 @@ def test_classify_retries_on_malformed_required_fields() -> None:
             "opinion_direction": "supports",
         },
     ]
-    result = classify(cast(_ClientProtocol, _FakeClient(payloads)), "message", "snapshot")
+    result = classify(_make_client(payloads), "message", "snapshot")
     assert result.attempt_count == 2
     assert result.reasoning_type == ReasoningType.LOGICAL_ARGUMENT
     assert not result.used_defaults
@@ -161,7 +133,7 @@ def test_classify_debunked_claim_aliases_resolve() -> None:
             "summary": "Debunked conspiracy theory.",
             "opinion_direction": "opposes",
         }
-        result = classify(cast(_ClientProtocol, _FakeClient(payload)), "message", "snapshot")
+        result = classify(_make_client(payload), "message", "snapshot")
         assert result.reasoning_type == ReasoningType.DEBUNKED_CLAIM, (
             f"alias={alias!r} did not resolve to debunked_claim, got {result.reasoning_type!r}"
         )
@@ -178,7 +150,7 @@ def test_classify_marks_missing_when_required_field_absent_after_retries() -> No
         "summary": "Missing required field",
         "opinion_direction": "neutral",
     }
-    result = classify(cast(_ClientProtocol, _FakeClient(payload)), "message", "snapshot")
+    result = classify(_make_client(payload), "message", "snapshot")
     assert result.attempt_count == 2
     assert result.used_defaults
     assert "missing:reasoning_type" in result.defaulted_fields

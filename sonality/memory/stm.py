@@ -1,7 +1,7 @@
-"""Short-Term Memory with PostgreSQL persistence and LLM summarization.
+"""Short-Term Memory with Neo4j persistence and LLM summarization.
 
 Bounded deque of recent messages with character-based capacity. Evicted messages
-are queued for background LLM summarization into a running summary. PostgreSQL
+are queued for background LLM summarization into a running summary. Neo4j
 persistence enables crash recovery.
 """
 
@@ -13,7 +13,7 @@ from collections import deque
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 
-from psycopg_pool import AsyncConnectionPool
+from neo4j import AsyncDriver
 
 from .. import config
 
@@ -28,7 +28,7 @@ class STMMessage:
 
 
 class ShortTermMemory:
-    """Bounded message buffer with running summary and PostgreSQL persistence."""
+    """Bounded message buffer with running summary and Neo4j persistence."""
 
     def __init__(self, capacity: int = config.STM_BUFFER_CAPACITY) -> None:
         self._capacity = capacity
@@ -73,7 +73,7 @@ class ShortTermMemory:
         return "\n".join(f"{m.role}: {m.content}" for m in recent)
 
     def to_dict(self) -> dict[str, object]:
-        """Serialize for PostgreSQL persistence."""
+        """Serialize for Neo4j persistence."""
         return {
             "running_summary": self.running_summary,
             "message_buffer": [asdict(m) for m in self._buffer],
@@ -83,7 +83,7 @@ class ShortTermMemory:
     def from_dict(
         cls, data: dict[str, object], capacity: int = config.STM_BUFFER_CAPACITY
     ) -> ShortTermMemory:
-        """Restore from PostgreSQL persistence."""
+        """Restore from Neo4j persistence."""
         stm = cls(capacity=capacity)
         stm.running_summary = str(data.get("running_summary", ""))
         buffer_data = data.get("message_buffer", [])
@@ -99,38 +99,37 @@ class ShortTermMemory:
                     )
         return stm
 
-    async def persist(self, pg_pool: AsyncConnectionPool) -> None:
-        """Save STM state to PostgreSQL for crash recovery."""
+    async def persist(self, neo4j_driver: AsyncDriver) -> None:
+        """Save STM state to Neo4j for crash recovery."""
         data = self.to_dict()
-        async with pg_pool.connection() as conn, conn.cursor() as cur:
-            await cur.execute(
+        async with neo4j_driver.session(database=config.NEO4J_DATABASE) as session:
+            await session.run(
                 """
-                INSERT INTO stm_state (session_id, running_summary, message_buffer, last_updated)
-                VALUES ('default', %s, %s::jsonb, NOW())
-                ON CONFLICT (session_id) DO UPDATE SET
-                    running_summary = EXCLUDED.running_summary,
-                    message_buffer = EXCLUDED.message_buffer,
-                    last_updated = NOW()
+                MERGE (s:STMState {session_id: 'default'})
+                SET s.running_summary = $summary,
+                    s.message_buffer = $buffer,
+                    s.last_updated = datetime()
                 """,
-                (data["running_summary"], json.dumps(data["message_buffer"])),
+                summary=data["running_summary"],
+                buffer=json.dumps(data["message_buffer"]),
             )
 
     @classmethod
-    async def load(cls, pg_pool: AsyncConnectionPool) -> ShortTermMemory:
-        """Load STM state from PostgreSQL."""
+    async def load(cls, neo4j_driver: AsyncDriver) -> ShortTermMemory:
+        """Load STM state from Neo4j."""
         try:
-            async with pg_pool.connection() as conn, conn.cursor() as cur:
-                await cur.execute(
-                    "SELECT running_summary, message_buffer FROM stm_state WHERE session_id = 'default'"
+            async with neo4j_driver.session(database=config.NEO4J_DATABASE) as session:
+                result = await session.run(
+                    "MATCH (s:STMState {session_id: 'default'}) RETURN s.running_summary, s.message_buffer"
                 )
-                row = await cur.fetchone()
-                if row:
-                    raw_buffer = row[1]
+                record = await result.single()
+                if record:
+                    raw_buffer = record[1]
                     parsed_buffer = (
-                        raw_buffer if isinstance(raw_buffer, list) else json.loads(str(raw_buffer))
+                        json.loads(raw_buffer) if isinstance(raw_buffer, str) else raw_buffer or []
                     )
-                    data = {"running_summary": row[0], "message_buffer": parsed_buffer}
+                    data = {"running_summary": record[0] or "", "message_buffer": parsed_buffer}
                     return cls.from_dict(data)
         except Exception:
-            log.exception("Failed to load STM from PostgreSQL; starting fresh")
+            log.exception("Failed to load STM from Neo4j; starting fresh")
         return cls()

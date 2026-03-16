@@ -32,4 +32,4 @@
 | `data/sponge_history/` | Archived snapshots |
 | `data/ess_log.jsonl` | Audit events |
 
-Persistent episodic/semantic memory lives in Neo4j/PostgreSQL, not local Chroma files.
+Persistent episodic/semantic memory lives in Neo4j/Qdrant, not local Chroma files.

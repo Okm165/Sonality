@@ -1,6 +1,6 @@
 """Testcontainers support for isolated database testing.
 
-Provides Neo4j and PostgreSQL/pgvector containers that spin up on demand.
+Provides Neo4j and Qdrant containers that spin up on demand.
 Use the session-scoped fixtures to share containers across tests, or
 function-scoped fixtures for complete isolation.
 
@@ -16,16 +16,11 @@ import time
 from collections.abc import Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    pass
 
 from sonality.schema import (
     NEO4J_IMAGE,
     NEO4J_SCHEMA_STATEMENTS,
-    PGVECTOR_IMAGE,
-    POSTGRES_SCHEMA_SQL,
+    init_qdrant_collections,
 )
 
 log = logging.getLogger(__name__)
@@ -33,23 +28,23 @@ log = logging.getLogger(__name__)
 
 @dataclass
 class ContainerConfig:
-    """Connection details for a running container."""
+    """Connection details for running containers."""
 
-    postgres_url: str
+    qdrant_url: str
     neo4j_url: str
     neo4j_user: str
     neo4j_password: str
 
 
-def _wait_for_postgres(url: str, max_attempts: int = 30) -> bool:
-    """Wait for PostgreSQL to accept connections."""
-    import psycopg
+def _wait_for_qdrant(url: str, max_attempts: int = 30) -> bool:
+    """Wait for Qdrant to accept connections."""
+    import httpx
 
     for _attempt in range(max_attempts):
         try:
-            with psycopg.connect(url, autocommit=True) as conn:
-                conn.execute("SELECT 1")
-            return True
+            resp = httpx.get(f"{url}/readyz", timeout=5)
+            if resp.status_code == 200:
+                return True
         except Exception:
             time.sleep(1)
     return False
@@ -71,13 +66,14 @@ def _wait_for_neo4j(url: str, auth: tuple[str, str], max_attempts: int = 30) -> 
     return False
 
 
-def _init_postgres_schema(url: str) -> None:
-    """Initialize PostgreSQL schema for testing."""
-    import psycopg
+async def _init_qdrant_schema(url: str) -> None:
+    """Initialize Qdrant collections for testing."""
+    from qdrant_client import AsyncQdrantClient
 
-    with psycopg.connect(url, autocommit=True) as conn:
-        conn.execute(POSTGRES_SCHEMA_SQL)
-    log.info("PostgreSQL schema initialized")
+    client = AsyncQdrantClient(url=url)
+    await init_qdrant_collections(client)
+    await client.close()
+    log.info("Qdrant collections initialized")
 
 
 def _init_neo4j_schema(url: str, auth: tuple[str, str]) -> None:
@@ -95,24 +91,20 @@ def _init_neo4j_schema(url: str, auth: tuple[str, str]) -> None:
 
 
 @contextmanager
-def postgres_container() -> Generator[str, None, None]:
-    """Start a PostgreSQL/pgvector container and return connection URL."""
-    from testcontainers.postgres import PostgresContainer
+def qdrant_container() -> Generator[str, None, None]:
+    """Start a Qdrant container and return connection URL."""
+    import asyncio
 
-    log.info("Starting PostgreSQL/pgvector container...")
-    container = PostgresContainer(
-        image=PGVECTOR_IMAGE,
-        username="sonality",
-        password="sonality_password",
-        dbname="sonality",
-    )
+    from testcontainers.qdrant import QdrantContainer
+
+    log.info("Starting Qdrant container...")
+    container = QdrantContainer(image="qdrant/qdrant:latest")
     with container:
-        url = container.get_connection_url()
-        url = url.replace("postgresql+psycopg2://", "postgresql://")
-        if not _wait_for_postgres(url):
-            raise RuntimeError("PostgreSQL container failed to start")
-        _init_postgres_schema(url)
-        log.info("PostgreSQL container ready at %s", url.split("@")[-1])
+        url = f"http://{container.get_container_host_ip()}:{container.get_exposed_port(6333)}"
+        if not _wait_for_qdrant(url):
+            raise RuntimeError("Qdrant container failed to start")
+        asyncio.run(_init_qdrant_schema(url))
+        log.info("Qdrant container ready at %s", url)
         yield url
 
 
@@ -126,7 +118,7 @@ def neo4j_container() -> Generator[tuple[str, str, str], None, None]:
     with container:
         url = container.get_connection_url()
         user = "neo4j"
-        password = container.NEO4J_ADMIN_PASSWORD
+        password = container.password
         auth = (user, password)
         if not _wait_for_neo4j(url, auth):
             raise RuntimeError("Neo4j container failed to start")
@@ -138,10 +130,10 @@ def neo4j_container() -> Generator[tuple[str, str, str], None, None]:
 @contextmanager
 def both_containers() -> Generator[ContainerConfig, None, None]:
     """Start both database containers and yield config."""
-    with postgres_container() as pg_url, neo4j_container() as neo4j_info:
+    with qdrant_container() as qdrant_url, neo4j_container() as neo4j_info:
         neo4j_url, neo4j_user, neo4j_password = neo4j_info
         yield ContainerConfig(
-            postgres_url=pg_url,
+            qdrant_url=qdrant_url,
             neo4j_url=neo4j_url,
             neo4j_user=neo4j_user,
             neo4j_password=neo4j_password,
@@ -152,24 +144,23 @@ def patch_config_for_containers(config_module: object, container_config: Contain
     """Monkey-patch sonality.config with container connection details."""
     import sonality.config as cfg
 
-    object.__setattr__(cfg, "POSTGRES_URL", container_config.postgres_url)
+    object.__setattr__(cfg, "QDRANT_URL", container_config.qdrant_url)
     object.__setattr__(cfg, "NEO4J_URL", container_config.neo4j_url)
     object.__setattr__(cfg, "NEO4J_USER", container_config.neo4j_user)
     object.__setattr__(cfg, "NEO4J_PASSWORD", container_config.neo4j_password)
 
 
-def clear_databases(postgres_url: str, neo4j_url: str, neo4j_auth: tuple[str, str]) -> None:
+async def clear_databases(qdrant_url: str, neo4j_url: str, neo4j_auth: tuple[str, str]) -> None:
     """Clear all data from both databases while preserving schema."""
-    import psycopg
     from neo4j import GraphDatabase
+    from qdrant_client import AsyncQdrantClient
 
-    with psycopg.connect(postgres_url, autocommit=True) as conn:
-        conn.execute("TRUNCATE derivatives, semantic_features RESTART IDENTITY CASCADE")
-        conn.execute("DELETE FROM stm_state WHERE session_id != 'default'")
-        conn.execute(
-            "UPDATE stm_state SET running_summary = '', message_buffer = '[]'::jsonb "
-            "WHERE session_id = 'default'"
-        )
+    client = AsyncQdrantClient(url=qdrant_url)
+    for collection in ["derivatives", "semantic_features"]:
+        if await client.collection_exists(collection):
+            await client.delete_collection(collection)
+    await init_qdrant_collections(client)
+    await client.close()
 
     driver = GraphDatabase.driver(neo4j_url, auth=neo4j_auth)
     try:

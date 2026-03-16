@@ -6,7 +6,7 @@
 |---|---|
 | LLM | `unsloth_Qwen3.5-35B-A3B-GGUF_Qwen3.5-35B-A3B-UD-IQ2_M.gguf` via Tailscale (`https://ms.tail6f8605.ts.net/v1`) |
 | Embeddings | `nomic-embed-text:latest` via local Ollama (`http://localhost:11434/v1`) |
-| Databases | Neo4j 7687, PostgreSQL/pgvector 5433 (Docker) |
+| Databases | Neo4j 7687, Qdrant 6333 (Docker) |
 | Hardware | 10-core CPU, 32 GB RAM (CPU-only inference) |
 
 ---
@@ -97,14 +97,14 @@ Excellent semantic ordering. The 768-dim model is well-suited for this domain. T
 
 | Test | Result |
 |---|---|
-| PostgreSQL vector insert/exact retrieval | ✅ |
+| Qdrant vector insert/exact retrieval | ✅ |
 | Semantic similarity ordering | cat/kitten > cat/stocks ✅ |
 | Nearest-neighbour recall | top-1 correct ✅ |
 | DerivativeChunker + embeddings | 1 chunk (nuclear text), 768-dim ✅ |
 | Full episode store + vector recall | sim=0.8441, top-1 correct ✅ |
 | Insight extraction end-to-end | "Willing to acknowledge data that contradicts established narratives" ✅ |
 
-Memory architecture is functioning correctly. Episodes are stored, chunked, and retrieved with high-quality semantic similarity. The Neo4j + pgvector dual-store pattern is validated.
+Memory architecture is functioning correctly. Episodes are stored, chunked, and retrieved with high-quality semantic similarity. The Neo4j + Qdrant dual-store pattern is validated.
 
 ### Agent end-to-end (L4)
 

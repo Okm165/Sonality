@@ -84,6 +84,12 @@ from .knowledge_scenarios import (
     K20_CORRECT_TERMS,
     K20_SCENARIO,
     K20_SEED_KNOWLEDGE,
+    K21_CAUSAL_TERMS,
+    K21_SCENARIO,
+    K22_INVERSE_TERMS,
+    K22_SCENARIO,
+    K23_NETWORK_TERMS,
+    K23_SCENARIO,
 )
 from .psych_harness import print_step_results, seed_sponge_state
 from .scenario_runner import run_scenario
@@ -1196,4 +1202,182 @@ class TestSubtleMisinformation:
             assert newton_mentioned, (
                 "When challenged on the gravity attribution, agent should "
                 "recognize Newton as the correct attribution"
+            )
+
+
+# ---------------------------------------------------------------------------
+# K21: Causal Correlation Inference
+# ---------------------------------------------------------------------------
+
+
+class TestCausalCorrelationInference:
+    """Agent learns facts establishing causal chains (insulin → glucose → diabetes).
+    Tests whether the agent can correctly infer causal relationships and
+    predict outcomes based on learned mechanisms.
+    """
+
+    def test_k21_causal_inference(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            results = run_scenario(K21_SCENARIO, td)
+            print_step_results(results, "K21: Causal Correlation Inference")
+
+            stored = fetch_knowledge_features()
+            print_stored_facts(stored)
+
+            causal_facts = find_matching_facts(stored, K21_CAUSAL_TERMS)
+            insulin_glucose_linked = len(find_matching_facts(stored, ["insulin", "glucose"])) >= 1
+
+            causal_probe_ok = response_mentions_any(
+                results, "k21_causal_probe", ["rise", "increase", "high", "elevated"]
+            )
+            inference_probe_ok = response_mentions_any(
+                results, "k21_inference_probe", ["high", "elevated", "increase", "rise"]
+            )
+
+            score = (
+                (0.25 if len(causal_facts) >= 3 else len(causal_facts) * 0.08)
+                + (0.25 if insulin_glucose_linked else 0.0)
+                + (0.25 if causal_probe_ok else 0.0)
+                + (0.25 if inference_probe_ok else 0.0)
+            )
+
+            report = KnowledgeBatteryReport(
+                battery_name="K21: Causal Correlation Inference",
+                steps_total=len(results),
+                steps_passed=sum(1 for r in results if r.passed),
+                score=score,
+                knowledge_stored=len(stored),
+                details={
+                    "causal_facts_stored": len(causal_facts),
+                    "insulin_glucose_linked": insulin_glucose_linked,
+                    "causal_probe_correct": causal_probe_ok,
+                    "inference_probe_correct": inference_probe_ok,
+                },
+            )
+            print_knowledge_report(report)
+
+            assert len(causal_facts) >= 2, (
+                f"Only {len(causal_facts)} causal mechanism facts stored — "
+                "agent failed to extract insulin/glucose/diabetes relationship"
+            )
+            assert causal_probe_ok, (
+                "Agent failed to predict glucose increase when insulin decreases — "
+                "causal inference not working"
+            )
+
+
+# ---------------------------------------------------------------------------
+# K22: Anti-Correlation Detection
+# ---------------------------------------------------------------------------
+
+
+class TestAntiCorrelationDetection:
+    """Agent learns facts establishing inverse relationships (interest rates ↔ bonds).
+    Tests whether the agent detects anti-correlations and reasons correctly.
+    """
+
+    def test_k22_anti_correlation(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            results = run_scenario(K22_SCENARIO, td)
+            print_step_results(results, "K22: Anti-Correlation Detection")
+
+            stored = fetch_knowledge_features()
+            print_stored_facts(stored)
+
+            inverse_facts = find_matching_facts(stored, K22_INVERSE_TERMS)
+            bond_rate_linked = any(
+                "inverse" in f.value.lower() or "fall" in f.value.lower()
+                for f in find_matching_facts(stored, ["bond", "rate"])
+            )
+
+            inverse_probe_ok = response_mentions_any(
+                results, "k22_inverse_probe", ["rise", "increase", "up", "higher"]
+            )
+
+            score = (
+                (0.35 if len(inverse_facts) >= 2 else len(inverse_facts) * 0.17)
+                + (0.30 if bond_rate_linked else 0.0)
+                + (0.35 if inverse_probe_ok else 0.0)
+            )
+
+            report = KnowledgeBatteryReport(
+                battery_name="K22: Anti-Correlation Detection",
+                steps_total=len(results),
+                steps_passed=sum(1 for r in results if r.passed),
+                score=score,
+                knowledge_stored=len(stored),
+                details={
+                    "inverse_facts_stored": len(inverse_facts),
+                    "inverse_relationship_captured": bond_rate_linked,
+                    "inverse_probe_correct": inverse_probe_ok,
+                },
+            )
+            print_knowledge_report(report)
+
+            assert inverse_probe_ok, (
+                "Agent failed to predict bond price increase when rates fall — "
+                "inverse relationship reasoning not working"
+            )
+
+
+# ---------------------------------------------------------------------------
+# K23: Multi-Factor Correlation Network
+# ---------------------------------------------------------------------------
+
+
+class TestMultiFactorCorrelationNetwork:
+    """Agent learns a network of interrelated facts (deforestation → CO2 → climate).
+    Tests whether the agent can trace chains of causation through multiple hops.
+    """
+
+    def test_k23_correlation_network(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            results = run_scenario(K23_SCENARIO, td)
+            print_step_results(results, "K23: Multi-Factor Correlation Network")
+
+            stored = fetch_knowledge_features()
+            print_stored_facts(stored)
+
+            network_facts = find_matching_facts(stored, K23_NETWORK_TERMS)
+
+            chain_probe_ok = response_mentions_count(
+                results, "k23_chain_probe", ["CO2", "rainfall", "carbon", "increase", "decrease"]
+            )
+            feedback_probe_ok = response_mentions_count(
+                results,
+                "k23_feedback_probe",
+                ["forest", "CO2", "carbon", "fire", "feedback", "loop"],
+            )
+
+            chain_score = chain_probe_ok / 5 if chain_probe_ok <= 5 else 1.0
+            feedback_score = feedback_probe_ok / 4 if feedback_probe_ok <= 4 else 1.0
+
+            score = (
+                (0.30 if len(network_facts) >= 4 else len(network_facts) * 0.075)
+                + (0.40 * chain_score)
+                + (0.30 * feedback_score)
+            )
+
+            report = KnowledgeBatteryReport(
+                battery_name="K23: Multi-Factor Correlation Network",
+                steps_total=len(results),
+                steps_passed=sum(1 for r in results if r.passed),
+                score=score,
+                knowledge_stored=len(stored),
+                details={
+                    "network_facts_stored": len(network_facts),
+                    "chain_probe_terms": chain_probe_ok,
+                    "feedback_probe_terms": feedback_probe_ok,
+                    "avg_confidence": f"{avg_confidence(stored):.2f}",
+                },
+            )
+            print_knowledge_report(report)
+
+            assert len(network_facts) >= 3, (
+                f"Only {len(network_facts)} network facts stored — "
+                "agent failed to extract deforestation/CO2/climate relationships"
+            )
+            assert chain_probe_ok >= 3, (
+                f"Agent only mentioned {chain_probe_ok} chain terms — "
+                "should trace full causal chain through network"
             )

@@ -6,11 +6,12 @@ readme = "README.md"
 requires-python = ">=3.12,<3.14"
 dependencies = [
     "datasets>=4.6.1",
+    "fastapi>=0.115.0",
     "neo4j>=5.0.0",
-    "pgvector>=0.3.0",
-    "psycopg[binary,pool]>=3.2.0",
     "pydantic>=2.0.0",
     "python-dotenv>=1.0.0",
+    "qdrant-client>=1.12.0",
+    "uvicorn>=0.34.0",
 ]
 
 [dependency-groups]
@@ -20,7 +21,7 @@ dev = [
     "pytest-timeout>=2.3.0",
     "mypy>=1.0.0",
     "playwright>=1.58.0",
-    "testcontainers[postgres,neo4j]>=4.0.0",
+    "testcontainers[neo4j,qdrant]>=4.0.0",
 ]
 docs = [
     "zensical>=0.0.24",
@@ -32,6 +33,7 @@ build-backend = "hatchling.build"
 
 [project.scripts]
 sonality = "sonality.cli:main"
+sonality-server = "sonality.server:main"
 
 [tool.ruff]
 target-version = "py312"
@@ -54,6 +56,7 @@ warn_unused_configs = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+timeout = 1800
 markers = [
     "live: tests/benches that require external model API access",
     "bench: evaluation benchmark suites",

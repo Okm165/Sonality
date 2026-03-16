@@ -30,6 +30,20 @@ class EdgeType(StrEnum):
     CONTRADICTS_BELIEF = "CONTRADICTS_BELIEF"
     BELONGS_TO_SEGMENT = "BELONGS_TO_SEGMENT"
     CONSOLIDATES = "CONSOLIDATES"
+    CORRELATES_WITH = "CORRELATES_WITH"
+    ANTI_CORRELATES_WITH = "ANTI_CORRELATES_WITH"
+    CAUSALLY_LINKED = "CAUSALLY_LINKED"
+
+
+@dataclass(frozen=True, slots=True)
+class BeliefCorrelation:
+    """Correlation between two belief topics."""
+
+    source_topic: str
+    target_topic: str
+    correlation_type: EdgeType
+    strength: float
+    reasoning: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -663,6 +677,81 @@ class MemoryGraph:
             )
             record = await result.single()
             return str(record["uid"]) if record and record.get("uid") else ""
+
+    async def link_beliefs(
+        self,
+        topic_a: str,
+        topic_b: str,
+        correlation_type: EdgeType,
+        strength: float,
+        reasoning: str,
+    ) -> None:
+        """Create or update a correlation edge between two belief topics.
+
+        Used during reflection cycles to record LLM-discovered causal relationships,
+        co-occurrences, or anti-correlations between topics.
+        """
+        topic_a = topic_a.strip().lower()
+        topic_b = topic_b.strip().lower()
+        if topic_a == topic_b:
+            return
+        async with self._driver.session(database=_DB) as session:
+            await session.run(
+                f"""
+                MERGE (a:Topic {{name: $topic_a}})
+                MERGE (b:Topic {{name: $topic_b}})
+                MERGE (a)-[r:{correlation_type}]->(b)
+                SET r.strength = $strength, r.reasoning = $reasoning, r.updated_at = datetime()
+                """,
+                topic_a=topic_a,
+                topic_b=topic_b,
+                strength=max(-1.0, min(1.0, strength)),
+                reasoning=reasoning[:500],
+            )
+        log.debug(
+            "Linked beliefs: %s -[%s]-> %s (strength=%.2f)",
+            topic_a,
+            correlation_type,
+            topic_b,
+            strength,
+        )
+
+    async def get_belief_correlations(self, topic: str) -> list[BeliefCorrelation]:
+        """Return all correlation edges for a given topic.
+
+        Includes both outgoing and incoming correlation edges.
+        """
+        topic = topic.strip().lower()
+        correlations: list[BeliefCorrelation] = []
+        async with self._driver.session(database=_DB) as session:
+            result = await session.run(
+                """
+                MATCH (a:Topic {name: $topic})-[r]->(b:Topic)
+                WHERE type(r) IN ['CORRELATES_WITH', 'ANTI_CORRELATES_WITH', 'CAUSALLY_LINKED']
+                RETURN a.name AS source, b.name AS target, type(r) AS rel_type,
+                       r.strength AS strength, r.reasoning AS reasoning
+                UNION
+                MATCH (a:Topic)-[r]->(b:Topic {name: $topic})
+                WHERE type(r) IN ['CORRELATES_WITH', 'ANTI_CORRELATES_WITH', 'CAUSALLY_LINKED']
+                RETURN a.name AS source, b.name AS target, type(r) AS rel_type,
+                       r.strength AS strength, r.reasoning AS reasoning
+                """,
+                topic=topic,
+            )
+            async for record in result:
+                try:
+                    correlations.append(
+                        BeliefCorrelation(
+                            source_topic=str(record["source"]),
+                            target_topic=str(record["target"]),
+                            correlation_type=EdgeType(record["rel_type"]),
+                            strength=float(record.get("strength") or 0.0),
+                            reasoning=str(record.get("reasoning") or ""),
+                        )
+                    )
+                except (ValueError, KeyError):
+                    continue
+        return correlations
 
     async def get_latest_segment_counter(self) -> int:
         """Get the max numeric suffix from `segment_<n>` identifiers."""

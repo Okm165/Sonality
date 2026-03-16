@@ -5,8 +5,9 @@ from collections.abc import Generator
 from pathlib import Path
 from typing import cast
 
-import psycopg
 import pytest
+from qdrant_client import QdrantClient
+from qdrant_client.models import PointIdsList
 
 from sonality import config
 
@@ -134,19 +135,27 @@ def _has_live_config() -> bool:
     return not config.missing_live_api_config()
 
 
-def _clean_postgres() -> None:
+def _clean_qdrant() -> None:
     """Delete all semantic_features and derivatives for test isolation."""
     try:
-        with psycopg.connect(config.POSTGRES_URL) as conn:
-            with conn.cursor() as cur:
-                cur.execute("DELETE FROM semantic_features")
-                sf = cur.rowcount
-                cur.execute("DELETE FROM derivatives")
-                dv = cur.rowcount
-            conn.commit()
-        _log.info("Postgres cleanup: %d semantic_features, %d derivatives deleted", sf, dv)
+        client = QdrantClient(url=config.QDRANT_URL)
+        for collection in ["semantic_features", "derivatives"]:
+            if client.collection_exists(collection):
+                results, _ = client.scroll(
+                    collection_name=collection,
+                    limit=10000,
+                    with_payload=False,
+                )
+                if results:
+                    point_ids = [p.id for p in results]
+                    client.delete(
+                        collection_name=collection,
+                        points_selector=PointIdsList(points=point_ids),
+                    )
+                _log.info("Qdrant cleanup: %s cleared (%d points)", collection, len(results))
+        client.close()
     except Exception:
-        _log.debug("Postgres cleanup skipped (not available)", exc_info=True)
+        _log.debug("Qdrant cleanup skipped (not available)", exc_info=True)
 
 
 def _clean_neo4j() -> None:
@@ -169,7 +178,7 @@ def _clean_neo4j() -> None:
 
 @pytest.fixture(autouse=True)
 def _clean_databases_for_live_tests(request: pytest.FixtureRequest) -> Generator[None, None, None]:
-    """Reset PostgreSQL and Neo4j before each live test for full isolation.
+    """Reset Qdrant and Neo4j before each live test for full isolation.
 
     Only runs for tests marked with 'live'. Ensures every benchmark starts
     with a clean database state, and connections are released after.
@@ -178,6 +187,6 @@ def _clean_databases_for_live_tests(request: pytest.FixtureRequest) -> Generator
     if "live" not in markers or not _has_live_config():
         yield
         return
-    _clean_postgres()
+    _clean_qdrant()
     _clean_neo4j()
     yield

@@ -3,7 +3,7 @@
 Sonality memory has two persistent layers and one narrative layer:
 
 - Graph memory (`Neo4j`): causal and temporal structure
-- Vector memory (`PostgreSQL + pgvector`): semantic retrieval
+- Vector memory (`Qdrant`): semantic retrieval
 - Personality state (`SpongeState`): compact evolving narrative and beliefs
 
 ## Graph Memory
@@ -31,9 +31,9 @@ This layer supports provenance, temporal traversal, and belief-aware retrieval.
 
 ## Vector Memory
 
-`derivatives` table stores derivative embeddings for fast semantic search.
+Qdrant stores derivative embeddings for fast semantic search.
 
-`semantic_features` table stores extracted long-lived features:
+Qdrant stores extracted long-lived semantic features:
 
 - personality
 - preferences

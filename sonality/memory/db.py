@@ -1,6 +1,6 @@
-"""Database connection management for Neo4j and PostgreSQL/pgvector.
+"""Database connection management for Neo4j and Qdrant.
 
-Single driver/pool instances created at startup, reused across all operations,
+Single driver/client instances created at startup, reused across all operations,
 and closed gracefully on shutdown.
 """
 
@@ -10,10 +10,10 @@ import logging
 from dataclasses import dataclass, field
 
 from neo4j import AsyncDriver, AsyncGraphDatabase
-from psycopg_pool import AsyncConnectionPool
+from qdrant_client import AsyncQdrantClient
 
 from .. import config
-from ..schema import NEO4J_SCHEMA_STATEMENTS
+from ..schema import NEO4J_SCHEMA_STATEMENTS, init_qdrant_collections
 
 log = logging.getLogger(__name__)
 
@@ -22,19 +22,12 @@ log = logging.getLogger(__name__)
 logging.getLogger("neo4j.notifications").setLevel(logging.WARNING)
 
 
-async def _configure_pgvector(conn: object) -> None:
-    """Register pgvector adapters for each pooled PostgreSQL connection."""
-    from pgvector.psycopg import register_vector_async  # type: ignore[import-untyped]
-
-    await register_vector_async(conn)
-
-
 @dataclass
 class DatabaseConnections:
-    """Holds Neo4j driver and PostgreSQL pool for the application lifetime."""
+    """Holds Neo4j driver and Qdrant client for the application lifetime."""
 
     neo4j_driver: AsyncDriver = field(init=False)
-    pg_pool: AsyncConnectionPool = field(init=False)
+    qdrant: AsyncQdrantClient = field(init=False)
 
     @classmethod
     async def create(cls) -> DatabaseConnections:
@@ -56,17 +49,11 @@ class DatabaseConnections:
                 await session.run(stmt)
         log.info("Neo4j schema initialized")
 
-        log.info("Connecting to PostgreSQL at %s", config.POSTGRES_URL.split("@")[-1])
-        self.pg_pool = AsyncConnectionPool(
-            conninfo=config.POSTGRES_URL,
-            min_size=config.PG_POOL_MIN_SIZE,
-            max_size=config.PG_POOL_MAX_SIZE,
-            configure=_configure_pgvector,
-            open=False,
-        )
-        await self.pg_pool.open()
-        await self.pg_pool.wait()
-        log.info("PostgreSQL connected (pgvector configured)")
+        log.info("Connecting to Qdrant at %s", config.QDRANT_URL)
+        self.qdrant = AsyncQdrantClient(url=config.QDRANT_URL)
+        # Verify Qdrant connectivity and initialize collections
+        await init_qdrant_collections(self.qdrant)
+        log.info("Qdrant connected and collections initialized")
 
         return self
 
@@ -74,5 +61,5 @@ class DatabaseConnections:
         """Gracefully close all connections."""
         log.info("Closing database connections")
         await self.neo4j_driver.close()
-        await self.pg_pool.close()
+        await self.qdrant.close()
         log.info("Database connections closed")

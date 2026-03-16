@@ -4,7 +4,7 @@
 
 - Python 3.12+
 - `uv`
-- running Neo4j and PostgreSQL/pgvector (for Path A)
+- running Neo4j and Qdrant (for Path A)
 - OpenAI-compatible model endpoint
 
 ## Setup
@@ -20,7 +20,7 @@ Edit `.env`:
 
 - provider: `SONALITY_BASE_URL`, `SONALITY_API_KEY`
 - models: `SONALITY_MODEL`, `SONALITY_ESS_MODEL`, `SONALITY_EMBEDDING_MODEL`
-- databases: `SONALITY_NEO4J_*`, `SONALITY_POSTGRES_URL`
+- databases: `SONALITY_NEO4J_*`, `SONALITY_QDRANT_URL`
 
 ## Run
 
@@ -31,7 +31,7 @@ make run
 Docker:
 
 ```bash
-docker compose up -d postgres neo4j
+docker compose up -d qdrant neo4j
 docker compose run --rm sonality
 ```
 

@@ -3,7 +3,7 @@
 Sonality runs on one memory architecture only:
 
 - `Neo4j` for graph structure (episodes, derivatives, topics, segments, beliefs)
-- `PostgreSQL + pgvector` for semantic/vector retrieval
+- `Qdrant` for semantic/vector retrieval
 - one OpenAI-compatible provider for both chat and embeddings
 
 Legacy Chroma/EpisodeStore flow is removed from runtime.
@@ -16,7 +16,7 @@ Legacy Chroma/EpisodeStore flow is removed from runtime.
 2. Build markdown system prompt
 3. Generate response via provider chat completion
 4. Run ESS classification
-5. Store episode in dual store (atomic graph write, then pgvector write with rollback)
+5. Store episode in dual store (atomic graph write, then Qdrant write with rollback)
 6. Update beliefs/insights, run optional reflection, persist sponge state
 
 ## Core Components

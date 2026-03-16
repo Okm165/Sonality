@@ -3,12 +3,26 @@
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass
 
 from .. import config
 from ..provider import embed as provider_embed
 
 log = logging.getLogger(__name__)
+
+
+def cosine_similarity(a: list[float], b: list[float]) -> float:
+    """Compute cosine similarity between two embedding vectors.
+
+    Returns 0.0 if either vector has zero norm.
+    """
+    dot = sum(x * y for x, y in zip(a, b, strict=True))
+    norm_a = math.sqrt(sum(x * x for x in a))
+    norm_b = math.sqrt(sum(x * x for x in b))
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
+    return dot / (norm_a * norm_b)
 
 
 class EmbeddingUnavailableError(Exception):
@@ -52,10 +66,17 @@ class ExternalEmbedder:
         return result[0]
 
     def embed_documents(self, documents: list[str]) -> list[list[float]]:
-        """Batch embed documents with storage-optimized instruction."""
+        """Batch embed documents with storage-optimized instruction.
+
+        Truncates each document to config.EMBEDDING_MAX_CHARS to prevent
+        context overflow on embedding models with short context windows.
+        """
         if not documents:
             return []
-        prefixed = [f"{self._cfg.doc_instruction} {doc}" for doc in documents]
+        max_chars = config.EMBEDDING_MAX_CHARS
+        prefixed = [
+            f"{self._cfg.doc_instruction} {doc[:max_chars]}" for doc in documents
+        ]
         return self._embed_batched(prefixed)
 
     def _embed_batched(self, texts: list[str]) -> list[list[float]]:

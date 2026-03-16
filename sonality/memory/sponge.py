@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import shutil
 from collections import defaultdict
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final
@@ -78,6 +80,48 @@ class StagedOpinionUpdate(BaseModel):
     new_uncertainty: float = -1.0  # LLM-assessed uncertainty; -1.0 = not set
 
 
+@dataclass(frozen=True, slots=True)
+class ProbabilityEstimate:
+    """Calibrated probability estimate from belief state.
+
+    Uses Platt scaling (sigmoid transformation) with evidence-weighted
+    blending against a base rate.
+    """
+
+    topic: str
+    probability: float
+    evidence_weight: float
+    opinion: float
+    confidence: float
+    evidence_count: int
+    raw_probability: float
+
+
+@dataclass(frozen=True, slots=True)
+class BeliefState:
+    """Complete view of a belief with position and metadata.
+
+    Eliminates scattered `if meta else` patterns by providing a single
+    structured type with sensible defaults for missing beliefs.
+    """
+
+    topic: str
+    position: float
+    confidence: float
+    uncertainty: float
+    evidence_count: int
+    supporting_count: int
+    contradicting_count: int
+
+    @property
+    def has_evidence(self) -> bool:
+        return self.evidence_count > 0
+
+
+# Default for topics with no recorded belief
+_EMPTY_BELIEF_META = BeliefMeta()
+
+
 class SpongeState(BaseModel):
     """Persistent personality state and incremental update logic."""
 
@@ -109,6 +153,25 @@ class SpongeState(BaseModel):
         if isinstance(sig, dict):
             sig.pop("reasoning_style", None)
         return data
+
+    def get_belief(self, topic: str) -> BeliefState:
+        """Retrieve complete belief state with defaults for missing topics.
+
+        Single canonical method eliminating scattered `if meta else` patterns.
+        Always returns a valid BeliefState, never None.
+        """
+        topic = topic.strip().lower()
+        position = self.opinion_vectors.get(topic, 0.0)
+        meta = self.belief_meta.get(topic, _EMPTY_BELIEF_META)
+        return BeliefState(
+            topic=topic,
+            position=position,
+            confidence=meta.confidence,
+            uncertainty=meta.uncertainty,
+            evidence_count=meta.evidence_count,
+            supporting_count=len(meta.supporting_episode_uids),
+            contradicting_count=len(meta.contradicting_episode_uids),
+        )
 
     def update_opinion(
         self,
@@ -312,6 +375,53 @@ class SpongeState(BaseModel):
         self.behavioral_signature.disagreement_rate = (
             self.behavioral_signature.disagreement_rate * (n - 1)
         ) / n
+
+    def estimate_probability(self, topic: str, base_rate: float = 0.5) -> ProbabilityEstimate:
+        """Convert internal belief state to calibrated probability using Platt scaling.
+
+        Maps the opinion vector value to a probability via sigmoid transformation,
+        then blends with a base rate based on evidence strength.
+
+        Args:
+            topic: The belief topic to estimate probability for.
+            base_rate: Prior probability from general knowledge or caller's context.
+                Should be between 0 and 1. Default 0.5 (maximum uncertainty).
+
+        Returns:
+            ProbabilityEstimate with calibrated probability and metadata.
+
+        Reference: Platt (1999), Adaptive Temperature Scaling (ICLR 2024)
+        """
+        topic = topic.strip().lower()
+        opinion = self.opinion_vectors.get(topic, 0.0)
+        meta = self.belief_meta.get(topic)
+
+        if meta is None:
+            return ProbabilityEstimate(
+                topic=topic,
+                probability=base_rate,
+                evidence_weight=0.0,
+                opinion=0.0,
+                confidence=0.0,
+                evidence_count=0,
+                raw_probability=0.5,
+            )
+
+        a, b = 2.5, 0.0
+        raw_prob = 1.0 / (1.0 + math.exp(-(a * opinion + b)))
+        evidence_weight = min(1.0, meta.confidence * math.log2(meta.evidence_count + 1) / 3.0)
+        final_prob = evidence_weight * raw_prob + (1.0 - evidence_weight) * base_rate
+        final_prob = max(0.01, min(0.99, final_prob))
+
+        return ProbabilityEstimate(
+            topic=topic,
+            probability=final_prob,
+            evidence_weight=evidence_weight,
+            opinion=opinion,
+            confidence=meta.confidence,
+            evidence_count=meta.evidence_count,
+            raw_probability=raw_prob,
+        )
 
     def save(self, path: Path, history_dir: Path) -> None:
         """Atomically persist state and archive the previous version.

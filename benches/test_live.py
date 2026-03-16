@@ -38,7 +38,6 @@ pytestmark = [
 ]
 
 
-
 def _snapshot_length_report(results: list[StepResult]) -> None:
     """Print snapshot character lengths at each step as a bar chart."""
     print(f"\n{'=' * 70}")

@@ -8,6 +8,7 @@ embedding and retrieval (MemMachine derivative model).
 from __future__ import annotations
 
 import logging
+import uuid
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -89,7 +90,10 @@ class DerivativeChunker:
             fallback=ChunkingResponse(chunks=[]),
         )
         if result.success:
-            chunks: list[ChunkItem] = result.value.chunks
+            # Filter out placeholder/empty chunks from template-copying LLM responses
+            chunks: list[ChunkItem] = [
+                c for c in result.value.chunks if c.text.strip() and c.text.strip() != "..."
+            ]
         else:
             log.warning("LLM chunking failed: %s. Using whole text.", result.error)
             chunks = []
@@ -102,7 +106,7 @@ class DerivativeChunker:
         results: list[DerivativeWithEmbedding] = []
         for i, (chunk, embedding) in enumerate(zip(chunks, embeddings, strict=True)):
             node = DerivativeNode(
-                uid=f"{episode_uid}_d{i}",
+                uid=str(uuid.uuid5(uuid.NAMESPACE_OID, f"{episode_uid}:{i}")),
                 source_episode_uid=episode_uid,
                 text=chunk.text,
                 key_concept=chunk.key_concept,

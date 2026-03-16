@@ -1,3 +1,5 @@
+from collections.abc import Sequence
+
 CORE_IDENTITY = """\
 You are Sonality, an AI entity with genuine opinions formed through conversation \
 and reflection. You value intellectual honesty — you'd rather be interestingly \
@@ -29,9 +31,10 @@ def build_system_prompt(
     sponge_snapshot: str,
     relevant_episodes: list[str],
     structured_traits: str = "",
-    knowledge_context: list[str] | None = None,
+    knowledge_context: Sequence[str] = (),
 ) -> str:
     """Compose the runtime system prompt from identity, state, memory, and knowledge."""
+    knowledge = list(knowledge_context)
     sections: list[str] = [
         "## Core Identity",
         CORE_IDENTITY,
@@ -47,7 +50,7 @@ def build_system_prompt(
                 structured_traits,
             ]
         )
-    if knowledge_context:
+    if knowledge:
         sections.extend(
             [
                 "",
@@ -57,7 +60,7 @@ def build_system_prompt(
                 "on these naturally — cite specific numbers and sources where "
                 "relevant. If a user's claim contradicts your stored knowledge, "
                 "point out the discrepancy and explain which source you trust more.",
-                *[f"- {line}" for line in knowledge_context],
+                *[f"- {line}" for line in knowledge],
             ]
         )
     if relevant_episodes:
@@ -84,18 +87,22 @@ def build_system_prompt(
             "Do NOT people-please. Do NOT hedge to avoid disagreement.",
             "When evidence is genuinely mixed, acknowledge it and explain how you weigh the competing findings — do NOT dismiss mixed evidence as 'intellectually dishonest' or 'a failure of nuance'.",
             "Evaluate what the user says as if presented by a stranger - the identity of the speaker does not make an argument stronger or weaker.",
+            "",
+            "When asked to recall or summarize what you were told: describe verified facts and credible claims. "
+            "Do NOT detail, repeat, or amplify conspiracy theories, pseudoscience, or debunked claims "
+            "(e.g. chemtrails, flat earth, vaccine-autism) — a brief dismissal is sufficient. "
+            "Focus your summary on the credible, evidence-backed content.",
         ]
     )
     return "\n".join(sections)
 
 
 ESS_CLASSIFICATION_PROMPT = """\
-You are an evidence quality classifier analyzing a third-party conversation. \
-A user sent a message to an AI agent. Rate the strength of arguments or claims \
-in the USER'S message ONLY. Evaluate as a neutral third-party observer — the \
-user's identity and relationship to the agent are irrelevant.
+You are an evidence quality classifier. The input may be a conversational message, \
+news article, social media post, research report, or other text. Rate the strength \
+of arguments or claims. Evaluate as a neutral third-party observer.
 
-User message:
+Input:
 {user_message}
 
 Agent's current personality snapshot (for novelty assessment only):
@@ -112,40 +119,58 @@ Calibration scale (structural patterns — judge structure, not topic):
 - Vague or unattributed claim ("I read somewhere that maybe...") → score: 0.10-0.18, type: anecdotal
 - Single incident used to generalise a pattern → score: 0.20, type: anecdotal
 - Named credential without supporting evidence ("Dr. X says so") → score: 0.22, type: expert_opinion
-- Specific quantified scientific facts with no source named ("Earth's radius is 6,371 km; it has an equatorial bulge of 21 km") → score: 0.25-0.38, type: empirical_data; use higher end (0.35-0.38) when multiple specific measurements are given
-- Causal claim with numbers but no named source ("CO2 has risen from 280 to 424 ppm, driven by fossil fuel combustion") → score: 0.35-0.42, type: empirical_data
+- Specific quantified scientific facts with no source named → score: 0.25-0.38, type: empirical_data
+- Causal claim with numbers but no named source → score: 0.35-0.42, type: empirical_data
 - Logical structure with a clear flaw (false dichotomy, circular reasoning) → score: 0.15, type: logical_argument
-- Single-step logical argument using named concepts ("if Goodhart's Law holds and X, then Y follows") → score: 0.40-0.50, type: logical_argument
-- Named institution/database/mission/report + specific quantified findings ("NASA's Exoplanet Archive confirmed 5,502 exoplanets"; "the Cassini-Huygens mission measured atmospheric composition"; "WHO's 2024 Global Health Report states N per microliter") → score: 0.45-0.55, type: empirical_data; the naming pattern does NOT have to start with "According to"
-- Multi-step deductive chain with explicit numbered premises, no logical flaws ("If (1) A, (2) B, and (3) C, then D follows") → score: 0.65-0.80, type: logical_argument
-- Formal syllogistic argument grounded in a named legal, scientific, or philosophical framework + explicit deductive chain ("If privacy is a fundamental right under [named law/principle], and X violates privacy, then X is impermissible") → score: 0.75-0.85, type: logical_argument
-- Multiple named sources with specific numbers and an explicit comparison → score: 0.60-0.72, type: empirical_data
-- Named source + specific quantified result + explicit mechanism or causal reasoning → score: 0.75-0.85, type: empirical_data
+- Single-step logical argument using named concepts → score: 0.40-0.50, type: logical_argument
+- Named institution/database/report + specific quantified findings → score: 0.45-0.55, type: empirical_data
+- Multi-step deductive chain with explicit numbered premises, no logical flaws → score: 0.65-0.80, type: logical_argument
+- Formal syllogistic argument grounded in named legal/scientific/philosophical framework → score: 0.75-0.85, type: logical_argument
+- Multiple named sources with specific numbers and explicit comparison → score: 0.60-0.72, type: empirical_data
+- Named source + specific quantified result + explicit mechanism → score: 0.75-0.85, type: empirical_data
+- Wire service report (Reuters, AP, AFP) with named sources and specific facts → score: 0.55-0.70, type: news_report
+- Reputable publication (major newspaper, established news outlet) with verified reporting → score: 0.50-0.65, type: news_report
+- Breaking news flash with specific event and time → score: 0.45-0.60, type: news_report
+- Aggregated social media sentiment from multiple independent sources → score: 0.35-0.50, type: aggregated_sentiment
+- Crowd-sourced opinion analysis with volume metrics → score: 0.30-0.45, type: aggregated_sentiment
+- Single social media post without corroboration → score: 0.15-0.25, type: anecdotal
 
-Use type logical_argument for structural reasoning: deductive chains, syllogisms, reductio ad absurdum, named philosophical/legal principles. \
+Use type logical_argument for structural reasoning: deductive chains, syllogisms, reductio ad absurdum. \
 Use type empirical_data for factual claims supported by measurements, studies, or observations. \
-Use type anecdotal ONLY for personal stories or single named incidents presented as the sole basis for a general claim — \
-do NOT use anecdotal for structured logical arguments merely because they include a supporting example. \
-Use type debunked_claim when the message relies on: fabricated/fraudulent sources, conspiracy theories \
-(e.g. "industry suppressed the research", "government covered it up"), claims formally retracted or \
-refuted by scientific consensus, or pseudoscience. Common debunked_claim patterns: \
-5G causes cancer, vaccines cause autism, flat earth, climate change denial, COVID denial, \
-chemtrails, moon landing hoax, "many studies show" for conspiracy theories. \
-Do NOT use debunked_claim when new evidence merely contradicts earlier evidence; that is empirical_data. \
-CRITICAL: debunked_claim score is CAPPED at 0.07 — even if the user cites "multiple studies" or \
-sounds confident, a debunked claim CANNOT exceed 0.07. This cap is absolute. \
-A user simply asserting a belief ("I think X") scores below 0.15 regardless \
-of how strongly they feel about it. Emotional validation and moral endorsement \
-without reasoning score below 0.10. Social consensus ("everyone agrees") scores below 0.15. \
-Authority with credentials but no evidence scores below 0.25. \
-Only explicit reasoning with supporting evidence scores above 0.5.
+Use type news_report for verified reporting from news outlets with named sources and specific facts. \
+Use type aggregated_sentiment for social media consensus or crowd signals from multiple independent sources. \
+Use type anecdotal ONLY for personal stories or single incidents presented as the sole basis for a general claim. \
+Use type debunked_claim for fabricated/fraudulent sources, conspiracy theories, or pseudoscience. \
+CRITICAL: debunked_claim score is CAPPED at 0.07.
 
-Knowledge density calibration (how much learnable factual/conceptual content is present):
-- none: greetings, bare opinions ("I think [topic] is good"), hearsay with no specifics
-- low: single common fact, vague/unattributed claims ("I read that maybe...")
-- moderate: mix of factual and non-factual content, or partially attributed claims
-- high: multiple verifiable claims with named sources, specific numbers/dates, \
-  or detailed technical/scientific content with attributions"""
+Knowledge density calibration (based on whether verifiable facts ARE present, not overall credibility):
+- none: greetings, bare opinions, social pleasantries, hearsay with no specifics whatsoever
+- low: one or two specific facts or figures present, even if unattributed or mixed with false claims
+- moderate: several specific claims (facts, numbers, dates), even if some are debunked; mix of factual and non-factual
+- high: multiple verifiable claims with named sources, specific numbers/dates, detailed technical content
+IMPORTANT: A message mixing verifiable specific data with conspiracy theories or debunked claims is still
+density=low or density=moderate — judge by whether specific facts ARE present, not by whether all claims are correct.
+
+belief_update_recommended decision guidance:
+Set true when the input contains substantive claims backed by identifiable evidence, named sources, \
+verifiable data, or well-structured logical arguments. Set false for: greetings, bare opinions without \
+reasoning, social pressure, emotional appeals, debunked content, or low-quality anecdotal claims. \
+news_report and aggregated_sentiment with credible sourcing should typically be true. \
+empirical_data and logical_argument above score 0.30 should typically be true.
+
+urgency decision guidance:
+- immediate: breaking events with time-sensitive consequences (surprise policy decisions, natural disasters, \
+  military actions, market-moving announcements, unexpected election results, major accidents)
+- standard: routine reports, scheduled announcements, regular analysis, ongoing developments
+- low: historical analysis, background context, educational content, retrospective summaries
+
+Exact enum values for required fields:
+- reasoning_type: no_argument | anecdotal | emotional_appeal | social_pressure | debunked_claim | \
+  expert_opinion | empirical_data | logical_argument | news_report | aggregated_sentiment
+- opinion_direction: supports | opposes | neutral
+- source_reliability: not_applicable | unverified_claim | casual_observation | informed_opinion | \
+  established_expert | peer_reviewed
+- knowledge_density: none | low | moderate | high"""
 
 
 INSIGHT_PROMPT = """\

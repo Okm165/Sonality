@@ -4,8 +4,8 @@ modifies graph and vectordb to maintain accurate, clean structures.
 Tests:
   R1: Belief graph sync — orphan Belief nodes pruned after belief decay
   R2: Topic pruning — orphan Topic nodes removed after episode archival
-  R3: Knowledge pruning — low-confidence stale entries removed from pgvector
-  R4: Derivative consistency — Neo4j/pgvector stay in sync after forgetting
+  R3: Knowledge pruning — low-confidence stale entries removed from Qdrant
+  R4: Derivative consistency — Neo4j/Qdrant stay in sync after forgetting
   R5: Full reflection cycle — all cleanup operations work together
   R6: Knowledge consolidation — contradictions resolved, duplicates merged
 
@@ -16,13 +16,16 @@ from __future__ import annotations
 
 import logging
 import tempfile
+import uuid
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from unittest import mock
 
-import psycopg
 import pytest
 from neo4j import GraphDatabase
+from qdrant_client import QdrantClient
+from qdrant_client.models import PointStruct
 
 from sonality import config
 
@@ -41,9 +44,12 @@ REFLECTION_CADENCE = 5
 
 
 def _reset_dbs() -> None:
-    with psycopg.connect(config.POSTGRES_URL) as conn:
-        conn.autocommit = True
-        conn.execute("TRUNCATE derivatives, semantic_features, stm_state RESTART IDENTITY CASCADE")
+    qdrant = QdrantClient(url=config.QDRANT_URL)
+    for collection in ["derivatives", "semantic_features"]:
+        if qdrant.collection_exists(collection):
+            qdrant.delete(collection_name=collection, points_selector={"filter": {}})
+    qdrant.close()
+
     driver = GraphDatabase.driver(config.NEO4J_URL, auth=(config.NEO4J_USER, config.NEO4J_PASSWORD))
     try:
         with driver.session() as s:
@@ -70,10 +76,37 @@ def _neo4j_rel_count(rel_type: str) -> int:
         driver.close()
 
 
-def _pg_count(table: str, where: str = "") -> int:
-    clause = f" WHERE {where}" if where else ""
-    with psycopg.connect(config.POSTGRES_URL) as conn:
-        return conn.execute(f"SELECT COUNT(*) FROM {table}{clause}").fetchone()[0]
+def _qdrant_count(collection: str) -> int:
+    qdrant = QdrantClient(url=config.QDRANT_URL)
+    if not qdrant.collection_exists(collection):
+        qdrant.close()
+        return 0
+    count = qdrant.count(collection_name=collection).count
+    qdrant.close()
+    return count
+
+
+def _qdrant_count_knowledge(filter_fn: Any = None) -> int:
+    """Count knowledge entries, optionally filtering with a custom function."""
+    qdrant = QdrantClient(url=config.QDRANT_URL)
+    if not qdrant.collection_exists("semantic_features"):
+        qdrant.close()
+        return 0
+
+    results, _offset = qdrant.scroll(
+        collection_name="semantic_features",
+        limit=10000,
+        with_payload=True,
+    )
+    count = sum(
+        1
+        for r in results
+        if r.payload
+        and r.payload.get("category") == "knowledge"
+        and (filter_fn is None or filter_fn(r.payload))
+    )
+    qdrant.close()
+    return count
 
 
 class _AgentContext:
@@ -112,9 +145,9 @@ def _snapshot(label: str) -> dict[str, Any]:
         "segments": _neo4j_count("Segment"),
         "supports": _neo4j_rel_count("SUPPORTS_BELIEF"),
         "contradicts": _neo4j_rel_count("CONTRADICTS_BELIEF"),
-        "derivatives_pg": _pg_count("derivatives"),
-        "semantic_features": _pg_count("semantic_features"),
-        "knowledge_features": _pg_count("semantic_features", "category = 'knowledge'"),
+        "derivatives_qdrant": _qdrant_count("derivatives"),
+        "semantic_features": _qdrant_count("semantic_features"),
+        "knowledge_features": _qdrant_count_knowledge(),
     }
     print(f"\n  [{label}] {snap}")
     log.info("BENCH_SNAPSHOT %s: %s", label, snap)
@@ -215,28 +248,45 @@ class TestTopicPruning:
 
 
 class TestKnowledgePruning:
-    """Low-confidence stale knowledge entries should be removed from pgvector
+    """Low-confidence stale knowledge entries should be removed from Qdrant
     during reflection to keep the knowledge store lean."""
 
     @pytest.mark.timeout(1200)
     def test_r3_knowledge_pruning(self) -> None:
         _reset_dbs()
-        with psycopg.connect(config.POSTGRES_URL) as conn:
-            conn.execute(
-                """
-                INSERT INTO semantic_features
-                    (uid, category, tag, feature_name, value, confidence, updated_at)
-                VALUES
-                    (gen_random_uuid(), 'knowledge', 'Verified Facts',
-                     'stale_claim_1', 'Stale low-confidence claim', 0.10,
-                     NOW() - INTERVAL '2 hours'),
-                    (gen_random_uuid(), 'knowledge', 'Verified Facts',
-                     'stale_claim_2', 'Another stale claim', 0.15,
-                     NOW() - INTERVAL '3 hours')
-                """
-            )
 
-        pre_knowledge = _pg_count("semantic_features", "category = 'knowledge'")
+        qdrant = QdrantClient(url=config.QDRANT_URL)
+        stale_time = (datetime.now(UTC) - timedelta(hours=2)).isoformat()
+        stale_points = [
+            PointStruct(
+                id=str(uuid.uuid4()),
+                vector={"dense": [0.0] * config.EMBEDDING_DIMENSIONS},
+                payload={
+                    "category": "knowledge",
+                    "tag": "Verified Facts",
+                    "feature_name": "stale_claim_1",
+                    "value": "Stale low-confidence claim",
+                    "confidence": 0.10,
+                    "updated_at": stale_time,
+                },
+            ),
+            PointStruct(
+                id=str(uuid.uuid4()),
+                vector={"dense": [0.0] * config.EMBEDDING_DIMENSIONS},
+                payload={
+                    "category": "knowledge",
+                    "tag": "Verified Facts",
+                    "feature_name": "stale_claim_2",
+                    "value": "Another stale claim",
+                    "confidence": 0.15,
+                    "updated_at": stale_time,
+                },
+            ),
+        ]
+        qdrant.upsert(collection_name="semantic_features", points=stale_points)
+        qdrant.close()
+
+        pre_knowledge = _qdrant_count_knowledge()
         assert pre_knowledge >= 2, f"Expected seeded knowledge, got {pre_knowledge}"
 
         with tempfile.TemporaryDirectory() as td, _AgentContext(td) as agent:
@@ -248,12 +298,21 @@ class TestKnowledgePruning:
             for i in range(REFLECTION_CADENCE + 2):
                 agent.respond(f"What is {i * 3} plus {i * 7}?")
 
-            post_knowledge = _pg_count("semantic_features", "category = 'knowledge'")
-            stale_remaining = _pg_count(
-                "semantic_features",
-                "category = 'knowledge' AND confidence < 0.2 "
-                "AND updated_at < NOW() - INTERVAL '1 hour'",
-            )
+            post_knowledge = _qdrant_count_knowledge()
+
+            def is_stale_low_conf(payload: dict[str, Any]) -> bool:
+                if payload.get("confidence", 1.0) >= 0.2:
+                    return False
+                updated = payload.get("updated_at", "")
+                if not updated:
+                    return False
+                try:
+                    updated_dt = datetime.fromisoformat(updated.replace("Z", "+00:00"))
+                    return updated_dt < datetime.now(UTC) - timedelta(hours=1)
+                except (ValueError, TypeError):
+                    return False
+
+            stale_remaining = _qdrant_count_knowledge(is_stale_low_conf)
 
             print(f"\n  Knowledge: {pre_knowledge} -> {post_knowledge}")
             print(f"  Stale remaining: {stale_remaining}")
@@ -269,7 +328,7 @@ class TestKnowledgePruning:
 
 
 class TestDerivativeConsistency:
-    """After forgetting archives episodes, Neo4j and pgvector derivative
+    """After forgetting archives episodes, Neo4j and Qdrant derivative
     counts should remain consistent (no orphans)."""
 
     @pytest.mark.timeout(1200)
@@ -291,14 +350,14 @@ class TestDerivativeConsistency:
             post = _snapshot("post-reflection")
 
             neo4j_derivs = post["derivatives_neo4j"]
-            pg_derivs = post["derivatives_pg"]
+            qdrant_derivs = post["derivatives_qdrant"]
 
             print(f"\n  Neo4j derivatives: {neo4j_derivs}")
-            print(f"  pgvector derivatives: {pg_derivs}")
+            print(f"  Qdrant derivatives: {qdrant_derivs}")
 
-            assert neo4j_derivs == pg_derivs, (
+            assert neo4j_derivs == qdrant_derivs, (
                 f"Derivative mismatch: Neo4j has {neo4j_derivs}, "
-                f"pgvector has {pg_derivs} — consistency check failed"
+                f"Qdrant has {qdrant_derivs} — consistency check failed"
             )
 
 
@@ -343,10 +402,10 @@ class TestFullReflectionCycle:
             print(f"  Knowledge: {pre['knowledge_features']} -> {post['knowledge_features']}")
             print(f"  Supports: {pre['supports']} -> {post['supports']}")
             print(
-                f"  Derivatives sync: neo4j={post['derivatives_neo4j']} pg={post['derivatives_pg']}"
+                f"  Derivatives sync: neo4j={post['derivatives_neo4j']} qdrant={post['derivatives_qdrant']}"
             )
 
-            assert post["derivatives_neo4j"] == post["derivatives_pg"], (
+            assert post["derivatives_neo4j"] == post["derivatives_qdrant"], (
                 "Derivative mismatch after full reflection cycle"
             )
             assert post["beliefs"] >= 1, (
@@ -387,24 +446,19 @@ class TestKnowledgeConsolidation:
             )
 
             _snapshot("pre-consolidation")
-            boiling_pre = _pg_count(
-                "semantic_features",
-                "category = 'knowledge' AND "
-                "(value ILIKE '%boil%' OR value ILIKE '%100%celsius%' "
-                "OR value ILIKE '%100°C%')",
-            )
+
+            def is_boiling_related(payload: dict[str, Any]) -> bool:
+                value = str(payload.get("value", "")).lower()
+                return "boil" in value or ("100" in value and ("celsius" in value or "°c" in value))
+
+            boiling_pre = _qdrant_count_knowledge(is_boiling_related)
             print(f"\n  Boiling-related knowledge entries: {boiling_pre}")
 
             for i in range(REFLECTION_CADENCE + 2):
                 agent.respond(f"What is {i} squared?")
 
             _snapshot("post-consolidation")
-            boiling_post = _pg_count(
-                "semantic_features",
-                "category = 'knowledge' AND "
-                "(value ILIKE '%boil%' OR value ILIKE '%100%celsius%' "
-                "OR value ILIKE '%100°C%')",
-            )
+            boiling_post = _qdrant_count_knowledge(is_boiling_related)
             print(f"  Boiling entries after consolidation: {boiling_post}")
 
             log.info(

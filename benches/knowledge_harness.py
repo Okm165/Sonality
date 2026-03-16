@@ -1,16 +1,17 @@
 """Knowledge acquisition benchmark harness.
 
-Provides helpers to query stored knowledge features from PostgreSQL after
+Provides helpers to query stored knowledge features from Qdrant after
 running a scenario, compute extraction quality metrics (precision, recall,
 tag distribution, confidence analysis), and formatted reporting.
 """
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass, field
 
-import psycopg
-from psycopg.rows import dict_row
+from qdrant_client import QdrantClient
+from qdrant_client.models import FieldCondition, Filter, MatchValue, PointStruct
 
 from sonality import config
 
@@ -19,7 +20,7 @@ from .scenario_runner import StepResult
 
 @dataclass(frozen=True, slots=True)
 class StoredKnowledgeFact:
-    """One knowledge semantic feature row from PostgreSQL."""
+    """One knowledge semantic feature from Qdrant."""
 
     uid: str
     tag: str
@@ -52,39 +53,60 @@ class KnowledgeBatteryReport:
 
 def fetch_knowledge_features(limit: int = 200) -> list[StoredKnowledgeFact]:
     """Synchronously query all knowledge-category semantic features."""
-    with psycopg.connect(config.POSTGRES_URL) as conn, conn.cursor(row_factory=dict_row) as cur:
-        cur.execute(
-            """
-                SELECT uid, tag, feature_name, value, confidence, episode_citations
-                FROM semantic_features
-                WHERE category = 'knowledge'
-                ORDER BY confidence DESC, updated_at DESC
-                LIMIT %s
-                """,
-            (limit,),
+    client = QdrantClient(url=config.QDRANT_URL)
+    results, _ = client.scroll(
+        collection_name="semantic_features",
+        scroll_filter=Filter(
+            must=[FieldCondition(key="category", match=MatchValue(value="knowledge"))]
+        ),
+        limit=limit,
+        with_payload=True,
+    )
+    facts = []
+    for point in results:
+        if not point.payload:
+            continue
+        p = point.payload
+        facts.append(
+            StoredKnowledgeFact(
+                uid=str(p.get("uid", "")),
+                tag=str(p.get("tag", "")),
+                feature_name=str(p.get("feature_name", "")),
+                value=str(p.get("value", "")),
+                confidence=float(p.get("confidence", 0)),
+                citations=list(p.get("episode_citations", []))
+                if p.get("episode_citations")
+                else [],
+            )
         )
-        rows = cur.fetchall()
-    return [
-        StoredKnowledgeFact(
-            uid=str(row["uid"]),
-            tag=str(row["tag"]),
-            feature_name=str(row["feature_name"]),
-            value=str(row["value"]),
-            confidence=float(row["confidence"]),
-            citations=row.get("episode_citations", []) or [],
-        )
-        for row in rows
-    ]
+    facts.sort(key=lambda f: -f.confidence)
+    client.close()
+    return facts
 
 
 def clear_knowledge_features() -> int:
     """Remove all knowledge-category features (for test isolation). Returns count deleted."""
-    with psycopg.connect(config.POSTGRES_URL) as conn:
-        with conn.cursor() as cur:
-            cur.execute("DELETE FROM semantic_features WHERE category = 'knowledge'")
-            deleted = cur.rowcount
-        conn.commit()
-    return deleted
+    client = QdrantClient(url=config.QDRANT_URL)
+    count = client.count(
+        collection_name="semantic_features",
+        count_filter=Filter(
+            must=[FieldCondition(key="category", match=MatchValue(value="knowledge"))]
+        ),
+    ).count
+    results, _ = client.scroll(
+        collection_name="semantic_features",
+        scroll_filter=Filter(
+            must=[FieldCondition(key="category", match=MatchValue(value="knowledge"))]
+        ),
+        limit=10000,
+        with_payload=["uid"],
+    )
+    if results:
+        uids = [str(p.payload.get("uid", "")) for p in results if p.payload]
+        if uids:
+            client.delete(collection_name="semantic_features", points_selector=uids)
+    client.close()
+    return count
 
 
 def seed_knowledge_features(facts: list[dict[str, object]]) -> int:
@@ -94,25 +116,26 @@ def seed_knowledge_features(facts: list[dict[str, object]]) -> int:
     Used to give the agent prior knowledge so benchmarks don't depend
     on the LLM's parametric knowledge for fact-checking.
     """
-    with psycopg.connect(config.POSTGRES_URL) as conn:
-        with conn.cursor() as cur:
-            for fact in facts:
-                cur.execute(
-                    """
-                    INSERT INTO semantic_features
-                        (uid, category, tag, feature_name, value, confidence, updated_at)
-                    VALUES (%s, 'knowledge', %s, %s, %s, %s, NOW())
-                    ON CONFLICT (uid) DO NOTHING
-                    """,
-                    (
-                        fact["uid"],
-                        fact["tag"],
-                        fact["feature_name"],
-                        fact["value"],
-                        fact["confidence"],
-                    ),
-                )
-        conn.commit()
+    client = QdrantClient(url=config.QDRANT_URL)
+    points = [
+        PointStruct(
+            id=str(uuid.uuid5(uuid.NAMESPACE_OID, str(fact["uid"]))),
+            vector=[0.0] * 768,  # placeholder vector
+            payload={
+                "uid": str(uuid.uuid5(uuid.NAMESPACE_OID, str(fact["uid"]))),
+                "category": "knowledge",
+                "tag": str(fact["tag"]),
+                "feature_name": str(fact["feature_name"]),
+                "value": str(fact["value"]),
+                "confidence": float(fact["confidence"]),
+                "episode_citations": [],
+            },
+        )
+        for fact in facts
+    ]
+    if points:
+        client.upsert(collection_name="semantic_features", points=points)
+    client.close()
     return len(facts)
 
 
@@ -166,16 +189,14 @@ def avg_confidence(stored: list[StoredKnowledgeFact]) -> float:
     return sum(f.confidence for f in stored) / len(stored)
 
 
-def _find_step_response(results: list[StepResult], label: str) -> str | None:
-    """Return the response text for a labeled step, or None if not found."""
-    return next((r.response_text for r in results if r.label == label), None)
+def _find_step_response(results: list[StepResult], label: str) -> str:
+    """Return the response text for a labeled step, or empty string if not found."""
+    return next((r.response_text for r in results if r.label == label), "")
 
 
 def response_mentions_any(results: list[StepResult], label: str, terms: list[str]) -> bool:
     """Check if the response for a labeled step mentions any of the terms."""
     text = _find_step_response(results, label)
-    if text is None:
-        return False
     text_lower = text.lower()
     return any(term.lower() in text_lower for term in terms)
 
@@ -183,8 +204,6 @@ def response_mentions_any(results: list[StepResult], label: str, terms: list[str
 def response_mentions_count(results: list[StepResult], label: str, terms: list[str]) -> int:
     """Count how many of the given terms appear in the labeled step's response."""
     text = _find_step_response(results, label)
-    if text is None:
-        return 0
     text_lower = text.lower()
     return sum(1 for term in terms if term.lower() in text_lower)
 
@@ -192,8 +211,6 @@ def response_mentions_count(results: list[StepResult], label: str, terms: list[s
 def response_does_not_mention(results: list[StepResult], label: str, terms: list[str]) -> bool:
     """Verify that none of the terms appear in the labeled step's response."""
     text = _find_step_response(results, label)
-    if text is None:
-        return True
     text_lower = text.lower()
     return not any(term.lower() in text_lower for term in terms)
 

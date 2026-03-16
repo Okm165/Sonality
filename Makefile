@@ -55,16 +55,16 @@ schema-scripts: ## Regenerate database init scripts from sonality/schema.py
 
 # --- Database ---
 
-.PHONY: db-up db-down db-reset db-init-neo4j db-init-postgres db-clear
-db-up: ## Start database containers (Neo4j + PostgreSQL)
-	docker compose up -d neo4j postgres
+.PHONY: db-up db-down db-reset db-init-neo4j db-clear
+db-up: ## Start database containers (Neo4j + Qdrant)
+	docker compose up -d neo4j qdrant
 
 db-down: ## Stop database containers
 	docker compose down
 
 db-reset: db-down ## Reset databases (delete all data and restart)
-	docker volume rm -f sonality_neo4j_data sonality_postgres_data sonality_neo4j_logs 2>/dev/null || true
-	docker compose up -d neo4j postgres
+	docker volume rm -f sonality_neo4j_data sonality_qdrant_data sonality_neo4j_logs 2>/dev/null || true
+	docker compose up -d neo4j qdrant
 	@echo "Waiting for databases to be ready..."
 	@sleep 10
 	@$(MAKE) db-init-neo4j
@@ -74,17 +74,13 @@ db-init-neo4j: ## Initialize Neo4j schema using cypher-shell (run after db-up)
 	docker compose exec -T neo4j cypher-shell -u neo4j -p sonality_password --file /scripts/init_neo4j.cypher || \
 		echo "Neo4j init failed or already initialized (schema is idempotent)"
 
-db-init-postgres: ## Re-run PostgreSQL init script (requires fresh container)
-	@echo "PostgreSQL is auto-initialized via docker-entrypoint-initdb.d/"
-	@echo "To re-initialize, run: make db-reset"
-
 db-clear: ## Clear all data from databases while preserving schema
-	@echo "Clearing PostgreSQL data..."
-	docker compose exec -T postgres psql -U sonality -d sonality -c \
-		"TRUNCATE derivatives, semantic_features RESTART IDENTITY CASCADE; DELETE FROM stm_state WHERE session_id != 'default'; UPDATE stm_state SET running_summary = '', message_buffer = '[]'::jsonb WHERE session_id = 'default';"
+	@echo "Clearing Qdrant collections..."
+	curl -s -X DELETE "http://localhost:6333/collections/derivatives" || true
+	curl -s -X DELETE "http://localhost:6333/collections/semantic_features" || true
 	@echo "Clearing Neo4j data..."
 	docker compose exec -T neo4j cypher-shell -u neo4j -p sonality_password "MATCH (n) DETACH DELETE n"
-	@echo "Databases cleared (schema preserved)"
+	@echo "Databases cleared (Qdrant collections will be recreated on next startup)"
 
 # --- Run ---
 
@@ -123,7 +119,7 @@ typecheck: ## Type-check code (mypy)
 	uv run mypy sonality/
 
 test: ## Run tests (pytest, skip live API tests)
-	uv run pytest tests -m "not live" -v
+	uv run pytest tests -m "not live" -v -s
 
 bench-contracts: ## Run non-live benchmark contracts (no API)
 	uv run pytest benches -m "bench and not live" -q

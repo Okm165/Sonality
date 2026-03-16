@@ -6,6 +6,7 @@ iteratively refines the query until satisfied or max iterations reached.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
 from enum import StrEnum
@@ -63,8 +64,10 @@ class ChainOfQueryAgent:
         all_episodes: list[EpisodeNode] = []
         current_query = query
         best_confidence = 0.0
+        iterations_used = 0
 
         for iteration in range(1, self._max_iterations + 1):
+            iterations_used = iteration
             # Hybrid search: RRF(vector, full-text) for better recall on exact terms
             results = await self._store.hybrid_search(current_query, top_k=base_n)
             new_episode_uids = [r[1] for r in results if r[1] not in all_episode_uids]
@@ -75,13 +78,23 @@ class ChainOfQueryAgent:
                     if ep.uid not in all_episode_uids:
                         all_episode_uids.add(ep.uid)
                         all_episodes.append(ep)
+            elif iteration > 1:
+                # Query refinement found no new episodes — no point calling LLM again.
+                log.debug("Chain retrieval: refinement produced no new episodes (iteration %d)", iteration)
+                break
 
-            # LLM sufficiency check
+            # Skip LLM sufficiency check if nothing was retrieved — trivially insufficient.
+            if not all_episodes:
+                log.debug("Chain retrieval: no episodes found, skipping sufficiency check")
+                break
+
+            # LLM sufficiency check (offload to thread — llm_call is blocking)
             context = "\n\n".join(
                 f"[{ep.created_at}] {ep.summary or ep.content[:200]}" for ep in all_episodes
             )
-            _suf = llm_call(
-                prompt=SUFFICIENCY_PROMPT.format(query=query, context=context or "No results found"),
+            _suf = await asyncio.to_thread(
+                llm_call,
+                prompt=SUFFICIENCY_PROMPT.format(query=query, context=context),
                 response_model=SufficiencyResponse,
                 fallback=SufficiencyResponse(),
             )
@@ -113,14 +126,15 @@ class ChainOfQueryAgent:
                 break
 
         log.info(
-            "Chain retrieval exhausted %d iterations (best conf=%.2f)",
+            "Chain retrieval done: %d/%d iterations, %d episodes (best conf=%.2f)",
+            iterations_used,
             self._max_iterations,
+            len(all_episodes),
             best_confidence,
         )
         return ChainResult(
             episodes=all_episodes,
             confidence=best_confidence,
-            iterations_used=self._max_iterations,
-            exhausted=True,
+            iterations_used=iterations_used,
+            exhausted=iterations_used >= self._max_iterations,
         )
-

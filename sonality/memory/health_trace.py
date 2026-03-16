@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from neo4j import AsyncSession
-    from psycopg_pool import AsyncConnectionPool
+    from qdrant_client import AsyncQdrantClient
 
     from .sponge import SpongeState
 
@@ -68,24 +68,26 @@ def trace_consolidation(
 
 
 async def dump_memory_snapshot(
-    pg_pool: AsyncConnectionPool,
+    qdrant: AsyncQdrantClient,
     neo4j_session: AsyncSession,
     sponge: SpongeState,
     label: str = "SNAPSHOT",
 ) -> None:
     """Dump DB contents to debug log for manual inspection."""
+    from qdrant_client.models import FieldCondition, Filter, MatchValue
+
     log.debug("=== MEMORY_SNAPSHOT: %s (interaction #%d) ===", label, sponge.interaction_count)
 
-    for topic, pos in sorted(sponge.opinion_vectors.items()):
-        meta = sponge.belief_meta.get(topic)
+    for topic in sorted(sponge.opinion_vectors):
+        b = sponge.get_belief(topic)
         log.debug(
             "SNAP_BELIEF topic=%s | pos=%+.3f | conf=%.2f | ev=%d | support=%d | contra=%d",
             topic,
-            pos,
-            meta.confidence if meta else 0.0,
-            meta.evidence_count if meta else 0,
-            len(meta.supporting_episode_uids) if meta else 0,
-            len(meta.contradicting_episode_uids) if meta else 0,
+            b.position,
+            b.confidence,
+            b.evidence_count,
+            b.supporting_count,
+            b.contradicting_count,
         )
     for s in sponge.staged_opinion_updates[:10]:
         log.debug(
@@ -96,27 +98,37 @@ async def dump_memory_snapshot(
             s.provenance.replace("\n", " "),
         )
 
-    async with pg_pool.connection() as conn, conn.cursor() as cur:
-        await cur.execute(
-            "SELECT tag, value, confidence FROM semantic_features "
-            "WHERE category = 'knowledge' ORDER BY confidence DESC LIMIT 20"
-        )
-        for tag, value, conf in await cur.fetchall():
+    results, _ = await qdrant.scroll(
+        collection_name="semantic_features",
+        scroll_filter=Filter(
+            must=[FieldCondition(key="category", match=MatchValue(value="knowledge"))]
+        ),
+        limit=20,
+        with_payload=["tag", "value", "confidence"],
+    )
+    for p in results:
+        if p.payload:
             log.debug(
                 "SNAP_KNOWLEDGE [%s] conf=%.2f | %.100s",
-                tag,
-                float(conf),
-                str(value).replace("\n", " "),
+                p.payload.get("tag", ""),
+                float(p.payload.get("confidence", 0)),
+                str(p.payload.get("value", "")).replace("\n", " "),
             )
-        await cur.execute("SELECT COUNT(*) FROM semantic_features WHERE category = 'knowledge'")
-        row = await cur.fetchone()
-        total_knowledge = row[0] if row else 0
-        await cur.execute("SELECT COUNT(*) FROM derivatives WHERE NOT archived")
-        row = await cur.fetchone()
-        active_derivs = row[0] if row else 0
-        log.debug(
-            "SNAP_PG total_knowledge=%d | active_derivatives=%d", total_knowledge, active_derivs
-        )
+    count_result = await qdrant.count(
+        collection_name="semantic_features",
+        count_filter=Filter(
+            must=[FieldCondition(key="category", match=MatchValue(value="knowledge"))]
+        ),
+    )
+    total_knowledge = count_result.count
+    deriv_count = await qdrant.count(
+        collection_name="derivatives",
+        count_filter=Filter(must=[FieldCondition(key="archived", match=MatchValue(value=False))]),
+    )
+    active_derivs = deriv_count.count
+    log.debug(
+        "SNAP_QDRANT total_knowledge=%d | active_derivatives=%d", total_knowledge, active_derivs
+    )
 
     result = await neo4j_session.run("MATCH (b:Belief) RETURN b.topic AS topic ORDER BY b.topic")
     log.debug("SNAP_GRAPH beliefs=%s", [r["topic"] async for r in result])

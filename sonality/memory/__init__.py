@@ -11,16 +11,18 @@ from .consolidation import ConsolidationEngine, ConsolidationReadinessDecision
 from .db import DatabaseConnections
 from .derivatives import ChunkImportance, DerivativeChunker
 from .dual_store import DualEpisodeStore, EpisodeStorageError, StoredEpisode
-from .embedder import EmbeddingUnavailableError, ExternalEmbedder
+from .embedder import EmbeddingUnavailableError, ExternalEmbedder, cosine_similarity
 from .forgetting import ForgettingAction, ForgettingEngine
-from .graph import EdgeType, EpisodeNode, MemoryGraph
+from .graph import BeliefCorrelation, EdgeType, EpisodeNode, MemoryGraph
 from .health import HealthReport, OverallHealth, assess_health
 from .health_trace import dump_memory_snapshot, trace_belief_provenance
 from .knowledge_extract import (
+    DetectedCorrelation,
     ExtractedProposition,
     KnowledgeConsolidation,
     PropositionType,
     consolidate_knowledge,
+    detect_correlations,
     extract_and_store_knowledge,
     prune_stale_knowledge,
     retrieve_relevant_knowledge,
@@ -39,7 +41,7 @@ from .retrieval import (
 )
 from .segmentation import BoundaryDecision, BoundaryResult, BoundaryType, EventBoundaryDetector
 from .semantic_features import SemanticIngestionWorker
-from .sponge import BeliefMeta, SpongeState, StagedOpinionUpdate
+from .sponge import BeliefMeta, BeliefState, ProbabilityEstimate, SpongeState, StagedOpinionUpdate
 from .stm import ShortTermMemory
 from .stm_consolidator import BackgroundSummarizer
 from .updater import extract_insight
@@ -47,7 +49,9 @@ from .updater import extract_insight
 __all__ = [
     "AggregationStrategy",
     "BackgroundSummarizer",
+    "BeliefCorrelation",
     "BeliefMeta",
+    "BeliefState",
     "BoundaryDecision",
     "BoundaryResult",
     "BoundaryType",
@@ -58,6 +62,7 @@ __all__ = [
     "ContractionAction",
     "DatabaseConnections",
     "DerivativeChunker",
+    "DetectedCorrelation",
     "DualEpisodeStore",
     "EdgeType",
     "EmbeddingUnavailableError",
@@ -72,6 +77,7 @@ __all__ = [
     "KnowledgeConsolidation",
     "MemoryGraph",
     "OverallHealth",
+    "ProbabilityEstimate",
     "PropositionType",
     "ProvenanceUpdate",
     "QueryCategory",
@@ -91,6 +97,8 @@ __all__ = [
     "assess_belief_evidence_batch",
     "assess_health",
     "consolidate_knowledge",
+    "cosine_similarity",
+    "detect_correlations",
     "dump_memory_snapshot",
     "extract_and_store_knowledge",
     "extract_insight",

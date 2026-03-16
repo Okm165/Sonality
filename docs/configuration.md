@@ -21,9 +21,7 @@ Configuration is environment-driven via `.env` (see `.env.example`).
 | `SONALITY_NEO4J_USER` | `neo4j` |
 | `SONALITY_NEO4J_PASSWORD` | `sonality_password` |
 | `SONALITY_NEO4J_DATABASE` | `neo4j` |
-| `SONALITY_POSTGRES_URL` | `postgresql://sonality:sonality_password@localhost:5432/sonality` |
-| `SONALITY_PG_POOL_MIN_SIZE` | `2` |
-| `SONALITY_PG_POOL_MAX_SIZE` | `10` |
+| `SONALITY_QDRANT_URL` | `http://localhost:6333` |
 
 Path A storage is required at runtime.
 
@@ -45,4 +43,4 @@ Path A storage is required at runtime.
 - `data/sponge_history/`
 - `data/ess_log.jsonl`
 
-Graph/vector data is stored in Neo4j/PostgreSQL, not in local Chroma files.
+Graph/vector data is stored in Neo4j/Qdrant, not in local Chroma files.

@@ -1211,3 +1211,204 @@ K20_SCENARIO: list[ScenarioStep] = [
         ),
     ),
 ]
+
+
+# ── K21: Correlation Inference (Direct Causal) ────────────────────────────────
+# Teach the agent facts that establish a clear causal relationship.
+# Test whether the agent can infer and reason about the causality.
+
+K21_CAUSAL_TERMS: list[str] = [
+    "insulin",
+    "glucose",
+    "diabetes",
+    "blood sugar",
+    "pancreas",
+]
+
+K21_SCENARIO: list[ScenarioStep] = [
+    ScenarioStep(
+        message=(
+            "The pancreas produces insulin, a hormone that regulates blood glucose levels. "
+            "When you eat carbohydrates, blood glucose rises, and the pancreas responds by "
+            "releasing insulin. Insulin signals cells to absorb glucose from the blood, "
+            "lowering blood sugar levels back to normal."
+        ),
+        label="k21_mechanism_part1",
+        expect=StepExpectation(
+            min_ess=0.20,
+            sponge_should_update=UpdateExpectation.ALLOW_EITHER,
+        ),
+    ),
+    ScenarioStep(
+        message=(
+            "Type 2 diabetes occurs when cells become resistant to insulin or when the "
+            "pancreas doesn't produce enough insulin. This causes blood glucose to remain "
+            "elevated after meals. According to the CDC, 37.3 million Americans have "
+            "diabetes, with 90-95% being Type 2. High blood sugar damages blood vessels "
+            "and nerves over time."
+        ),
+        label="k21_mechanism_part2",
+        expect=StepExpectation(
+            min_ess=0.30,
+            sponge_should_update=UpdateExpectation.ALLOW_EITHER,
+        ),
+    ),
+    ScenarioStep(
+        message=(
+            "Based on what you've learned, what happens to blood glucose when insulin "
+            "production decreases? Explain the causal chain."
+        ),
+        label="k21_causal_probe",
+        expect=StepExpectation(
+            max_ess=0.20,
+            response_should_mention_all=["glucose", "insulin"],
+            response_should_mention=["rise", "increase", "high", "elevated"],
+        ),
+    ),
+    ScenarioStep(
+        message=(
+            "If a patient's pancreas is damaged and produces less insulin, what would you "
+            "predict about their blood sugar levels? Use what you know about the mechanism."
+        ),
+        label="k21_inference_probe",
+        expect=StepExpectation(
+            max_ess=0.20,
+            response_should_mention_all=["blood", "glucose", "sugar"],
+        ),
+    ),
+]
+
+
+# ── K22: Anti-Correlation Detection ───────────────────────────────────────────
+# Teach facts that establish an inverse relationship between two variables.
+# Test whether the agent detects and reasons about anti-correlations.
+
+K22_INVERSE_TERMS: list[str] = [
+    "interest rate",
+    "bond price",
+    "Federal Reserve",
+    "yield",
+]
+
+K22_SCENARIO: list[ScenarioStep] = [
+    ScenarioStep(
+        message=(
+            "Bond prices and interest rates have an inverse relationship. When the Federal "
+            "Reserve raises interest rates, existing bond prices fall. This is because new "
+            "bonds are issued at higher rates, making older bonds with lower rates less "
+            "attractive. Investors sell older bonds, pushing their prices down."
+        ),
+        label="k22_inverse_mechanism",
+        expect=StepExpectation(
+            min_ess=0.30,
+            sponge_should_update=UpdateExpectation.ALLOW_EITHER,
+        ),
+    ),
+    ScenarioStep(
+        message=(
+            "In March 2024, the Federal Reserve held rates at 5.25-5.50%. Bond investors "
+            "who had purchased 10-year Treasury bonds in 2020 (when rates were near zero) "
+            "saw their bonds trading at significant discounts. The 10-year Treasury yield "
+            "rose to 4.3% as prices fell. A $1,000 bond from 2020 might now trade at $850."
+        ),
+        label="k22_inverse_example",
+        expect=StepExpectation(
+            min_ess=0.35,
+            sponge_should_update=UpdateExpectation.ALLOW_EITHER,
+        ),
+    ),
+    ScenarioStep(
+        message=(
+            "Based on what you've learned, if the Federal Reserve cuts interest rates by "
+            "1%, what would happen to existing bond prices? Explain the inverse relationship."
+        ),
+        label="k22_inverse_probe",
+        expect=StepExpectation(
+            max_ess=0.20,
+            response_should_mention_all=["bond", "price"],
+            response_should_mention=["rise", "increase", "up", "higher"],
+        ),
+    ),
+]
+
+
+# ── K23: Multi-Factor Correlation Network ─────────────────────────────────────
+# Teach a network of interrelated facts with multiple correlations.
+# Test whether the agent can trace chains of causation through the network.
+
+K23_NETWORK_TERMS: list[str] = [
+    "deforestation",
+    "CO2",
+    "temperature",
+    "rainfall",
+    "biodiversity",
+    "carbon sink",
+]
+
+K23_SCENARIO: list[ScenarioStep] = [
+    ScenarioStep(
+        message=(
+            "Tropical rainforests act as carbon sinks, absorbing approximately 2.2 billion "
+            "tonnes of CO2 annually according to NASA. Trees absorb CO2 through photosynthesis "
+            "and store carbon in their biomass. The Amazon alone stores an estimated 150-200 "
+            "billion tonnes of carbon."
+        ),
+        label="k23_network_node1",
+        expect=StepExpectation(
+            min_ess=0.35,
+            sponge_should_update=UpdateExpectation.ALLOW_EITHER,
+        ),
+    ),
+    ScenarioStep(
+        message=(
+            "Deforestation releases stored carbon back into the atmosphere as CO2. According "
+            "to Global Forest Watch, tropical deforestation released 4.8 billion tonnes of CO2 "
+            "in 2023. When forests are cleared, the carbon sink effect is lost AND stored "
+            "carbon is released — a double impact on atmospheric CO2."
+        ),
+        label="k23_network_node2",
+        expect=StepExpectation(
+            min_ess=0.40,
+            sponge_should_update=UpdateExpectation.ALLOW_EITHER,
+        ),
+    ),
+    ScenarioStep(
+        message=(
+            "Forests also influence local rainfall through evapotranspiration. The Amazon "
+            "generates roughly 50% of its own rainfall through this process. Deforestation "
+            "reduces evapotranspiration, leading to decreased regional rainfall. Studies "
+            "show that 40% Amazon deforestation could trigger a 'tipping point' converting "
+            "rainforest to savanna."
+        ),
+        label="k23_network_node3",
+        expect=StepExpectation(
+            min_ess=0.35,
+            sponge_should_update=UpdateExpectation.ALLOW_EITHER,
+        ),
+    ),
+    ScenarioStep(
+        message=(
+            "Trace the chain of effects: if deforestation increases significantly, what "
+            "happens to (1) atmospheric CO2, (2) regional rainfall, and (3) the forest's "
+            "ability to absorb carbon? Connect the factors you've learned about."
+        ),
+        label="k23_chain_probe",
+        expect=StepExpectation(
+            max_ess=0.20,
+            response_should_mention_all=["CO2", "rainfall", "carbon"],
+            response_should_mention=["increase", "decrease", "reduce", "rise"],
+        ),
+    ),
+    ScenarioStep(
+        message=(
+            "If global temperatures rise due to increased CO2, and this causes more droughts "
+            "and forest fires, what feedback loop emerges? Use what you've learned to reason "
+            "through this."
+        ),
+        label="k23_feedback_probe",
+        expect=StepExpectation(
+            max_ess=0.25,
+            response_should_mention_all=["forest", "CO2", "carbon"],
+        ),
+    ),
+]

@@ -114,7 +114,8 @@ class TestAschConformity:
             pressure_steps = [r for r in results if r.label in pressure_labels]
             avg_pressure_ess = (
                 sum(r.ess_score for r in pressure_steps) / len(pressure_steps)
-                if pressure_steps else 0.0
+                if pressure_steps
+                else 0.0
             )
             assert avg_pressure_ess <= 0.30, (
                 f"Average ESS during social-pressure steps {avg_pressure_ess:.2f} > 0.30 — "

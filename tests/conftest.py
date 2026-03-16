@@ -2,7 +2,7 @@
 
 Container fixtures:
 - `db_containers` — Session-scoped, shared across all tests (efficient)
-- `isolated_pg` — Function-scoped PostgreSQL (fresh per test)
+- `isolated_qdrant` — Function-scoped Qdrant (fresh per test)
 - `isolated_neo4j` — Function-scoped Neo4j (fresh per test)
 
 Enable containers with: pytest --use-containers
@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Callable, Generator
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Final
 
 import pytest
 from pydantic import BaseModel
@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from tests.containers import ContainerConfig
 
 log = logging.getLogger(__name__)
+NO_DB_CONTAINERS: Final[dict[str, str]] = {}
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
@@ -32,21 +33,15 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         "--use-containers",
         action="store_true",
         default=False,
-        help="Use testcontainers for Neo4j and PostgreSQL instead of local DBs.",
+        help="Use testcontainers for Neo4j and Qdrant instead of local DBs.",
     )
 
 
 @pytest.fixture(scope="session")
-def use_containers(pytestconfig: pytest.Config) -> bool:
-    """Whether to use testcontainers for database isolation."""
-    return bool(pytestconfig.getoption("--use-containers"))
-
-
-@pytest.fixture(scope="session")
-def db_containers(use_containers: bool) -> Generator[dict[str, Any] | None, None, None]:
+def db_containers(pytestconfig: pytest.Config) -> Generator[dict[str, str], None, None]:
     """Session-scoped database containers (only started if --use-containers is set)."""
-    if not use_containers:
-        yield None
+    if not bool(pytestconfig.getoption("--use-containers")):
+        yield NO_DB_CONTAINERS
         return
 
     from tests.containers import both_containers, patch_config_for_containers
@@ -57,7 +52,7 @@ def db_containers(use_containers: bool) -> Generator[dict[str, Any] | None, None
 
         patch_config_for_containers(cfg, config)
         yield {
-            "postgres_url": config.postgres_url,
+            "qdrant_url": config.qdrant_url,
             "neo4j_url": config.neo4j_url,
             "neo4j_user": config.neo4j_user,
             "neo4j_password": config.neo4j_password,
@@ -65,31 +60,33 @@ def db_containers(use_containers: bool) -> Generator[dict[str, Any] | None, None
 
 
 @pytest.fixture(autouse=True)
-def clear_db_between_tests(
-    use_containers: bool, db_containers: dict[str, Any] | None
-) -> Generator[None, None, None]:
+def clear_db_between_tests(db_containers: dict[str, str]) -> Generator[None, None, None]:
     """Clear databases between tests when using containers."""
     yield
-    if use_containers and db_containers:
+    if db_containers:
+        import asyncio
+
         from tests.containers import clear_databases
 
-        clear_databases(
-            db_containers["postgres_url"],
-            db_containers["neo4j_url"],
-            (db_containers["neo4j_user"], db_containers["neo4j_password"]),
+        asyncio.run(
+            clear_databases(
+                db_containers["qdrant_url"],
+                db_containers["neo4j_url"],
+                (db_containers["neo4j_user"], db_containers["neo4j_password"]),
+            )
         )
 
 
 @pytest.fixture(scope="function")
-def isolated_pg() -> Generator[str, None, None]:
-    """Function-scoped PostgreSQL container for complete isolation.
+def isolated_qdrant() -> Generator[str, None, None]:
+    """Function-scoped Qdrant container for complete isolation.
 
     Use this when a test requires a completely fresh database with no
     state from other tests. More expensive than session-scoped fixtures.
     """
-    from tests.containers import postgres_container
+    from tests.containers import qdrant_container
 
-    with postgres_container() as url:
+    with qdrant_container() as url:
         yield url
 
 

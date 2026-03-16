@@ -11,7 +11,7 @@ import logging
 from dataclasses import dataclass
 from enum import StrEnum
 
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 from ...llm.caller import llm_call
 from ...llm.prompts import DECOMPOSITION_PROMPT
@@ -31,6 +31,14 @@ class DecompositionResponse(BaseModel):
     sub_queries: list[str]
     aggregation_strategy: AggregationStrategy = AggregationStrategy.MERGE
 
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_response(cls, data: object) -> object:
+        """Handle bare list of queries returned without the wrapper object."""
+        if isinstance(data, list):
+            return {"sub_queries": [x for x in data if isinstance(x, str)]}
+        return data
+
 
 @dataclass(frozen=True, slots=True)
 class SplitResult:
@@ -48,7 +56,7 @@ class SplitQueryAgent:
 
     async def retrieve(self, query: str, n_per_sub: int = 10) -> SplitResult:
         """Decompose query, execute sub-queries in parallel, aggregate."""
-        decomposition = self._decompose(query)
+        decomposition = await asyncio.to_thread(self._decompose, query)
         sub_queries = decomposition.sub_queries
         strategy = decomposition.aggregation_strategy
 

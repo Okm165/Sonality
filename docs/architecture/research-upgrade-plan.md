@@ -1,7 +1,7 @@
 # Research-Backed Upgrade Plan
 
 > Status note: this document is historical planning material. Current runtime
-> architecture is Path A (Neo4j + PostgreSQL/pgvector + unified OpenAI-compatible
+> architecture is Path A (Neo4j + Qdrant + unified OpenAI-compatible
 > provider). For current behavior, use `docs/architecture/overview.md`.
 
 This page translates the research synthesis into concrete architecture decisions for Sonality.
@@ -27,7 +27,7 @@ This ordering follows ENGRAM (typed memory over graph complexity), ABBEL (belief
 
 ### Decision
 
-Current runtime uses **Path A dual-store**: `Neo4j + PostgreSQL/pgvector` with typed memory flows.
+Current runtime uses **Path A dual-store**: `Neo4j + Qdrant` with typed memory flows.
 
 ### Why
 
@@ -37,8 +37,8 @@ Current runtime uses **Path A dual-store**: `Neo4j + PostgreSQL/pgvector` with t
 
 ### What this project does now
 
-- **Episodic memory**: episode nodes + derivative nodes in Neo4j/PostgreSQL.
-- **Semantic memory**: `semantic_features` in PostgreSQL with embeddings.
+- **Episodic memory**: episode nodes in Neo4j plus derivative vectors in Qdrant.
+- **Semantic memory**: `semantic_features` in Qdrant with embeddings.
 - **Procedural memory**: immutable behavior contract in `CORE_IDENTITY` and instruction blocks.
 
 This keeps ENGRAM-style typing while preserving explicit graph provenance.
@@ -103,7 +103,7 @@ Keep **append-first, consolidate-later**:
 
 ### Current stance
 
-Use the configured OpenAI-compatible embedding model with pgvector indexes.
+Use the configured OpenAI-compatible embedding model with Qdrant collections.
 
 ### Recommended migration path to a long-context embedding backend
 
@@ -118,7 +118,7 @@ Switch only when retrieval quality becomes a measured bottleneck. Keep concrete 
 ### Why not force migration immediately
 
 - No new dependency pressure unless quality requires it.
-- Keeps the system within the current dependency budget (provider client, `pydantic`, `neo4j`, `pgvector`, `psycopg`).
+- Keeps the system within the current dependency budget (provider client, `pydantic`, `neo4j`, `qdrant-client`).
 
 ---
 

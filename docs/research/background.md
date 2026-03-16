@@ -50,7 +50,7 @@ An independent benchmark (fastpaca.com, 2025) tested memory systems head-to-head
 
 *Aborted after half the benchmark due to cost.
 
-The surprise: long context (84.6%) outperforms sophisticated memory systems. But long context fails at scale — exceeds context windows, attention degrades. Sonality's current middle ground is hybrid structured state plus Path A dual memory (Neo4j + PostgreSQL/pgvector).
+The surprise: long context (84.6%) outperforms sophisticated memory systems. But long context fails at scale — exceeds context windows, attention degrades. Sonality's current middle ground is hybrid structured state plus Path A dual memory (Neo4j + Qdrant).
 
 ---
 

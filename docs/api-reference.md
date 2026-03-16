@@ -11,7 +11,7 @@ Concise reference for active runtime modules.
 - `shutdown() -> None`  
   Stops background workers and closes DB resources.
 
-The agent requires Path A storage (Neo4j + PostgreSQL/pgvector).
+The agent requires Path A storage (Neo4j + Qdrant).
 
 ## `sonality.provider`
 

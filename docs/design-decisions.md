@@ -57,7 +57,7 @@ Every architectural choice in Sonality is backed by specific research findings. 
 | Aspect | Detail |
 |--------|--------|
 | **Problem** | Need both semantic retrieval efficiency and explicit belief/segment/topic provenance. |
-| **Solution** | Path A dual store: `Neo4j` graph + `PostgreSQL/pgvector` derivatives and semantic features. Writes are coordinated via `DualEpisodeStore`; retrieval composes graph traversal and vector search. |
+| **Solution** | Path A dual store: `Neo4j` graph + `Qdrant` derivatives and semantic features. Writes are coordinated via `DualEpisodeStore`; retrieval composes graph traversal and vector search. |
 | **Research** | Prior graph-vs-vector tradeoff findings still apply, but production needs provenance edges and segment lifecycle explicitly represented. |
 | **Alternative** | Chroma-only runtime. Rejected for current architecture because it cannot represent first-class belief provenance and segment graph semantics. |
 

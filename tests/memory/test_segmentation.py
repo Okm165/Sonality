@@ -36,7 +36,12 @@ def test_boundary_detector_uses_llm_boundary_boolean(
     monkeypatch.setattr("sonality.memory.segmentation.llm_call", fake_call, raising=False)
 
     detector = EventBoundaryDetector()
+    # First call uses the no-LLM shortcut (no prior context).
+    first = detector.check_boundary("Hello, let's talk about astronomy.")
+    assert first.boundary_decision is BoundaryDecision.BOUNDARY
+    assert first.segment_id == "segment_1"
+    # Second call has prior context → exercises the LLM path.
     result = detector.check_boundary("Let's switch to another topic now.")
     assert result.boundary_decision is BoundaryDecision.BOUNDARY
-    assert result.segment_id == "segment_1"
+    assert result.segment_id == "segment_2"
     assert result.label == "new topic"

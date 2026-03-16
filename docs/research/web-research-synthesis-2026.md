@@ -5,7 +5,7 @@
 
 **Date:** February 28, 2026  
 **Scope:** Behavioral learning (API-only), memory architecture, evidence-gated updates, sycophancy, reflection, and production failures.  
-**Reference architecture (current):** Sponge + Path A dual memory: Neo4j graph, PostgreSQL/pgvector derivatives/features, ESS-gated updates, periodic reflection, staged opinion updates.
+**Reference architecture (current):** Sponge + Path A dual memory: Neo4j graph, Qdrant derivatives/features, ESS-gated updates, periodic reflection, staged opinion updates.
 
 ---
 
@@ -79,7 +79,7 @@ Persona vectors identify training data leading to personality shifts. Activation
 
 Three main types: (1) Vector — similarity search, limited abstraction; (2) Graph — relational/temporal reasoning, fixed schemas; (3) Event logs — temporal sequences. Hybrid and tiered approaches are common in production.
 
-**Sponge relevance:** Historical note. Current runtime uses dual memory (Neo4j + PostgreSQL/pgvector) plus structured sponge state.
+**Sponge relevance:** Historical note. Current runtime uses dual memory (Neo4j + Qdrant) plus structured sponge state.
 
 ### 2.2 Adaptive Memory Structures (FluxMem, 2026)
 **Source:** [arXiv:2602.14038](https://arxiv.org/html/2602.14038) — "Choosing How to Remember: Adaptive Memory Structures for LLM Agents"
@@ -107,7 +107,7 @@ Vector DBs: strong semantic search, weak temporal/structural context. Knowledge 
 
 Three-layer strategy: Redis (session, context, metadata), Vector DB (semantic memory, personality traits), SQL/Object (audit trail, permissions). Only ingest meaningful signals; define sessions explicitly.
 
-**Sponge relevance:** Current runtime uses JSON + Neo4j + PostgreSQL/pgvector. Redis/session layering remains optional and non-essential for this architecture.
+**Sponge relevance:** Current runtime uses JSON + Neo4j + Qdrant. Redis/session layering remains optional and non-essential for this architecture.
 
 ### 2.6 MemoryGraft: Poisoned Retrieval (2025)
 **Source:** [arXiv:2512.16962](https://arxiv.org/abs/2512.16962) — "MemoryGraft: Persistent Compromise of LLM Agents via Poisoned Experience Retrieval"
@@ -322,7 +322,7 @@ Attention dilution — soft attention in fixed-capacity transformers degrades as
 |------------------|------------------|------------------------|
 | ~500 token narrative | ABBEL belief bottleneck | — |
 | ESS gating (0–1) | RULERS, MArgE, ArgRAG, EDF | Separate ESS model, calibration |
-| Dual-store episodic (Neo4j + pgvector) | Hybrid provenance + semantic retrieval | Probabilistic gating (FluxMem) |
+| Dual-store episodic (Neo4j + Qdrant) | Hybrid provenance + semantic retrieval | Probabilistic gating (FluxMem) |
 | Opinion vectors + Bayesian | Oravecz, BASIL, ABBEL | — |
 | Power-law decay | Ebbinghaus, FadeMem, SAGE | — |
 | Periodic reflection | Park et al., SAMULE, PreFlect | Multi-level, prospective triggers |

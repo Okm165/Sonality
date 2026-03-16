@@ -1,7 +1,7 @@
 """Semantic feature extraction and storage (personality, preferences, knowledge, relationships).
 
 Background ingestion worker extracts features from episodes using category-specific
-LLM prompts. Features stored in PostgreSQL with pgvector embeddings.
+LLM prompts. Features stored in Qdrant with vector embeddings.
 """
 
 from __future__ import annotations
@@ -11,14 +11,17 @@ import logging
 import queue
 import re
 import threading
+import time as _time
 import uuid
 from collections.abc import Coroutine
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import TypeVar
 
-from psycopg_pool import AsyncConnectionPool
 from pydantic import BaseModel, Field, field_validator, model_validator
+from qdrant_client import AsyncQdrantClient
+from qdrant_client.models import FieldCondition, Filter, MatchValue, PointStruct
 
 from .. import config
 from ..llm.caller import llm_call
@@ -65,11 +68,6 @@ class FeatureExtractionResponse(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def normalize_commands(cls, data: object) -> object:
-        """Handle model responses that omit the outer commands wrapper.
-
-        LLMs sometimes return a bare FeatureCommand object or a bare list
-        instead of {"commands": [...]}. Normalise both into the expected shape.
-        """
         if isinstance(data, list):
             return {"commands": data}
         if isinstance(data, dict) and "command" in data and "commands" not in data:
@@ -107,34 +105,25 @@ class SemanticIngestionWorker:
 
     Receives episode UIDs via thread-safe queue. Processes in adaptive batches.
     Uses LLM for category-specific feature extraction.
-
-    Runs its own dedicated event loop to decouple async DB writes from the
-    main agent loop, preventing contention during high-load interactions.
     """
 
     def __init__(
         self,
-        conninfo: str,
+        qdrant_url: str,
         embedder: ExternalEmbedder,
     ) -> None:
-        self._conninfo = conninfo
         self._embedder = embedder
-        self._pg_pool: AsyncConnectionPool | None = None
-        self._queue: queue.Queue[tuple[str, str]] = queue.Queue()  # (episode_uid, content)
+        self._qdrant = AsyncQdrantClient(url=qdrant_url)
+        self._queue: queue.Queue[tuple[str, str, tuple[str, ...]]] = queue.Queue()
         self._loop = asyncio.new_event_loop()
-        self._loop_thread: threading.Thread | None = None
+        self._loop_thread = threading.Thread(
+            target=self._loop.run_forever, name="semantic-ingestion-loop", daemon=True
+        )
         self._thread = threading.Thread(target=self._run, name="semantic-ingestion", daemon=True)
         self._stop_event = threading.Event()
 
     def _run_async(self, coro: Coroutine[object, object, _T]) -> _T:
-        """Submit a coroutine to the worker's own dedicated event loop.
-
-        Cancels the underlying asyncio task on timeout to prevent connection
-        pool exhaustion from orphaned coroutines. Closes the coroutine if the
-        loop is already stopped (e.g. during agent shutdown) to suppress
-        'coroutine was never awaited' ResourceWarnings.
-        """
-        if not self._loop.is_running():
+        if not self._loop.is_running() or self._stop_event.is_set():
             coro.close()
             raise RuntimeError("semantic ingestion loop is not running")
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
@@ -144,87 +133,52 @@ class SemanticIngestionWorker:
             future.cancel()
             raise
 
-    async def _open_pool(self) -> None:
-        """Open a dedicated pool on this worker's event loop.
-
-        Each worker gets its own pool so DB coroutines always run on the same
-        event loop that owns the pool — avoiding asyncio cross-loop contention
-        that causes TimeoutErrors when sharing the main agent pool.
-        """
-        from .db import _configure_pgvector  # local import to avoid circular
-
-        self._pg_pool = AsyncConnectionPool(
-            conninfo=self._conninfo,
-            min_size=1,
-            max_size=config.PG_POOL_MAX_SIZE // 2,
-            configure=_configure_pgvector,
-            open=False,
-        )
-        await self._pg_pool.open()
-        await self._pg_pool.wait()
-
-    async def _close_pool(self) -> None:
-        if self._pg_pool is not None:
-            await self._pg_pool.close()
-            self._pg_pool = None
-
-    @property
-    def _pool(self) -> AsyncConnectionPool:
-        assert self._pg_pool is not None, "pool not open — call start() first"
-        return self._pg_pool
-
     def start(self) -> None:
-        """Start the background processing thread and its dedicated event loop."""
         if not self._thread.is_alive():
-            # Spin the dedicated event loop in a separate daemon thread first,
-            # then open the pool on that loop so asyncio primitives are bound
-            # to the correct event loop throughout the worker's lifetime.
-            self._loop_thread = threading.Thread(
-                target=self._loop.run_forever, name="semantic-ingestion-loop", daemon=True
-            )
             self._loop_thread.start()
-            self._run_async(self._open_pool())
+            # Wait for the event loop to be running before starting the processing
+            # thread, preventing a race where the first queue item is processed
+            # before run_forever() has been called.
+            deadline = _time.monotonic() + 5.0
+            while not self._loop.is_running() and _time.monotonic() < deadline:
+                _time.sleep(0.005)
             self._thread.start()
         log.info("Semantic ingestion worker started")
 
-    async def _cancel_all_and_close_pool(self) -> None:
-        """Cancel pending tasks then close the connection pool.
-
-        Must be called from within the worker's own event loop so that
-        asyncio.all_tasks() sees all outstanding coroutines bound to it.
-        """
+    async def _cancel_all_and_close_client(self) -> None:
         tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
         for task in tasks:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
-        await self._close_pool()
+        await self._qdrant.close()
 
     def stop(self) -> None:
-        """Signal the worker to stop, drain pending tasks, shut down the event loop.
-
-        Extends join timeout to 30 s so in-flight batches finish cleanly.
-        Cancels any remaining async tasks before closing the pool to avoid
-        'coroutine was never awaited' RuntimeWarnings during teardown.
-        """
         self._stop_event.set()
         if self._thread.is_alive():
-            self._thread.join(timeout=30.0)
+            # Use config.ASYNC_TIMEOUT as the join deadline so that a long LLM
+            # call inside _process_episode has time to finish before the event
+            # loop is torn down. If the thread doesn't finish in time, we still
+            # proceed so the agent shutdown doesn't hang indefinitely.
+            self._thread.join(timeout=float(config.ASYNC_TIMEOUT))
         if self._loop.is_running():
             try:
-                self._run_async(self._cancel_all_and_close_pool())
+                self._run_async(self._cancel_all_and_close_client())
             except Exception:
                 log.debug("Error during semantic worker shutdown", exc_info=True)
             self._loop.call_soon_threadsafe(self._loop.stop)
-        if self._loop_thread is not None and self._loop_thread.is_alive():
+        if self._loop_thread.is_alive():
             self._loop_thread.join(timeout=5.0)
 
-    def enqueue(self, episode_uid: str, content: str) -> None:
-        """Queue an episode for semantic feature extraction."""
-        self._queue.put((episode_uid, content))
+    def enqueue(
+        self,
+        episode_uid: str,
+        content: str,
+        categories: tuple[str, ...] = (),
+    ) -> None:
+        self._queue.put((episode_uid, content, categories))
 
     def _run(self) -> None:
-        """Main worker loop: wait for episodes, process in batches."""
         while not self._stop_event.is_set():
             try:
                 first = self._queue.get(timeout=60.0)
@@ -235,17 +189,24 @@ class SemanticIngestionWorker:
                     except queue.Empty:
                         break
 
-                for episode_uid, content in batch:
-                    self._process_episode(episode_uid, content)
-
+                for episode_uid, content, categories in batch:
+                    self._process_episode(episode_uid, content, categories)
             except queue.Empty:
                 continue
             except Exception:
                 log.exception("Semantic ingestion error; continuing")
 
-    def _process_episode(self, episode_uid: str, content: str) -> None:
-        """Extract features for all categories from a single episode."""
-        for category in SEMANTIC_CATEGORIES:
+    def _process_episode(
+        self,
+        episode_uid: str,
+        content: str,
+        categories: tuple[str, ...],
+    ) -> None:
+        target_cats = list(categories) if categories else SEMANTIC_CATEGORIES
+        for category in target_cats:
+            if self._stop_event.is_set():
+                log.debug("Semantic worker stopping mid-episode at category=%s", category)
+                return
             try:
                 self._extract_features(episode_uid, content, category)
             except Exception:
@@ -256,49 +217,39 @@ class SemanticIngestionWorker:
                 )
 
     def _extract_features(self, episode_uid: str, content: str, category: str) -> None:
-        """Use LLM to extract features for one category, then apply commands."""
-        existing_features = self._load_existing_features(category)
-
-        tags = FEATURE_TAGS.get(category, "Domain, Traits, Style, Stance")
+        if self._stop_event.is_set():
+            return
+        existing = self._load_existing_features(category)
+        tags = FEATURE_TAGS.get(category, "")
         prompt = FEATURE_EXTRACTION_PROMPT.format(
-            episode_content=content,
             category=category,
-            existing_features=existing_features,
+            episode_content=content,
             tags=tags,
+            existing_features=existing,
         )
+
+        # 4 commands × ~100 tokens each + JSON overhead — needs more than the 1024 default.
         result = llm_call(
             prompt=prompt,
             response_model=FeatureExtractionResponse,
-            fallback=FeatureExtractionResponse(commands=[]),
+            fallback=FeatureExtractionResponse(),
+            max_tokens=config.FAST_LLM_MAX_TOKENS * 2,
         )
         if not result.success:
-            log.warning(
-                "Feature extraction parse failed for category=%s (skipping): %s",
-                category,
-                result.error,
-            )
+            log.debug("Feature extraction failed: %s", result.error)
             return
+
         response = result.value
         if len(response.commands) > 4:
-            log.debug(
-                "Feature extraction: capping %d commands → 4 for category=%s",
-                len(response.commands),
-                category,
-            )
             response.commands = response.commands[:4]
-        # Deduplicate by tag within same pass — keep last (most refined) command per tag.
+
         seen_tags: dict[str, int] = {}
         for i, cmd in enumerate(response.commands):
             if cmd.tag:
                 seen_tags[cmd.tag] = i
         if len(seen_tags) < len(response.commands):
-            dupes = len(response.commands) - len(seen_tags)
             response.commands = [response.commands[i] for i in sorted(seen_tags.values())]
-            log.debug("Feature extraction: removed %d duplicate-tag commands for category=%s", dupes, category)
 
-        # Pre-filter commands and batch-embed all UPSERT texts in a single HTTP call.
-        # Previously this made one embed_query call per feature, which serialized 11+
-        # round-trips to Ollama. Batching reduces latency from ~O(n) to ~O(1).
         upsert_indices = [
             i
             for i, cmd in enumerate(response.commands)
@@ -312,11 +263,15 @@ class SemanticIngestionWorker:
             try:
                 batch_embeddings = self._embedder.embed_documents(upsert_texts)
             except Exception:
-                log.warning("Batch embedding failed for %s features in %s", len(upsert_texts), category)
+                log.warning(
+                    "Batch embedding failed for %s features in %s", len(upsert_texts), category
+                )
         embedding_map: dict[int, list[float]] = {
-            idx: emb for idx, emb in zip(upsert_indices, batch_embeddings)
+            idx: emb for idx, emb in zip(upsert_indices, batch_embeddings, strict=True)
         }
 
+        if self._stop_event.is_set():
+            return
         for i, cmd in enumerate(response.commands):
             if cmd.command in {FeatureCommandType.ADD, FeatureCommandType.UPDATE}:
                 log.info(
@@ -328,15 +283,7 @@ class SemanticIngestionWorker:
                     cmd.confidence,
                 )
             elif cmd.command is FeatureCommandType.DELETE:
-                # Require a non-empty reason (explicit contradiction evidence).
-                # Topic shifts produce reason="" which we skip to prevent personality erosion.
                 if not cmd.reason.strip():
-                    log.debug(
-                        "Feature DELETE skipped (no contradiction evidence): %s/%s/%s",
-                        category,
-                        cmd.tag,
-                        cmd.feature,
-                    )
                     continue
                 log.info(
                     "Feature DELETE: %s/%s/%s reason=%s",
@@ -349,24 +296,16 @@ class SemanticIngestionWorker:
                 continue
             embedding = embedding_map.get(i, [])
             if cmd.command in {FeatureCommandType.ADD, FeatureCommandType.UPDATE} and not embedding:
-                log.warning("Embedding missing for %s/%s/%s; skipping", category, cmd.tag, cmd.feature)
+                log.warning(
+                    "Embedding missing for %s/%s/%s; skipping", category, cmd.tag, cmd.feature
+                )
                 continue
             try:
                 self._run_async(self._persist_command_async(episode_uid, category, cmd, embedding))
-            except TimeoutError:
-                # Pool contention under test load — background, non-critical.
-                log.debug(
-                    "Feature persistence timed out (pool contention) episode=%s %s/%s/%s",
-                    episode_uid[:8],
-                    category,
-                    cmd.tag,
-                    cmd.feature,
-                )
-            except RuntimeError as exc:
-                log.debug("Feature persistence skipped (shutdown) episode=%s %s/%s/%s: %s",
-                    episode_uid[:8], category, cmd.tag, cmd.feature, exc)
             except Exception:
-                log.warning(
+                level = logging.DEBUG if self._stop_event.is_set() else logging.WARNING
+                log.log(
+                    level,
                     "Feature persistence failed for episode=%s %s/%s/%s",
                     episode_uid[:8],
                     category,
@@ -374,17 +313,14 @@ class SemanticIngestionWorker:
                     cmd.feature,
                     exc_info=True,
                 )
+
         try:
             self._consolidate_features(category)
-        except TimeoutError:
-            log.debug("Feature consolidation timed out (pool contention) category=%s", category)
-        except RuntimeError as exc:
-            log.debug("Feature consolidation skipped (shutdown) category=%s: %s", category, exc)
         except Exception:
-            log.warning("Feature consolidation failed for category=%s", category, exc_info=True)
+            level = logging.DEBUG if self._stop_event.is_set() else logging.WARNING
+            log.log(level, "Feature consolidation failed for category=%s", category, exc_info=True)
 
     def _load_existing_features(self, category: str) -> str:
-        """Load current category features to give extractor update/delete context."""
         try:
             rows = self._run_async(self._load_feature_rows_async(category, limit=30))
         except Exception:
@@ -398,12 +334,6 @@ class SemanticIngestionWorker:
         )
 
     def _consolidate_features(self, category: str) -> None:
-        """Use LLM to consolidate overlapping semantic features in a category.
-
-        Only runs when the feature set is large enough to warrant an LLM consolidation
-        pass — prevents expensive consolidation calls early in a conversation when
-        duplicate features are unlikely.
-        """
         features = self._run_async(self._load_feature_rows_async(category, limit=40))
         if len(features) < 15:
             log.debug(
@@ -414,199 +344,153 @@ class SemanticIngestionWorker:
             return
         log.debug("Consolidating %d features in category=%s", len(features), category)
         features_text = "\n".join(
-            f"- uid={row.uid} | [{row.tag}] {row.feature_name}: {row.value}"
-            f" (conf={row.confidence:.2f})"
-            for row in features
+            f"[{f.uid[:8]}] [{f.tag}] {f.feature_name}: {f.value} (conf={f.confidence:.2f})"
+            for f in features
         )
         result = llm_call(
-            prompt=FEATURE_CONSOLIDATION_PROMPT.format(
-                category=category,
-                features=features_text,
-            ),
+            prompt=FEATURE_CONSOLIDATION_PROMPT.format(category=category, features=features_text),
             response_model=FeatureConsolidationResponse,
             fallback=FeatureConsolidationResponse(),
         )
         if not result.success:
-            log.warning(
-                "Feature consolidation parse failed for category=%s (skipping): %s",
-                category,
-                result.error,
-            )
+            log.debug("Feature consolidation LLM failed: %s", result.error)
             return
         response = result.value
-        if response.consolidation_decision is not FeatureConsolidationDecision.CONSOLIDATE:
+        if response.consolidation_decision is FeatureConsolidationDecision.SKIP:
             return
-        valid_uids = {row.uid for row in features}
-        for action in response.actions[:2]:  # cap at 2 merges per consolidation pass
-            source_uid = action.source_uid.strip()
-            target_uid = action.target_uid.strip()
+        feature_uids = {f.uid for f in features}
+        for action in response.actions[:2]:
+            source_uid = action.source_uid
+            target_uid = action.target_uid
             if (
-                source_uid == target_uid
-                or source_uid not in valid_uids
-                or target_uid not in valid_uids
+                not source_uid
+                or not target_uid
+                or source_uid == target_uid
+                or source_uid not in feature_uids
+                or target_uid not in feature_uids
             ):
                 continue
-            self._run_async(
-                self._merge_features_async(
-                    category=category,
-                    source_uid=source_uid,
-                    target_uid=target_uid,
-                    action=action,
+            self._run_async(self._merge_features_async(category, source_uid, target_uid, action))
+
+    async def _load_feature_rows_async(self, category: str, limit: int) -> list[SemanticFeatureRow]:
+        results, _ = await self._qdrant.scroll(
+            collection_name="semantic_features",
+            scroll_filter=Filter(
+                must=[FieldCondition(key="category", match=MatchValue(value=category))]
+            ),
+            limit=limit,
+            with_payload=True,
+            with_vectors=False,
+        )
+        rows = []
+        for point in results:
+            if not point.payload:
+                continue
+            p = point.payload
+            rows.append(
+                SemanticFeatureRow(
+                    uid=str(p.get("uid", "")),
+                    tag=str(p.get("tag", "")),
+                    feature_name=str(p.get("feature_name", "")),
+                    value=str(p.get("value", "")),
+                    confidence=float(p.get("confidence", 0.0)),
+                    citations=list(p.get("episode_citations", []))
+                    if p.get("episode_citations")
+                    else [],
                 )
             )
-
-    @classmethod
-    def _row_to_feature(
-        cls, row: tuple[object, object, object, object, object, object]
-    ) -> SemanticFeatureRow:
-        confidence_obj = row[4]
-        confidence = float(confidence_obj) if isinstance(confidence_obj, (int, float, str)) else 0.0
-        return SemanticFeatureRow(
-            uid=str(row[0]),
-            tag=str(row[1]),
-            feature_name=str(row[2]),
-            value=str(row[3]),
-            confidence=confidence,
-            citations=[str(c) for c in row[5]] if isinstance(row[5], list) else [],
-        )
-
-    async def _load_feature_rows_async(
-        self,
-        category: str,
-        *,
-        limit: int,
-    ) -> list[SemanticFeatureRow]:
-        """Load semantic feature rows for one category."""
-        async with self._pool.connection() as conn, conn.cursor() as cur:
-            await cur.execute(
-                """
-                SELECT uid, tag, feature_name, value, confidence, episode_citations
-                FROM semantic_features
-                WHERE category = %s
-                ORDER BY confidence DESC, updated_at DESC
-                LIMIT %s
-                """,
-                (category, limit),
-            )
-            rows: list[tuple[object, object, object, object, object, object]] = await cur.fetchall()
-        return [self._row_to_feature(row) for row in rows]
+        rows.sort(key=lambda r: -r.confidence)
+        return rows
 
     async def _merge_features_async(
         self,
-        *,
         category: str,
         source_uid: str,
         target_uid: str,
         action: FeatureConsolidationAction,
     ) -> None:
-        """Merge one redundant source feature into the target feature row."""
-        async with self._pool.connection() as conn, conn.cursor() as cur:
-            await cur.execute(
-                """
-                SELECT uid, tag, feature_name, value, confidence, episode_citations
-                FROM semantic_features
-                WHERE category = %s AND uid IN (%s, %s)
-                """,
-                (category, source_uid, target_uid),
-            )
-            rows: list[tuple[object, object, object, object, object, object]] = await cur.fetchall()
-        by_uid = {f.uid: f for f in (self._row_to_feature(r) for r in rows)}
-        if source_uid not in by_uid or target_uid not in by_uid:
+        results, _ = await self._qdrant.scroll(
+            collection_name="semantic_features",
+            scroll_filter=Filter(
+                must=[
+                    FieldCondition(key="category", match=MatchValue(value=category)),
+                    FieldCondition(key="uid", match=MatchValue(value=target_uid)),
+                ]
+            ),
+            limit=1,
+            with_payload=True,
+        )
+        if not results:
             return
-        source = by_uid[source_uid]
-        target = by_uid[target_uid]
-        canonical_tag = action.canonical_tag.strip() or target.tag
-        canonical_feature = action.canonical_feature.strip() or target.feature_name
-        canonical_value = action.canonical_value.strip() or target.value
-        confidence = max(source.confidence, target.confidence)
-        citations = list(dict.fromkeys(target.citations + source.citations))
-        async with self._pool.connection() as conn, conn.cursor() as cur:
-            await cur.execute(
-                """
-                UPDATE semantic_features
-                SET
-                    tag = %s,
-                    feature_name = %s,
-                    value = %s,
-                    confidence = %s,
-                    episode_citations = %s,
-                    updated_at = NOW()
-                WHERE uid = %s
-                """,
-                (
-                    canonical_tag,
-                    canonical_feature,
-                    canonical_value,
-                    confidence,
-                    citations,
-                    target_uid,
-                ),
-            )
-            await cur.execute(
-                "DELETE FROM semantic_features WHERE uid = %s",
-                (source_uid,),
-            )
-            log.info(
-                "Feature MERGE: %s <- %s (%s)",
-                target_uid[:8],
-                source_uid[:8],
-                action.reason[:80],
-            )
+        target = results[0].payload or {}
+        citations = list(target.get("episode_citations", []))
+        confidence = max(float(target.get("confidence", 0.0)), 0.5)
+        await self._qdrant.set_payload(
+            collection_name="semantic_features",
+            payload={
+                "tag": action.canonical_tag or target.get("tag", ""),
+                "feature_name": action.canonical_feature or target.get("feature_name", ""),
+                "value": action.canonical_value or target.get("value", ""),
+                "confidence": confidence,
+                "episode_citations": citations,
+                "updated_at": datetime.now(UTC).isoformat(),
+            },
+            points=[target_uid],
+        )
+        await self._qdrant.delete(
+            collection_name="semantic_features",
+            points_selector=Filter(
+                must=[FieldCondition(key="uid", match=MatchValue(value=source_uid))]
+            ),
+        )
+        log.info("Feature MERGE: %s <- %s (%s)", target_uid[:8], source_uid[:8], action.reason[:80])
 
     async def _persist_command_async(
         self, episode_uid: str, category: str, cmd: FeatureCommand, embedding: list[float]
     ) -> None:
-        """Persist feature command to PostgreSQL with a pre-computed embedding.
-
-        The embedding is computed synchronously in the worker thread before this
-        coroutine is submitted, keeping async paths free for DB I/O only.
-        """
         seed = f"semantic:{category}:{cmd.tag.strip().lower()}:{cmd.feature.strip().lower()}"
         feature_uid = str(uuid.uuid5(uuid.NAMESPACE_URL, seed))
+        now = datetime.now(UTC).isoformat()
 
-        async with self._pool.connection() as conn, conn.cursor() as cur:
-            if cmd.command in {FeatureCommandType.ADD, FeatureCommandType.UPDATE}:
-                await cur.execute(
-                    """
-                    INSERT INTO semantic_features (
-                        uid, category, tag, feature_name, value,
-                        episode_citations, confidence, embedding, updated_at
-                    )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s::vector, NOW())
-                    ON CONFLICT (uid) DO UPDATE
-                    SET
-                        value = EXCLUDED.value,
-                        confidence = EXCLUDED.confidence,
-                        embedding = EXCLUDED.embedding,
-                        updated_at = NOW(),
-                        episode_citations = (
-                            SELECT ARRAY(
-                                SELECT DISTINCT citation
-                                FROM unnest(
-                                    semantic_features.episode_citations
-                                    || EXCLUDED.episode_citations
-                                ) AS citation
-                            )
-                        )
-                    """,
-                    (
-                        feature_uid,
-                        category,
-                        cmd.tag,
-                        cmd.feature,
-                        cmd.value,
-                        [episode_uid],
-                        max(0.0, min(1.0, cmd.confidence)),
-                        embedding,
-                    ),
-                )
-            elif cmd.command is FeatureCommandType.DELETE:
-                await cur.execute(
-                    """
-                    DELETE FROM semantic_features
-                    WHERE category = %s
-                      AND tag = %s
-                      AND feature_name = %s
-                    """,
-                    (category, cmd.tag, cmd.feature),
-                )
+        if cmd.command in {FeatureCommandType.ADD, FeatureCommandType.UPDATE}:
+            existing, _ = await self._qdrant.scroll(
+                collection_name="semantic_features",
+                scroll_filter=Filter(
+                    must=[FieldCondition(key="uid", match=MatchValue(value=feature_uid))]
+                ),
+                limit=1,
+                with_payload=True,
+            )
+            citations = [episode_uid]
+            if existing and existing[0].payload:
+                old_citations = existing[0].payload.get("episode_citations", [])
+                if isinstance(old_citations, list):
+                    citations = list(dict.fromkeys([*old_citations, episode_uid]))
+
+            point = PointStruct(
+                id=feature_uid,
+                vector=embedding,
+                payload={
+                    "uid": feature_uid,
+                    "category": category,
+                    "tag": cmd.tag,
+                    "feature_name": cmd.feature,
+                    "value": cmd.value,
+                    "episode_citations": citations,
+                    "confidence": max(0.0, min(1.0, cmd.confidence)),
+                    "created_at": now,
+                    "updated_at": now,
+                },
+            )
+            await self._qdrant.upsert(collection_name="semantic_features", points=[point])
+        elif cmd.command is FeatureCommandType.DELETE:
+            await self._qdrant.delete(
+                collection_name="semantic_features",
+                points_selector=Filter(
+                    must=[
+                        FieldCondition(key="category", match=MatchValue(value=category)),
+                        FieldCondition(key="tag", match=MatchValue(value=cmd.tag)),
+                        FieldCondition(key="feature_name", match=MatchValue(value=cmd.feature)),
+                    ]
+                ),
+            )

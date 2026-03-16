@@ -44,18 +44,13 @@ OPINION_COOLING_PERIOD: Final = _env_int("SONALITY_OPINION_COOLING_PERIOD", 3)
 MAX_CONVERSATION_CHARS: Final = 100_000
 REFLECTION_EVERY: Final = _env_int("SONALITY_REFLECTION_EVERY", 20)
 
-# --- Database (Neo4j + PostgreSQL) ---
+# --- Database (Neo4j + Qdrant) ---
 NEO4J_URL: Final = _env_str("SONALITY_NEO4J_URL", "bolt://localhost:7687")
 NEO4J_USER: Final = _env_str("SONALITY_NEO4J_USER", "neo4j")
 NEO4J_PASSWORD: Final = _env_str("SONALITY_NEO4J_PASSWORD", "sonality_password")
 NEO4J_DATABASE: Final = _env_str("SONALITY_NEO4J_DATABASE", "neo4j")
 
-POSTGRES_URL: Final = _env_str(
-    "SONALITY_POSTGRES_URL",
-    "postgresql://sonality:sonality_password@localhost:5433/sonality",
-)
-PG_POOL_MIN_SIZE: Final = _env_int("SONALITY_PG_POOL_MIN_SIZE", 2)
-PG_POOL_MAX_SIZE: Final = _env_int("SONALITY_PG_POOL_MAX_SIZE", 10)
+QDRANT_URL: Final = _env_str("SONALITY_QDRANT_URL", "http://localhost:6333")
 
 # --- Embedding (can use separate endpoint and API key from chat models) ---
 EMBEDDING_BASE_URL: Final = _env_str("SONALITY_EMBEDDING_BASE_URL", "")
@@ -63,6 +58,8 @@ EMBEDDING_API_KEY: Final = _env_str("SONALITY_EMBEDDING_API_KEY", "")
 EMBEDDING_MODEL: Final = _env_str("SONALITY_EMBEDDING_MODEL", "nomic-embed-text")
 EMBEDDING_DIMENSIONS: Final = _env_int("SONALITY_EMBEDDING_DIMENSIONS", 768)
 EMBEDDING_BATCH_SIZE: Final = _env_int("SONALITY_EMBEDDING_BATCH_SIZE", 32)
+# Max characters per text before embedding; prevents context overflow on long chunks.
+EMBEDDING_MAX_CHARS: Final = _env_int("SONALITY_EMBEDDING_MAX_CHARS", 2000)
 # Set to false for Ollama models that don't accept a dimensions truncation parameter
 EMBEDDING_SEND_DIMENSIONS: Final = _env_str(
     "SONALITY_EMBEDDING_SEND_DIMENSIONS", "true"
