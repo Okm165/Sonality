@@ -26,7 +26,8 @@ from qdrant_client.models import FieldCondition, Filter, MatchValue, PointStruct
 from .. import config
 from ..llm.caller import llm_call
 from ..llm.prompts import FEATURE_CONSOLIDATION_PROMPT, FEATURE_EXTRACTION_PROMPT, FEATURE_TAGS
-from .embedder import ExternalEmbedder
+from ..provider import interaction_active, llm_semaphore_idle
+from .embedder import Embedder
 
 _T = TypeVar("_T")
 log = logging.getLogger(__name__)
@@ -110,7 +111,7 @@ class SemanticIngestionWorker:
     def __init__(
         self,
         qdrant_url: str,
-        embedder: ExternalEmbedder,
+        embedder: Embedder,
     ) -> None:
         self._embedder = embedder
         self._qdrant = AsyncQdrantClient(url=qdrant_url)
@@ -153,6 +154,25 @@ class SemanticIngestionWorker:
             await asyncio.gather(*tasks, return_exceptions=True)
         await self._qdrant.close()
 
+    def drain(self, timeout: float = 120.0) -> bool:
+        """Block until all queued items are processed or timeout expires.
+
+        Returns True if the queue was fully drained.
+        Must be called before stop() to ensure background feature extraction completes.
+        """
+        done = threading.Event()
+
+        def _join() -> None:
+            self._queue.join()
+            done.set()
+
+        t = threading.Thread(target=_join, daemon=True)
+        t.start()
+        drained = done.wait(timeout=timeout)
+        if not drained:
+            log.warning("Semantic worker drain timed out after %.0fs; queue may have pending items", timeout)
+        return drained
+
     def stop(self) -> None:
         self._stop_event.set()
         if self._thread.is_alive():
@@ -182,19 +202,35 @@ class SemanticIngestionWorker:
         while not self._stop_event.is_set():
             try:
                 first = self._queue.get(timeout=60.0)
-                batch = [first]
-                while len(batch) < 5:
-                    try:
-                        batch.append(self._queue.get_nowait())
-                    except queue.Empty:
-                        break
-
-                for episode_uid, content, categories in batch:
-                    self._process_episode(episode_uid, content, categories)
             except queue.Empty:
                 continue
-            except Exception:
-                log.exception("Semantic ingestion error; continuing")
+
+            batch = [first]
+            while len(batch) < 5:
+                try:
+                    batch.append(self._queue.get_nowait())
+                except queue.Empty:
+                    break
+
+            requeue: list[tuple[str, str, tuple[str, ...]]] = []
+            for item in batch:
+                episode_uid, content, categories = item
+                if interaction_active.is_set():
+                    log.debug("Semantic worker deferring: interaction active")
+                    requeue.append(item)
+                else:
+                    try:
+                        self._process_episode(episode_uid, content, categories)
+                    except Exception:
+                        log.exception("Semantic ingestion error; continuing")
+                # One task_done per get() to keep Queue.join() accurate.
+                self._queue.task_done()
+
+            for item in requeue:
+                self._queue.put(item)
+
+            if requeue:
+                _time.sleep(1.0)
 
     def _process_episode(
         self,
@@ -206,6 +242,10 @@ class SemanticIngestionWorker:
         for category in target_cats:
             if self._stop_event.is_set():
                 log.debug("Semantic worker stopping mid-episode at category=%s", category)
+                return
+            if interaction_active.is_set():
+                log.debug("Semantic worker pausing mid-episode: interaction active at category=%s", category)
+                self._queue.put((episode_uid, content, tuple(target_cats[target_cats.index(category):])))
                 return
             try:
                 self._extract_features(episode_uid, content, category)
@@ -219,6 +259,16 @@ class SemanticIngestionWorker:
     def _extract_features(self, episode_uid: str, content: str, category: str) -> None:
         if self._stop_event.is_set():
             return
+        # Skip immediately if the main interaction thread holds the LLM semaphore.
+        # Each category makes one LLM call; waiting up to 4x90 s blocks foreground
+        # routing and knowledge-extraction calls. Defer to the next poll cycle instead.
+        if not llm_semaphore_idle():
+            log.debug(
+                "LLM busy; skipping semantic feature extraction for episode=%s category=%s",
+                episode_uid[:8],
+                category,
+            )
+            return
         existing = self._load_existing_features(category)
         tags = FEATURE_TAGS.get(category, "")
         prompt = FEATURE_EXTRACTION_PROMPT.format(
@@ -228,14 +278,16 @@ class SemanticIngestionWorker:
             existing_features=existing,
         )
 
-        # 4 commands x ~100 tokens each + JSON overhead - needs more than the 1024 default.
-        # max_retries=1: if server is busy, skip this episode rather than blocking for 90s.
+        # 2-4 short commands; 256 tokens is ample. Keeping it small caps the semaphore
+        # hold time to ~60s on a 35B model, reducing foreground latency spikes.
+        # max_retries=1: if server is busy, skip this episode rather than blocking further.
         result = llm_call(
             prompt=prompt,
             response_model=FeatureExtractionResponse,
             fallback=FeatureExtractionResponse(),
-            max_tokens=config.FAST_LLM_MAX_TOKENS * 2,
+            max_tokens=256,
             max_retries=1,
+            assistant_prefix='{"commands": [',
         )
         if not result.success:
             log.debug("Feature extraction failed: %s", result.error)
@@ -355,6 +407,7 @@ class SemanticIngestionWorker:
             fallback=FeatureConsolidationResponse(),
             max_tokens=512,  # SKIP or 2 merges — small output
             max_retries=1,
+            assistant_prefix='{"consolidation_decision": "',
         )
         if not result.success:
             log.debug("Feature consolidation LLM failed: %s", result.error)
@@ -473,7 +526,7 @@ class SemanticIngestionWorker:
 
             point = PointStruct(
                 id=feature_uid,
-                vector=embedding,
+                vector={"dense": embedding},
                 payload={
                     "uid": feature_uid,
                     "category": category,

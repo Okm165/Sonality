@@ -52,26 +52,13 @@ NEO4J_DATABASE: Final = _env_str("SONALITY_NEO4J_DATABASE", "neo4j")
 
 QDRANT_URL: Final = _env_str("SONALITY_QDRANT_URL", "http://localhost:6333")
 
-# --- Embedding (can use separate endpoint and API key from chat models) ---
-EMBEDDING_BASE_URL: Final = _env_str("SONALITY_EMBEDDING_BASE_URL", "")
-EMBEDDING_API_KEY: Final = _env_str("SONALITY_EMBEDDING_API_KEY", "")
-EMBEDDING_MODEL: Final = _env_str("SONALITY_EMBEDDING_MODEL", "nomic-embed-text")
-EMBEDDING_DIMENSIONS: Final = _env_int("SONALITY_EMBEDDING_DIMENSIONS", 768)
-EMBEDDING_BATCH_SIZE: Final = _env_int("SONALITY_EMBEDDING_BATCH_SIZE", 32)
-# Max characters per text before embedding; prevents context overflow on long chunks.
+# --- Embedding (local FastEmbed bge-large-en-v1.5, 1024 dims) ---
+EMBEDDING_DIMENSIONS: Final = 1024
 EMBEDDING_MAX_CHARS: Final = _env_int("SONALITY_EMBEDDING_MAX_CHARS", 2000)
-# Set to false for Ollama models that don't accept a dimensions truncation parameter
-EMBEDDING_SEND_DIMENSIONS: Final = _env_str(
-    "SONALITY_EMBEDDING_SEND_DIMENSIONS", "true"
-).lower() not in ("false", "0", "no")
-EMBEDDING_QUERY_INSTRUCTION: Final = _env_str(
-    "SONALITY_EMBEDDING_QUERY_INSTRUCTION",
-    "Represent this memory retrieval query for finding relevant past conversations:",
-)
-EMBEDDING_DOC_INSTRUCTION: Final = _env_str(
-    "SONALITY_EMBEDDING_DOC_INSTRUCTION",
-    "Represent this conversation memory for semantic retrieval:",
-)
+
+# --- Qdrant search tuning ---
+QDRANT_SEARCH_EF: Final = _env_int("SONALITY_QDRANT_SEARCH_EF", 128)
+QDRANT_RESCORE_QUANTIZED: Final = _env_str("SONALITY_QDRANT_RESCORE", "true").lower() == "true"
 
 # --- LLM for scoring/assessment tasks (fast, cheap model) ---
 FAST_LLM_MODEL: Final = _env_str("SONALITY_FAST_LLM_MODEL", ESS_MODEL)
@@ -89,9 +76,11 @@ RETRIEVAL_CONFIDENCE_THRESHOLD: Final = _env_float("SONALITY_RETRIEVAL_CONFIDENC
 RETRIEVAL_OVER_FETCH_FACTOR: Final = _env_int("SONALITY_RETRIEVAL_OVER_FETCH_FACTOR", 3)
 MAX_RERANK_CANDIDATES: Final = _env_int("SONALITY_MAX_RERANK_CANDIDATES", 25)
 
-# Per-HTTP-request timeout for LLM calls. The 35B model typically responds in 55s;
-# 90s gives a generous buffer. Increase for very large models (e.g. 70B+).
-LLM_REQUEST_TIMEOUT: Final = _env_int("SONALITY_LLM_TIMEOUT", 90)
+# Per-HTTP-request timeout for LLM calls. 90s is sufficient for the chat response,
+# but knowledge extraction (1500-token prompt + 512-token output) needs ~130-150s on
+# a 35B model at ~4 tok/s. 180s gives a safe buffer for all task types.
+# Increase further for 70B+ models or throttled endpoints.
+LLM_REQUEST_TIMEOUT: Final = _env_int("SONALITY_LLM_TIMEOUT", 180)
 
 # Timeout for async ops dispatched from the sync context via run_coroutine_threadsafe.
 # Must exceed the maximum realistic duration of any single coroutine, which in the

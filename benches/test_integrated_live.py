@@ -55,6 +55,7 @@ from .scenario_runner import run_scenario
 pytestmark = [
     pytest.mark.bench,
     pytest.mark.live,
+    pytest.mark.timeout(14400),  # 4h: composed scenarios have up to 12 steps at ~1000s worst case
     pytest.mark.skipif(
         bool(config.missing_live_api_config()),
         reason=f"Missing live config: {config.missing_live_api_config()}",

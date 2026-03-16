@@ -158,21 +158,26 @@ Your response must end with ONLY the JSON object."""
 
 # --- LLM Listwise Reranking ---
 RERANK_PROMPT: Final = """\
-Given this query and candidate episodes, rank them by relevance.
+Rank these candidate episodes by topical relevance to the query. \
+A candidate is relevant only if it is about the SAME topic or subject matter as the query. \
+Do NOT rank a candidate higher because it contains rich factual detail if that detail is \
+about a completely different topic.
 
 Query: {query}
 
 Candidates:
 {numbered_candidates}
 
-Consider:
-- Semantic relevance to the query
-- Information completeness and specificity
-- Temporal relevance (recent context may be more relevant)
-- Cross-document reasoning (does one candidate provide context for another?)
+Ranking criteria (strict priority order):
+1. Topical match: Is the candidate about the same subject/topic as the query?
+2. Directness: Does it directly address the query without detours?
+3. Recency: Among topically matched candidates, prefer more recent ones.
 
-Respond with ONLY a JSON object. Example (if 3 candidates, ranking by relevance):
-{{"ranking": [3, 1, 2], "reasoning": "Candidate 3 is most directly relevant; candidate 1 provides useful context; candidate 2 is tangential."}}
+Assign rank 1 to the MOST relevant. Episodes about completely different topics should be \
+ranked last even if they are factually detailed.
+
+Respond with ONLY a JSON object. Example (if 3 candidates):
+{{"ranking": [3, 1, 2], "reasoning": "Candidate 3 is on-topic; candidate 1 partially relevant; candidate 2 is about a different subject."}}
 
 ranking must list every candidate index exactly once.
 Your response must end with ONLY the JSON object."""

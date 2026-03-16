@@ -16,6 +16,7 @@ SAMPLE_PATH = Path(__file__).resolve().parents[1] / "tests" / "data" / "ibm_argq
 pytestmark = [
     pytest.mark.bench,
     pytest.mark.live,
+    pytest.mark.timeout(7200),  # 2h: 50 ESS classification calls at ~60s each + overhead
     pytest.mark.skipif(
         bool(config.missing_live_api_config()),
         reason=f"Missing live config: {config.missing_live_api_config()}",

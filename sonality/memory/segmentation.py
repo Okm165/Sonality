@@ -99,6 +99,7 @@ class EventBoundaryDetector:
             response_model=BoundaryDetectionResponse,
             fallback=BoundaryDetectionResponse(),
             max_tokens=256,  # BOUNDARY/CONTINUE + type + short reasoning
+            assistant_prefix='{"boundary_decision": "',
         )
         if not result.success:
             log.warning(

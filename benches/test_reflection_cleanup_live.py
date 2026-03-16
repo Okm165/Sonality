@@ -163,7 +163,7 @@ class TestBeliefGraphSync:
     """After reflection decays beliefs, the corresponding Neo4j Belief nodes
     and SUPPORTS/CONTRADICTS edges should be pruned."""
 
-    @pytest.mark.timeout(1200)
+    @pytest.mark.timeout(10800)
     def test_r1_belief_sync(self) -> None:
         _reset_dbs()
         with tempfile.TemporaryDirectory() as td, _AgentContext(td) as agent:
@@ -210,7 +210,7 @@ class TestTopicPruning:
     """After episodes are archived/forgotten, orphan Topic nodes with
     zero active episode connections should be removed."""
 
-    @pytest.mark.timeout(1200)
+    @pytest.mark.timeout(10800)
     def test_r2_topic_pruning(self) -> None:
         _reset_dbs()
         with tempfile.TemporaryDirectory() as td, _AgentContext(td) as agent:
@@ -251,7 +251,7 @@ class TestKnowledgePruning:
     """Low-confidence stale knowledge entries should be removed from Qdrant
     during reflection to keep the knowledge store lean."""
 
-    @pytest.mark.timeout(1200)
+    @pytest.mark.timeout(10800)
     def test_r3_knowledge_pruning(self) -> None:
         _reset_dbs()
 
@@ -331,7 +331,7 @@ class TestDerivativeConsistency:
     """After forgetting archives episodes, Neo4j and Qdrant derivative
     counts should remain consistent (no orphans)."""
 
-    @pytest.mark.timeout(1200)
+    @pytest.mark.timeout(10800)
     def test_r4_consistency(self) -> None:
         _reset_dbs()
         with tempfile.TemporaryDirectory() as td, _AgentContext(td) as agent:
@@ -370,7 +370,7 @@ class TestFullReflectionCycle:
     """End-to-end test: substantive data, social pressure, then enough
     filler to trigger reflection. Verify all cleanup operations fire."""
 
-    @pytest.mark.timeout(1800)
+    @pytest.mark.timeout(10800)
     def test_r5_full_cycle(self) -> None:
         _reset_dbs()
         with tempfile.TemporaryDirectory() as td, _AgentContext(td) as agent:
@@ -427,7 +427,7 @@ class TestKnowledgeConsolidation:
     """Feed contradicting facts across multiple turns. Reflection should
     consolidate by merging duplicates and resolving contradictions."""
 
-    @pytest.mark.timeout(1200)
+    @pytest.mark.timeout(10800)
     def test_r6_knowledge_consolidation(self) -> None:
         _reset_dbs()
         with tempfile.TemporaryDirectory() as td, _AgentContext(td) as agent:

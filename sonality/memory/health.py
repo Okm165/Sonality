@@ -87,6 +87,7 @@ def assess_health(sponge: SpongeState) -> HealthReport:
         prompt=prompt,
         response_model=HealthResponse,
         fallback=HealthResponse(),
+        assistant_prefix='{"overall_health": "',
     )
     if not result.success:
         log.warning("Health assessment parse failed (using default fallback): %s", result.error)

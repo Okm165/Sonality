@@ -91,6 +91,7 @@ class ForgettingEngine:
                 snapshot_excerpt=snapshot_excerpt or "No snapshot available",
             ),
             response_model=BatchForgettingResponse,
+            assistant_prefix='{"decisions": [',
             fallback=BatchForgettingResponse(
                 decisions=[
                     ForgettingDecision(

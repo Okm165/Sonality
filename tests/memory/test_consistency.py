@@ -11,7 +11,7 @@ from qdrant_client.models import PointStruct
 from sonality import config
 from sonality.memory.derivatives import DerivativeChunker
 from sonality.memory.dual_store import DualEpisodeStore
-from sonality.memory.embedder import ExternalEmbedder
+from sonality.memory.embedder import Embedder
 from sonality.memory.graph import MemoryGraph
 
 if TYPE_CHECKING:
@@ -50,7 +50,7 @@ def test_verify_consistency_cleans_orphans(isolated_both: ContainerConfig) -> No
                 points=[
                     PointStruct(
                         id=uid_a,
-                        vector=vector,
+                        vector={"dense": vector},
                         payload={
                             "uid": uid_a,
                             "episode_uid": "ep-a",
@@ -63,7 +63,7 @@ def test_verify_consistency_cleans_orphans(isolated_both: ContainerConfig) -> No
                     ),
                     PointStruct(
                         id=uid_b,
-                        vector=vector,
+                        vector={"dense": vector},
                         payload={
                             "uid": uid_b,
                             "episode_uid": "ep-b",
@@ -84,7 +84,7 @@ def test_verify_consistency_cleans_orphans(isolated_both: ContainerConfig) -> No
                 graph=graph,
                 qdrant=qdrant,
                 chunker=cast(DerivativeChunker, _UnusedChunker()),
-                embedder=cast(ExternalEmbedder, _UnusedEmbedder()),
+                embedder=cast(Embedder, _UnusedEmbedder()),
             )
             orphans = await store.verify_consistency()
             assert set(orphans) == {uid_a, uid_c}

@@ -7,6 +7,7 @@ Bi-temporal tracking with created_at/valid_at/expired_at on episodes.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import re
 from collections.abc import Mapping
@@ -773,6 +774,146 @@ class MemoryGraph:
                 except ValueError:
                     continue
             return max(counters, default=0)
+
+    # --- Graph Data Science algorithms ---
+
+    async def compute_episode_importance(self) -> int:
+        """Compute PageRank importance scores for all episodes.
+
+        PageRank models "importance" as: an episode is important if it's
+        connected to other important episodes/topics/beliefs. Replaces
+        heuristic utility_score with principled graph-based importance.
+        """
+        async with self._driver.session(database=_DB) as session:
+            with contextlib.suppress(Exception):
+                await session.run("CALL gds.graph.drop('episode_importance', false)")
+            await session.run("""
+                CALL gds.graph.project(
+                    'episode_importance',
+                    ['Episode', 'Topic', 'Belief'],
+                    {
+                        DISCUSSES: {orientation: 'UNDIRECTED'},
+                        SUPPORTS_BELIEF: {orientation: 'UNDIRECTED'},
+                        CONTRADICTS_BELIEF: {orientation: 'UNDIRECTED'},
+                        TEMPORAL_NEXT: {orientation: 'NATURAL'}
+                    }
+                )
+            """)
+            result = await session.run("""
+                CALL gds.pageRank.write('episode_importance', {
+                    writeProperty: 'importance_score',
+                    dampingFactor: 0.85,
+                    maxIterations: 20,
+                    tolerance: 0.0001
+                })
+                YIELD nodePropertiesWritten
+                RETURN nodePropertiesWritten
+            """)
+            record = await result.single()
+            updated = int(record["nodePropertiesWritten"]) if record else 0
+            await session.run("CALL gds.graph.drop('episode_importance', false)")
+            log.info("PageRank updated %d nodes", updated)
+            return updated
+
+    async def detect_topic_communities(self) -> int:
+        """Detect topic communities using Louvain algorithm.
+
+        Groups densely connected topics for better retrieval context.
+        Returns number of communities detected.
+        """
+        async with self._driver.session(database=_DB) as session:
+            result = await session.run("""
+                MATCH ()-[r:CORRELATES_WITH]->() RETURN count(r) AS cnt
+            """)
+            record = await result.single()
+            if not record or record["cnt"] == 0:
+                log.debug("No CORRELATES_WITH edges; skipping community detection")
+                return 0
+            with contextlib.suppress(Exception):
+                await session.run("CALL gds.graph.drop('topic_communities', false)")
+            await session.run("""
+                CALL gds.graph.project(
+                    'topic_communities',
+                    'Topic',
+                    {CORRELATES_WITH: {orientation: 'UNDIRECTED', properties: 'strength'}}
+                )
+            """)
+            result = await session.run("""
+                CALL gds.louvain.write('topic_communities', {
+                    writeProperty: 'community_id',
+                    relationshipWeightProperty: 'strength',
+                    includeIntermediateCommunities: false
+                })
+                YIELD communityCount
+                RETURN communityCount
+            """)
+            record = await result.single()
+            communities = int(record["communityCount"]) if record else 0
+            await session.run("CALL gds.graph.drop('topic_communities', false)")
+            log.info("Louvain detected %d topic communities", communities)
+            return communities
+
+    async def find_similar_episodes(
+        self,
+        episode_uid: str,
+        top_k: int = 5,
+        min_similarity: float = 0.3,
+    ) -> list[tuple[str, float]]:
+        """Find structurally similar episodes using Node Similarity.
+
+        Compares episodes based on shared neighbors (topics, beliefs) using
+        Jaccard coefficient. Complements embedding-based similarity with graph structure.
+        """
+        async with self._driver.session(database=_DB) as session:
+            with contextlib.suppress(Exception):
+                await session.run("CALL gds.graph.drop('episode_similarity', false)")
+            await session.run("""
+                CALL gds.graph.project(
+                    'episode_similarity',
+                    ['Episode', 'Topic'],
+                    {DISCUSSES: {orientation: 'UNDIRECTED'}}
+                )
+            """)
+            result = await session.run("""
+                CALL gds.nodeSimilarity.stream('episode_similarity', {
+                    topK: $top_k,
+                    similarityCutoff: $min_sim
+                })
+                YIELD node1, node2, similarity
+                WITH gds.util.asNode(node1) AS e1, gds.util.asNode(node2) AS e2, similarity
+                WHERE e1.uid = $uid AND e2:Episode
+                RETURN e2.uid AS similar_uid, similarity
+                ORDER BY similarity DESC
+            """, uid=episode_uid, top_k=top_k, min_sim=min_similarity)
+            records = [r async for r in result]
+            await session.run("CALL gds.graph.drop('episode_similarity', false)")
+            return [(str(r["similar_uid"]), float(r["similarity"])) for r in records]
+
+    async def get_episodes_by_importance(
+        self, limit: int = 20, min_importance: float = 0.0
+    ) -> list[EpisodeNode]:
+        """Get most important episodes by PageRank score."""
+        async with self._driver.session(database=_DB) as session:
+            result = await session.run("""
+                MATCH (e:Episode)
+                WHERE NOT e.archived AND coalesce(e.importance_score, 0) >= $min_imp
+                RETURN e
+                ORDER BY e.importance_score DESC
+                LIMIT $limit
+            """, min_imp=min_importance, limit=limit)
+            return [_record_to_episode(r["e"]) async for r in result]
+
+    async def get_topic_community(self, topic: str) -> list[str]:
+        """Get all topics in the same community as the given topic."""
+        async with self._driver.session(database=_DB) as session:
+            result = await session.run("""
+                MATCH (t1:Topic {name: $topic})
+                MATCH (t2:Topic)
+                WHERE t2.community_id = t1.community_id AND t2.name <> $topic
+                RETURN t2.name AS topic
+                ORDER BY t2.episode_count DESC
+            """, topic=topic.strip().lower())
+            return [str(r["topic"]) async for r in result]
 
 
 def _record_to_episode(node: Mapping[str, object]) -> EpisodeNode:

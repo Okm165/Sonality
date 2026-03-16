@@ -21,13 +21,22 @@ _LLM_SEMAPHORE: threading.Semaphore = threading.Semaphore(1)
 
 _LLM_REQUEST_TIMEOUT: int = config.LLM_REQUEST_TIMEOUT  # seconds per attempt
 
+# Set while the main interaction thread is inside respond() — routing, chat, and
+# post-processing all hold this.  Background workers check it before starting any
+# LLM call so they never preempt critical-path operations even when the semaphore
+# is momentarily free (e.g. between routing and reranking).
+interaction_active: threading.Event = threading.Event()
+
 
 def llm_semaphore_idle() -> bool:
-    """Return True if the LLM semaphore is free (non-blocking probe).
+    """Return True if the LLM semaphore is free AND no interaction is active.
 
-    Background workers (e.g. STM consolidator) use this to avoid preempting
-    the main interaction thread. Subject to TOCTOU races; treat as advisory.
+    Background workers (e.g. STM consolidator, semantic ingestion) use this to
+    avoid preempting the main interaction thread. Subject to TOCTOU races;
+    treat as advisory.
     """
+    if interaction_active.is_set():
+        return False
     acquired = _LLM_SEMAPHORE.acquire(blocking=False)
     if acquired:
         _LLM_SEMAPHORE.release()
@@ -344,14 +353,14 @@ def chat_completion(
     temperature: float = -1.0,
     tools: Sequence[Mapping[str, object]] = (),
     tool_choice: Mapping[str, object] = _EMPTY_MAPPING,
+    enable_thinking: bool = True,
 ) -> ChatResult:
     payload: dict[str, object] = {
         "model": model,
         "messages": [dict(message) for message in messages],
         "max_tokens": max_tokens,
     }
-    # Keep model reasoning enabled, but strip chain-of-thought from returned text.
-    payload["chat_template_kwargs"] = {"enable_thinking": True}
+    payload["chat_template_kwargs"] = {"enable_thinking": enable_thinking}
     if temperature >= 0.0:
         payload["temperature"] = temperature
     if tools:

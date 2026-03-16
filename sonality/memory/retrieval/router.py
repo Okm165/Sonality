@@ -82,6 +82,7 @@ class QueryRouter:
             response_model=RoutingResponse,
             fallback=RoutingResponse(),
             max_tokens=256,  # category + depth + flags + short reasoning
+            assistant_prefix='{"category": "',  # prefill to force JSON output
         )
 
         if result.success:
@@ -89,12 +90,20 @@ class QueryRouter:
             category = response.category
             depth = response.depth
 
+            # BELIEF_QUERY always requires semantic search — override LLM decision.
+            # Belief retrieval depends on vector similarity; graph-only lookup misses cross-topic matches.
+            semantic_memory = (
+                SemanticMemoryDecision.SEARCH
+                if category == QueryCategory.BELIEF_QUERY
+                else response.semantic_memory
+            )
+
             decision = RoutingDecision(
                 category=category,
                 depth=depth,
                 n_results=DEPTH_TO_COUNT[depth],
                 temporal_expansion=response.temporal_expansion,
-                semantic_memory=response.semantic_memory,
+                semantic_memory=semantic_memory,
                 reasoning=response.reasoning,
             )
             log.info(

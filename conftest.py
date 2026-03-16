@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import logging
 import sys
-import urllib.request
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -25,15 +24,8 @@ _CONSOLE_LOGGERS = ("sonality.agent", "sonality.memory.knowledge_extract", "benc
 
 
 def _embedding_service_available() -> bool:
-    """Ping the configured embedding endpoint; return True if reachable."""
-    from sonality import config as cfg
-
-    url = cfg.EMBEDDING_BASE_URL.rstrip("/").replace("/v1", "") + "/api/tags"
-    try:
-        urllib.request.urlopen(url, timeout=3)
-        return True
-    except Exception:
-        return False
+    """Check if embedding is available. Always True with local FastEmbed."""
+    return True
 
 
 def pytest_configure(config: pytest.Config) -> None:

@@ -50,18 +50,31 @@ def _raw_call(
     model: str,
     max_tokens: int,
     system: str = "",
+    assistant_prefix: str = "",
 ) -> str:
-    """Execute a single provider chat completion and return plain text."""
+    """Execute a single provider chat completion and return plain text.
+
+    assistant_prefix: if non-empty, added as the last message with role=assistant
+    so the model continues from it (prefilling). Use to force JSON output by
+    prefixing with the opening of the expected structure, e.g. ``{"propositions": [``.
+    The prefix is prepended to the returned text so callers get a complete string.
+    """
     messages: list[dict[str, str]] = []
     if system:
         messages.append({"role": "system", "content": system})
     messages.append({"role": "user", "content": prompt})
+    if assistant_prefix:
+        messages.append({"role": "assistant", "content": assistant_prefix})
     completion = chat_completion(
         model=model,
         messages=tuple(messages),
         max_tokens=max_tokens,
+        # Prefilled assistant turns are incompatible with enable_thinking on most servers.
+        # Thinking mode also hurts JSON tasks: the model reasons in the thinking trace then
+        # fails to produce valid JSON in content. Disable it for all structured llm_call uses.
+        enable_thinking=False,
     )
-    return completion.text
+    return (assistant_prefix + completion.text) if assistant_prefix else completion.text
 
 
 def _parse_json(text: str) -> dict[str, object] | list[object]:
@@ -96,6 +109,7 @@ def llm_call[T: BaseModel](
     max_tokens: int = config.FAST_LLM_MAX_TOKENS,
     system: str = _JSON_SYSTEM_PROMPT,
     max_retries: int = _MAX_RETRIES,
+    assistant_prefix: str = "",
 ) -> LLMCallResult[T]:
     """Execute a structured LLM call with retry, repair, and fallback.
 
@@ -135,6 +149,7 @@ def llm_call[T: BaseModel](
                 model=model,
                 max_tokens=max_tokens,
                 system=system,
+                assistant_prefix=assistant_prefix,
             )
             data = _parse_json(raw_text)
             value = response_model.model_validate(data)

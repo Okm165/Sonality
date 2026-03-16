@@ -103,6 +103,7 @@ class SplitQueryAgent:
             response_model=DecompositionResponse,
             fallback=DecompositionResponse(sub_queries=[query]),
             max_tokens=256,  # 2-4 sub-queries + aggregation strategy
+            assistant_prefix='{"sub_queries": [',
         )
         if not result.success:
             return DecompositionResponse(

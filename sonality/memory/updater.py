@@ -62,7 +62,8 @@ def extract_insight(
         response_model=InsightExtractionResponse,
         fallback=InsightExtractionResponse(),
         model=model,
-        max_tokens=256,  # SKIP or one short sentence — small output
+        max_tokens=128,  # SKIP or one short sentence — small output
+        assistant_prefix='{"insight_decision": "',
     )
     if not result.success:
         log.warning("Insight extraction parse failed (returning empty): %s", result.error)

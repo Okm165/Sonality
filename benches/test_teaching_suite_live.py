@@ -57,6 +57,7 @@ def _missing_artifact_message(artifact_name: str) -> str:
 
 @pytest.mark.bench
 @pytest.mark.live
+@pytest.mark.timeout(14400)  # 4h: slow inference servers need extended budget per step
 @bench_live
 def test_teaching_suite_benchmark(
     bench_profile: EvalProfile,

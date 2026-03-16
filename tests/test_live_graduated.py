@@ -27,7 +27,7 @@ from pydantic import BaseModel
 
 from sonality import config
 from sonality.llm.caller import LLMCallResult, llm_call
-from sonality.memory.embedder import ExternalEmbedder
+from sonality.memory.embedder import Embedder
 from sonality.provider import chat_completion, parse_json_object
 
 # Top-level parser tests do NOT call the LLM and run without -m live.
@@ -207,7 +207,7 @@ class TestL1RawResponse:
     def test_embedding_returns_correct_dimensions(self) -> None:
         """Embedding a short sentence returns the configured dimension count."""
         t = time.perf_counter()
-        embedder = ExternalEmbedder()
+        embedder = Embedder()
         vec = embedder.embed_query("hello world")
         elapsed = _elapsed(t)
 
@@ -220,7 +220,7 @@ class TestL1RawResponse:
     def test_embedding_batch_consistent(self) -> None:
         """Batch embedding two texts returns two vectors of the right size."""
         t = time.perf_counter()
-        embedder = ExternalEmbedder()
+        embedder = Embedder()
         vecs = embedder.embed_documents(["cats are fluffy", "dogs are loyal"])
         elapsed = _elapsed(t)
 
@@ -493,7 +493,7 @@ class TestL3MemoryPrimitives:
         from qdrant_client.models import PointStruct
 
         t = time.perf_counter()
-        embedder = ExternalEmbedder()
+        embedder = Embedder()
         text = "The quick brown fox jumps over the lazy dog."
         vec = embedder.embed_documents([text])[0]
 
@@ -526,7 +526,7 @@ class TestL3MemoryPrimitives:
     def test_embedding_semantic_ordering(self) -> None:
         """Two semantically similar sentences should be closer than a dissimilar one."""
         t = time.perf_counter()
-        embedder = ExternalEmbedder()
+        embedder = Embedder()
         vecs = embedder.embed_documents(
             [
                 "The cat sat on the mat.",  # anchor
@@ -549,7 +549,7 @@ class TestL3MemoryPrimitives:
         from qdrant_client import QdrantClient
         from qdrant_client.models import PointStruct
 
-        embedder = ExternalEmbedder()
+        embedder = Embedder()
         docs = [
             ("test-grad-nn-1", "ep-nn", "Quantum computing uses qubits for superposition."),
             ("test-grad-nn-2", "ep-nn", "The best pizza in Naples uses buffalo mozzarella."),
@@ -932,7 +932,7 @@ class TestL3xMemoryStoreRetrieve:
         """DerivativeChunker.chunk_and_embed returns ≥1 derivatives with correct dim."""
         from sonality.memory.derivatives import DerivativeChunker
 
-        embedder = ExternalEmbedder()
+        embedder = Embedder()
         chunker = DerivativeChunker(embedder)
 
         t = time.perf_counter()
@@ -966,9 +966,9 @@ class TestL3xMemoryStoreRetrieve:
         from qdrant_client.models import PointStruct
 
         from sonality.memory.derivatives import DerivativeChunker
-        from sonality.memory.embedder import ExternalEmbedder
+        from sonality.memory.embedder import Embedder
 
-        embedder = ExternalEmbedder()
+        embedder = Embedder()
         chunker = DerivativeChunker(embedder)
 
         ep_uid = f"test-store-{uuid.uuid4().hex[:8]}"

@@ -16,7 +16,7 @@ from pydantic import BaseModel, field_validator, model_validator
 
 from ..llm.caller import llm_call
 from ..llm.prompts import CHUNKING_PROMPT
-from .embedder import ExternalEmbedder
+from .embedder import Embedder
 from .graph import DerivativeNode
 
 log = logging.getLogger(__name__)
@@ -39,11 +39,8 @@ class ChunkItem(BaseModel):
         """Accept placeholder patterns ('...', 'high/medium/low') → MEDIUM fallback."""
         if not isinstance(v, str):
             return v
-        # Take first slash-separated option, then try to match enum
         candidate = v.split("/")[0].strip().lower()
-        if candidate in ("", "...", "none"):
-            return ChunkImportance.MEDIUM
-        return candidate
+        return ChunkImportance.MEDIUM if candidate in ("", "...", "none") else candidate
 
 
 class ChunkingResponse(BaseModel):
@@ -62,7 +59,7 @@ class ChunkingResponse(BaseModel):
 
 @dataclass(frozen=True, slots=True)
 class DerivativeWithEmbedding:
-    """A derivative chunk with its pre-computed embedding."""
+    """A derivative chunk with its pre-computed dense embedding."""
 
     node: DerivativeNode
     embedding: list[float]
@@ -71,29 +68,20 @@ class DerivativeWithEmbedding:
 class DerivativeChunker:
     """LLM-based semantic chunking of episode text into derivatives."""
 
-    def __init__(self, embedder: ExternalEmbedder) -> None:
+    def __init__(self, embedder: Embedder) -> None:
         self._embedder = embedder
 
-    def chunk_and_embed(
-        self,
-        text: str,
-        episode_uid: str,
-    ) -> list[DerivativeWithEmbedding]:
-        """Split text into semantic chunks and embed each one.
-
-        Returns a list of DerivativeWithEmbedding. On LLM failure, falls back
-        to treating the entire text as a single derivative.
-        """
+    def chunk_and_embed(self, text: str, episode_uid: str) -> list[DerivativeWithEmbedding]:
+        """Split text into semantic chunks and embed each one."""
         result = llm_call(
             prompt=CHUNKING_PROMPT.format(text=text),
             response_model=ChunkingResponse,
             fallback=ChunkingResponse(chunks=[]),
-            # 5-15 chunks x ~40 tokens each; no benefit in retrying if server is busy.
             max_tokens=512,
             max_retries=1,
+            assistant_prefix='{"chunks": [',
         )
         if result.success:
-            # Filter out placeholder/empty chunks from template-copying LLM responses
             chunks: list[ChunkItem] = [
                 c for c in result.value.chunks if c.text.strip() and c.text.strip() != "..."
             ]
@@ -104,10 +92,11 @@ class DerivativeChunker:
         if not chunks:
             chunks = [ChunkItem(text=text, key_concept="full_content")]
 
-        embeddings = self._embedder.embed_documents([c.text for c in chunks])
-
+        texts = [c.text for c in chunks]
+        embeddings = self._embedder.embed_documents(texts)
         results: list[DerivativeWithEmbedding] = []
-        for i, (chunk, embedding) in enumerate(zip(chunks, embeddings, strict=True)):
+
+        for i, (chunk, emb) in enumerate(zip(chunks, embeddings, strict=True)):
             node = DerivativeNode(
                 uid=str(uuid.uuid5(uuid.NAMESPACE_OID, f"{episode_uid}:{i}")),
                 source_episode_uid=episode_uid,
@@ -115,7 +104,7 @@ class DerivativeChunker:
                 key_concept=chunk.key_concept,
                 sequence_num=i,
             )
-            results.append(DerivativeWithEmbedding(node=node, embedding=embedding))
+            results.append(DerivativeWithEmbedding(node=node, embedding=emb))
 
         log.debug("Chunked episode %s into %d derivatives", episode_uid[:8], len(results))
         return results

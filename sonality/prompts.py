@@ -164,13 +164,29 @@ urgency decision guidance:
 - standard: routine reports, scheduled announcements, regular analysis, ongoing developments
 - low: historical analysis, background context, educational content, retrospective summaries
 
+opinion_direction — the directional stance of the user's message on the central claim:
+- supports: user makes a positive argument, presents evidence FOR a claim, or reinforces a \
+  position (initial argument-building, corroborating evidence, pro statements)
+- opposes: user makes a negative argument, presents counter-evidence AGAINST a claim, challenges \
+  an established position, or argues that a previous claim is wrong or incomplete; counter-evidence \
+  messages, rebuttals, and CVE/study citations that undermine a prior claim count as opposes
+- neutral: user makes no directional claim (questions, session recaps, greetings, requests to \
+  summarize, emotional appeals without factual content)
+
+CRITICAL: A message containing counter-evidence, named contradictory data, or a direct challenge \
+to any claim made earlier in the conversation MUST be classified as opposes — even if phrased \
+as a hedged observation ("studies also find that X can fail under Y conditions").
+
 Exact enum values for required fields:
 - reasoning_type: no_argument | anecdotal | emotional_appeal | social_pressure | debunked_claim | \
   expert_opinion | empirical_data | logical_argument | news_report | aggregated_sentiment
 - opinion_direction: supports | opposes | neutral
 - source_reliability: not_applicable | unverified_claim | casual_observation | informed_opinion | \
   established_expert | peer_reviewed
-- knowledge_density: none | low | moderate | high"""
+- knowledge_density: none | low | moderate | high
+  (none=greetings/chitchat/bare questions; low=opinions/social; moderate=at least one verifiable fact or citation; \
+high=multiple specific data points, statistics, or named-source exposition — \
+any message with specific numbers, percentages, or named sources is at least moderate)"""
 
 
 INSIGHT_PROMPT = """\

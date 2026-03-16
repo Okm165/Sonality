@@ -43,15 +43,12 @@ help: ## Show available commands
 
 # --- Setup ---
 
-.PHONY: install install-dev schema-scripts
+.PHONY: install install-dev
 install: ## Install dependencies with uv (creates local .venv)
 	uv sync --no-group dev
 
 install-dev: ## Install with dev dependencies (ruff, pytest, mypy)
 	uv sync
-
-schema-scripts: ## Regenerate database init scripts from sonality/schema.py
-	@uv run python -c "from sonality.schema import write_all_init_scripts; pg, neo = write_all_init_scripts(); print(f'Generated {pg} and {neo}')"
 
 # --- Database ---
 
@@ -141,7 +138,7 @@ test-live-report: ## Run live tests with detailed output
 	@echo ""
 	@echo "Live test report written to test-live-report.xml"
 
-.PHONY: bench-teaching bench-teaching-lean bench-teaching-high bench-teaching-profile bench-teaching-smoke bench-teaching-pulse bench-teaching-rapid bench-teaching-first-signal bench-plan-segments bench-teaching-segmented bench-select-failures-last bench-teaching-failures-last bench-teaching-contextual bench-teaching-hotspots bench-select-hotspots-last bench-teaching-hotspots-auto bench-teaching-safety bench-teaching-development bench-teaching-iterate bench-memory bench-personality bench-report-last bench-report-failures-last bench-report-root bench-report-memory-root bench-report-beliefs-last bench-report-insights-root bench-report-delta-last bench-signal-gate-last
+.PHONY: memory-diagnostics memory-diagnostics-fix bench-teaching bench-teaching-lean bench-teaching-high bench-teaching-profile bench-teaching-smoke bench-teaching-pulse bench-teaching-rapid bench-teaching-first-signal bench-plan-segments bench-teaching-segmented bench-select-failures-last bench-teaching-failures-last bench-teaching-contextual bench-teaching-hotspots bench-select-hotspots-last bench-teaching-hotspots-auto bench-teaching-safety bench-teaching-development bench-teaching-iterate bench-memory bench-personality bench-report-last bench-report-failures-last bench-report-root bench-report-memory-root bench-report-beliefs-last bench-report-insights-root bench-report-delta-last bench-signal-gate-last
 bench-teaching: ## Run teaching benchmark suite (default profile, API required)
 	$(BENCH_TEACHING_BASE) --bench-profile default \
 		--bench-pack-group $(BENCH_PACK_GROUP) --bench-packs "$(BENCH_PACKS)"
@@ -310,6 +307,12 @@ bench-teaching-iterate: ## Run staged pipeline from BENCH_ITERATE_STAGES, stop o
 			stage_idx=$$((stage_idx + 1)); \
 		done
 
+memory-diagnostics: ## Run Neo4j + Qdrant memory health diagnostics
+	uv run python scripts/memory_diagnostics.py
+
+memory-diagnostics-fix: ## Run memory diagnostics and auto-fix orphan derivatives
+	uv run python scripts/memory_diagnostics.py --fix-orphans
+
 bench-memory: ## Run memory-structure and memory-leakage benchmark slices
 	$(BENCH_TEACHING_BASE) --bench-profile default --bench-pack-group memory
 
@@ -357,37 +360,14 @@ docker-run: ## Run agent in Docker (interactive)
 
 .PHONY: sponge shifts
 sponge: ## Show current sponge state (JSON)
-	@python -m json.tool data/sponge.json 2>/dev/null || echo "No sponge yet. Run 'make run' first."
+	@uv run python -m json.tool data/sponge.json 2>/dev/null || echo "No sponge yet. Run 'make run' first."
 
 shifts: ## Show recent personality shifts
-	@python -c "import json; d=json.load(open('data/sponge.json')); \
+	@uv run python -c "import json; d=json.load(open('data/sponge.json')); \
 		shifts=d.get('recent_shifts',[]); \
 		[print(f'  #{s[\"interaction\"]} ({s[\"magnitude\"]:.3f}): {s[\"description\"]}') for s in shifts] \
 		if shifts else print('  No shifts recorded.')" \
 		2>/dev/null || echo "No sponge yet."
-
-# --- Dataset Testing ---
-
-.PHONY: test-datasets test-moral test-sycophancy test-nct
-test-datasets: ## Download and cache priority test datasets
-	@echo "Fetching DailyDilemmas..."
-	uv run python -c "from datasets import load_dataset; ds=load_dataset('kellycyy/daily_dilemmas', split='test[:100]'); print(f'  DailyDilemmas: {len(ds)} scenarios loaded')" 2>/dev/null || \
-		echo "  DailyDilemmas unavailable (check dataset access or split)"
-	@echo "Fetching CMV-cleaned..."
-	uv run python -c "from datasets import load_dataset; ds=load_dataset('Siddish/change-my-view-subreddit-cleaned', split='train[:50]'); print(f'  CMV-cleaned: {len(ds)} threads loaded')" 2>/dev/null || \
-		echo "  Install datasets: uv add datasets"
-	@echo "Fetching GlobalOpinionQA..."
-	uv run python -c "from datasets import load_dataset; ds=load_dataset('Anthropic/llm_global_opinions', split='train[:50]'); print(f'  GlobalOpinionQA: {len(ds)} questions loaded')" 2>/dev/null || \
-		echo "  Install datasets: uv add datasets"
-
-test-moral: ## Run moral consistency tests with DailyDilemmas (requires API key)
-	uv run pytest tests/ -v -k "moral or dilemma" --tb=short -s
-
-test-sycophancy: ## Run sycophancy resistance battery (requires API key)
-	uv run pytest benches/ -m "bench and live" -v -k "sycophancy or syc or elephant or persist" --tb=short -s
-
-test-nct: ## Run Narrative Continuity Test battery (requires API key)
-	uv run pytest benches/ -m "bench and live" -v -k "nct or continuity or persistence" --tb=short -s
 
 # --- Docs ---
 

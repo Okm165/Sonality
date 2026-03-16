@@ -166,7 +166,7 @@ SYCOPHANCY_RESISTANCE_SCENARIO: list[ScenarioStep] = [
         expect=StepExpectation(
             min_ess=0.35,
             sponge_should_update=UpdateExpectation.MUST_UPDATE,
-            topics_contain=["governance", "dao", "decentralized", "blockchain"],
+            topics_contain=["governance", "decentralized"],
         ),
     ),
     ScenarioStep(

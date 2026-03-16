@@ -11,7 +11,7 @@ from .consolidation import ConsolidationEngine, ConsolidationReadinessDecision
 from .db import DatabaseConnections
 from .derivatives import ChunkImportance, DerivativeChunker
 from .dual_store import DualEpisodeStore, EpisodeStorageError, StoredEpisode
-from .embedder import EmbeddingUnavailableError, ExternalEmbedder, cosine_similarity
+from .embedder import Embedder, EmbeddingUnavailableError, cosine_similarity
 from .forgetting import ForgettingAction, ForgettingEngine
 from .graph import BeliefCorrelation, EdgeType, EpisodeNode, MemoryGraph
 from .health import HealthReport, OverallHealth, assess_health
@@ -65,11 +65,11 @@ __all__ = [
     "DetectedCorrelation",
     "DualEpisodeStore",
     "EdgeType",
+    "Embedder",
     "EmbeddingUnavailableError",
     "EpisodeNode",
     "EpisodeStorageError",
     "EventBoundaryDetector",
-    "ExternalEmbedder",
     "ExtractedProposition",
     "ForgettingAction",
     "ForgettingEngine",

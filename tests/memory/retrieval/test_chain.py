@@ -12,7 +12,7 @@ from sonality.memory.retrieval.chain import ChainOfQueryAgent
 
 def _store_mock() -> DualEpisodeStore:
     store = AsyncMock(spec=DualEpisodeStore)
-    store.hybrid_search = AsyncMock(return_value=[("d1", "ep-1", 0.1)])
+    store.vector_search = AsyncMock(return_value=[("d1", "ep-1", 0.1)])
     return cast(DualEpisodeStore, store)
 
 

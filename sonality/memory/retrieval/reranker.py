@@ -66,6 +66,7 @@ def rerank_episodes(
         response_model=RerankResponse,
         fallback=RerankResponse(ranking=list(range(1, len(to_rank) + 1))),
         max_tokens=256,  # list of ints + short reasoning
+        assistant_prefix='{"ranking": [',  # prefill to force JSON output
     )
 
     if result.success:

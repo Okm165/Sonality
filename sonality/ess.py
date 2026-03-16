@@ -230,12 +230,19 @@ ESS_TOOL: Final = {
             "opinion_direction": {
                 "type": "string",
                 "enum": list(OPINION_DIRECTION_VALUES),
-                "description": "Whether the user supports, opposes, or is neutral toward the primary topic.",
+                "description": "Directional stance of the user's message: supports = positive argument or evidence FOR a claim; opposes = counter-evidence, rebuttal, or argument AGAINST a prior claim; neutral = no directional stance (questions, recaps, social).",
             },
             "knowledge_density": {
                 "type": "string",
                 "enum": list(KNOWLEDGE_DENSITY_VALUES),
-                "description": "Density of learnable factual/conceptual content: high (multiple verifiable claims or detailed exposition), moderate (some facts mixed with opinion/filler), low (mostly opinion or social), none (greetings, chitchat).",
+                "description": (
+                    "Density of learnable factual/conceptual content in the USER's message: "
+                    "high = multiple specific numbers, percentages, named sources, or detailed factual exposition; "
+                    "moderate = at least one verifiable fact, statistic, or citation; "
+                    "low = mostly user opinion, social commentary, or questions without data; "
+                    "none = greetings, chitchat, bare questions without data, or requests with no factual content. "
+                    "ANY message presenting specific data points, statistics, named sources, or technical facts MUST be at least 'moderate'."
+                ),
             },
             "belief_update_recommended": {
                 "type": "boolean",
@@ -549,7 +556,7 @@ def _run_classification_attempts(
         else:
             completion = chat_completion(
                 model=model,
-                max_tokens=config.FAST_LLM_MAX_TOKENS,
+                max_tokens=256,  # ESS tool call: ~150 tokens for score+type+topics+summary
                 temperature=0.0,
                 messages=(
                     {
@@ -559,6 +566,7 @@ def _run_classification_attempts(
                 ),
                 tools=(PROVIDER_ESS_TOOL,),
                 tool_choice=PROVIDER_ESS_TOOL_CHOICE,
+                enable_thinking=False,
             )
             total_input_tokens += completion.input_tokens
             total_output_tokens += completion.output_tokens
@@ -756,6 +764,17 @@ def classify(
             payload.defaulted_fields,
         )
 
+    # Consistency guard: empirical_data and expert_opinion inherently carry
+    # learnable content, so knowledge_density=NONE is contradictory.
+    kd = payload.knowledge_density
+    if kd == KnowledgeDensity.NONE and payload.reasoning_type in (
+        ReasoningType.EMPIRICAL_DATA,
+        ReasoningType.EXPERT_OPINION,
+        ReasoningType.NEWS_REPORT,
+    ):
+        kd = KnowledgeDensity.LOW
+        log.debug("ESS: upgraded knowledge_density NONE→LOW for type=%s", payload.reasoning_type)
+
     result = ESSResult(
         score=_clamp(payload.score),
         reasoning_type=payload.reasoning_type,
@@ -765,7 +784,7 @@ def classify(
         topics=payload.topics,
         summary=payload.summary,
         opinion_direction=payload.opinion_direction,
-        knowledge_density=payload.knowledge_density,
+        knowledge_density=kd,
         belief_update_recommended=payload.belief_update_recommended,
         urgency=payload.urgency,
         defaulted_fields=payload.defaulted_fields,

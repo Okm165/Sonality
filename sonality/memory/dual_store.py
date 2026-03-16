@@ -19,10 +19,13 @@ from qdrant_client.models import (
     MatchText,
     MatchValue,
     PointStruct,
+    QuantizationSearchParams,
+    SearchParams,
 )
 
+from .. import config
 from .derivatives import DerivativeChunker, DerivativeWithEmbedding
-from .embedder import EmbeddingUnavailableError, ExternalEmbedder
+from .embedder import Embedder, EmbeddingUnavailableError
 from .graph import EpisodeNode, MemoryGraph
 
 log = logging.getLogger(__name__)
@@ -52,14 +55,14 @@ class DualEpisodeStore:
         graph: MemoryGraph,
         qdrant: AsyncQdrantClient,
         chunker: DerivativeChunker,
-        embedder: ExternalEmbedder,
+        embedder: Embedder,
     ) -> None:
         self._graph = graph
         self._qdrant = qdrant
         self._chunker = chunker
         self._embedder = embedder
         self._last_episode_uid = ""
-        self.has_episodes = False  # Set True after first successful store or on restore
+        self.has_episodes = False
 
     async def store(
         self,
@@ -81,8 +84,6 @@ class DualEpisodeStore:
         now = datetime.now(UTC).isoformat()
         content = f"User: {user_message}\nAssistant: {agent_response}"
 
-        # Phase 1: LLM chunking + embedding.
-        # chunk_and_embed makes sync LLM calls; run in thread to avoid blocking the event loop.
         try:
             derivatives = await asyncio.to_thread(
                 self._chunker.chunk_and_embed, content, episode_uid
@@ -99,7 +100,7 @@ class DualEpisodeStore:
             "Episode %s: %d derivatives, dims=%d, concepts=%s",
             episode_uid[:8],
             len(derivatives),
-            len(derivatives[0].embedding) if derivatives else 0,
+            len(derivatives[0].embedding),
             [d.node.key_concept[:20] for d in derivatives[:3]],
         )
         log.debug(
@@ -121,7 +122,6 @@ class DualEpisodeStore:
                 d.node.text.replace("\n", " "),
             )
 
-        # Phase 2: Neo4j graph writes (ACID transaction)
         episode_node = EpisodeNode(
             uid=episode_uid,
             content=content,
@@ -153,7 +153,6 @@ class DualEpisodeStore:
             log.error("Neo4j write failed for episode %s: %s", episode_uid[:8], exc)
             raise EpisodeStorageError(f"Neo4j write failed: {exc}") from exc
 
-        # Phase 3: Qdrant writes (after Neo4j success)
         try:
             await self._insert_derivatives_qdrant(derivatives, now)
         except Exception as exc:
@@ -180,25 +179,33 @@ class DualEpisodeStore:
         top_k: int = 20,
         text_filter: bool = False,
     ) -> list[tuple[str, str, float]]:
-        """Search Qdrant for similar derivatives. Returns (uid, episode_uid, score).
+        """Search Qdrant for similar derivatives using dense vectors.
 
-        When text_filter=True, adds a full-text "should" condition to boost exact
-        term matches (hybrid-lite: dense vector + text payload filter).
-        Falls back to text-only search when embedding is unavailable.
+        Returns (uid, episode_uid, score).
         """
         try:
             query_embedding = await asyncio.to_thread(self._embedder.embed_query, query)
         except Exception:
             log.debug("Embedding unavailable; falling back to text-only search", exc_info=True)
             return await self._text_only_search(query, top_k)
+
         must = [FieldCondition(key="archived", match=MatchValue(value=False))]
         should = [FieldCondition(key="text", match=MatchText(text=query))] if text_filter else None
+
         response = await self._qdrant.query_points(
             collection_name="derivatives",
             query=query_embedding,
+            using="dense",
             query_filter=Filter(must=must, should=should),
             limit=top_k,
             with_payload=True,
+            search_params=SearchParams(
+                hnsw_ef=config.QDRANT_SEARCH_EF,
+                quantization=QuantizationSearchParams(
+                    rescore=config.QDRANT_RESCORE_QUANTIZED,
+                    oversampling=2.0,
+                ),
+            ),
         )
         return [
             (str(p.payload.get("uid", "")), str(p.payload.get("episode_uid", "")), p.score or 0.0)
@@ -206,11 +213,7 @@ class DualEpisodeStore:
             if p.payload
         ]
 
-    async def _text_only_search(
-        self,
-        query: str,
-        top_k: int,
-    ) -> list[tuple[str, str, float]]:
+    async def _text_only_search(self, query: str, top_k: int) -> list[tuple[str, str, float]]:
         """Keyword-based fallback when embedding service is unavailable."""
         results, _ = await self._qdrant.scroll(
             collection_name="derivatives",
@@ -228,21 +231,6 @@ class DualEpisodeStore:
             for p in results
             if p.payload
         ]
-
-    async def hybrid_search(
-        self,
-        query: str,
-        top_k: int = 20,
-    ) -> list[tuple[str, str, float]]:
-        """Dense vector search boosted by full-text match on the 'text' payload field.
-
-        Uses Qdrant's `should` filter to surface derivatives that match query terms
-        exactly — improving recall on queries with specific names, numbers, or dates
-        (e.g. "IRENA 2023 solar cost") without requiring sparse vector configuration.
-
-        Returns (uid, episode_uid, score) sorted by cosine similarity descending.
-        """
-        return await self.vector_search(query, top_k=top_k, text_filter=True)
 
     async def archive_derivatives(self, episode_uid: str) -> None:
         """Mark derivatives as archived in Qdrant (soft delete)."""
@@ -303,7 +291,7 @@ class DualEpisodeStore:
         points = [
             PointStruct(
                 id=d.node.uid,
-                vector=d.embedding,
+                vector={"dense": d.embedding},
                 payload={
                     "uid": d.node.uid,
                     "episode_uid": d.node.source_episode_uid,

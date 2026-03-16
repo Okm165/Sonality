@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+import time
 from urllib.error import URLError
 
 import pytest
@@ -14,7 +16,6 @@ class TestTimeoutFailsFast:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """URLError wrapping TimeoutError propagates as RuntimeError with no retry sleep."""
-        import time
 
         from sonality import provider
 
@@ -41,7 +42,6 @@ class TestTimeoutFailsFast:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Bare TimeoutError (not wrapped in URLError) propagates as RuntimeError."""
-        import time
 
         from sonality import provider
 
@@ -92,7 +92,6 @@ class TestTimeoutFailsFast:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """DNS resolution failure raises immediately without retrying (name resolution)."""
-        import time
 
         from sonality import provider
 
@@ -112,6 +111,97 @@ class TestTimeoutFailsFast:
 
         assert call_count == 1
         assert elapsed < 1.0
+
+
+class TestLLMSemaphoreContention:
+    """Background workers must respect llm_semaphore_idle() to avoid preempting foreground calls."""
+
+    def test_semaphore_idle_when_free(self) -> None:
+        from sonality.provider import llm_semaphore_idle
+
+        assert llm_semaphore_idle() is True
+
+    def test_semaphore_busy_when_held(self) -> None:
+        from sonality import provider
+
+        barrier = threading.Barrier(2)
+        released = threading.Event()
+
+        def hold_semaphore() -> None:
+            with provider._LLM_SEMAPHORE:
+                barrier.wait()
+                released.wait(timeout=2.0)
+
+        t = threading.Thread(target=hold_semaphore, daemon=True)
+        t.start()
+        barrier.wait()
+        try:
+            assert provider.llm_semaphore_idle() is False, (
+                "Semaphore should appear busy while held by another thread"
+            )
+        finally:
+            released.set()
+            t.join(timeout=2.0)
+
+    def test_semantic_worker_skips_when_semaphore_busy(self) -> None:
+        """SemanticIngestionWorker._extract_features skips the LLM call when semaphore is busy."""
+        from unittest.mock import MagicMock, patch
+
+        from sonality import provider
+        from sonality.memory.semantic_features import SemanticIngestionWorker
+
+        embedder = MagicMock()
+        worker = SemanticIngestionWorker(qdrant_url="http://localhost:6333", embedder=embedder)
+
+        llm_call_count = 0
+
+        def fake_llm_call(**_kwargs: object) -> object:
+            nonlocal llm_call_count
+            llm_call_count += 1
+            from sonality.llm.caller import LLMCallResult
+            from sonality.memory.semantic_features import FeatureExtractionResponse
+            return LLMCallResult(value=FeatureExtractionResponse(), success=False, error="skipped")
+
+        # Acquire the semaphore to simulate main thread being busy
+        with provider._LLM_SEMAPHORE, patch("sonality.memory.semantic_features.llm_call", side_effect=fake_llm_call):
+            worker._extract_features("ep-uid-test", "some content", "personality")
+
+        # The semaphore was held → _extract_features should have skipped without calling llm_call
+        assert llm_call_count == 0, (
+            f"Expected 0 LLM calls when semaphore is busy but got {llm_call_count}. "
+            "SemanticIngestionWorker must check llm_semaphore_idle() before calling LLM."
+        )
+
+    def test_semantic_worker_proceeds_when_semaphore_free(self) -> None:
+        """SemanticIngestionWorker._extract_features runs the LLM call when semaphore is idle."""
+        from unittest.mock import MagicMock, patch
+
+        from sonality.llm.caller import LLMCallResult
+        from sonality.memory.semantic_features import (
+            FeatureExtractionResponse,
+            SemanticIngestionWorker,
+        )
+
+        embedder = MagicMock()
+        worker = SemanticIngestionWorker(qdrant_url="http://localhost:6333", embedder=embedder)
+
+        llm_call_count = 0
+
+        def fake_llm_call(**_kwargs: object) -> object:
+            nonlocal llm_call_count
+            llm_call_count += 1
+            return LLMCallResult(value=FeatureExtractionResponse(), success=False, error="test")
+
+        # Semaphore is free — worker should attempt the LLM call
+        with (
+            patch("sonality.memory.semantic_features.llm_call", side_effect=fake_llm_call),
+            patch.object(worker, "_load_existing_features", return_value=""),
+        ):
+            worker._extract_features("ep-uid-test", "some content", "personality")
+
+        assert llm_call_count == 1, (
+            f"Expected 1 LLM call when semaphore is free but got {llm_call_count}"
+        )
 
 
 class TestNormalizeSchemaNotation:

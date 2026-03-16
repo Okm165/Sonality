@@ -15,7 +15,6 @@ from enum import StrEnum
 
 from pydantic import BaseModel, field_validator, model_validator
 
-from .. import config
 from ..llm.caller import llm_call
 from ..llm.prompts import BATCH_BELIEF_UPDATE_PROMPT, BELIEF_UPDATE_PROMPT
 from .graph import EdgeType, MemoryGraph
@@ -203,6 +202,8 @@ async def assess_belief_evidence(
         prompt=prompt,
         response_model=BeliefUpdateResponse,
         fallback=BeliefUpdateResponse(direction=0.0, evidence_strength=0.0),
+        assistant_prefix='{"direction": ',
+        max_retries=1,
     )
     if not result.success:
         log.warning(
@@ -297,17 +298,18 @@ async def assess_belief_evidence_batch(
             BeliefUpdateResponse(topic=t, direction=0.0, evidence_strength=0.0) for t in topics
         ]
     )
-    # Each topic assessment needs ~300 output tokens; scale to avoid truncation.
-    # max_retries=2 caps worst-case at 2x LLM_REQUEST_TIMEOUT, keeping this call
-    # well within ASYNC_TIMEOUT even when a background worker holds the semaphore.
-    batch_max_tokens = max(config.FAST_LLM_MAX_TOKENS, len(topics) * 300)
+    # ~80 tokens per topic assessment (direction + strength + 1-sentence reasoning).
+    # 300 was excessive and caused 450s+ generation on a 4 tok/s model with 6 topics.
+    # Cap at 512 to bound latency; a truncated response recovers via the per-topic fallback.
+    batch_max_tokens = min(512, max(128, len(topics) * 80))
     result = await asyncio.to_thread(
         llm_call,
         prompt=prompt,
         response_model=BatchBeliefUpdateResponse,
         fallback=fallback,
         max_tokens=batch_max_tokens,
-        max_retries=2,
+        max_retries=1,
+        assistant_prefix='{"assessments": [',
     )
     if not result.success:
         # Server-side errors (transport timeout, network failure) mean the server is busy.

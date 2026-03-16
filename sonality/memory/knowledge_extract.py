@@ -36,7 +36,7 @@ from ..llm.prompts import (
     WINDOW_CONTEXT_SUMMARY_PROMPT,
 )
 from ..provider import chat_completion
-from .embedder import ExternalEmbedder, cosine_similarity
+from .embedder import Embedder, cosine_similarity
 from .sponge import SpongeState
 
 log = logging.getLogger(__name__)
@@ -125,6 +125,7 @@ def _split_windows(text: str) -> list[tuple[str, str]]:
                     },
                 ),
                 max_tokens=128,  # 2-4 sentence summary; no need for full FAST_LLM_MAX_TOKENS
+                enable_thinking=False,
             )
             prev_summary = result.text.strip()
         except Exception:
@@ -157,8 +158,18 @@ def _extract_propositions(text: str, preceding_context: str = "") -> list[Extrac
         prompt=KNOWLEDGE_EXTRACTION_PROMPT.format(text=prompt_text),
         response_model=ExtractionResponse,
         fallback=ExtractionResponse(),
+        max_tokens=384,  # 4-6 propositions (prefill forces JSON, ~60 tokens each)
+        max_retries=1,  # fail fast; retrying rarely helps prose-drift failures
+        assistant_prefix='{"propositions": [',  # prefill forces JSON output, bypasses prose drift
     )
     if not result.success:
+        # The model sometimes tries to output an empty array `[]` but corrupts the JSON
+        # when the assistant_prefix forces `[` — treat this as "nothing to extract".
+        raw = result.error.lower()
+        is_empty_attempt = any(kw in raw for kw in ('["]}', '[]', '"]}', '["'))
+        if is_empty_attempt:
+            log.debug("Knowledge extraction: model signalled empty list (no propositions)")
+            return []
         log.warning("Knowledge extraction parse failed: %s", result.error)
         return []
     return [
@@ -342,7 +353,7 @@ async def _persist_proposition(
 
     point = PointStruct(
         id=uid,
-        vector=embedding,
+        vector={"dense": embedding},
         payload={
             "uid": uid,
             "category": "knowledge",
@@ -367,7 +378,7 @@ async def extract_and_store_knowledge(
     text: str,
     episode_uid: str,
     qdrant: AsyncQdrantClient,
-    embedder: ExternalEmbedder,
+    embedder: Embedder,
     sponge: SpongeState,
     *,
     cooling_period: int = 3,
@@ -529,6 +540,7 @@ async def consolidate_knowledge(
         ),
         response_model=KnowledgeConsolidation,
         fallback=KnowledgeConsolidation(),
+        assistant_prefix='{"contradictions": [',
     )
     if not result.success:
         log.warning("Knowledge consolidation parse failed: %s", result.error)
@@ -637,7 +649,7 @@ async def prune_stale_knowledge(
 async def retrieve_relevant_knowledge(
     query: str,
     qdrant: AsyncQdrantClient,
-    embedder: ExternalEmbedder,
+    embedder: Embedder,
     top_k: int = 8,
     min_confidence: float = 0.3,
 ) -> list[str]:
@@ -656,6 +668,7 @@ async def retrieve_relevant_knowledge(
     response = await qdrant.query_points(
         collection_name="semantic_features",
         query=query_embedding,
+        using="dense",
         query_filter=Filter(
             must=[FieldCondition(key="category", match=MatchValue(value="knowledge"))]
         ),
@@ -758,6 +771,7 @@ async def detect_correlations(
         ),
         response_model=CorrelationDetectionResponse,
         fallback=CorrelationDetectionResponse(),
+        assistant_prefix='{"correlations": [',
     )
 
     if not result.success:

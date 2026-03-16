@@ -68,8 +68,7 @@ class ChainOfQueryAgent:
 
         for iteration in range(1, self._max_iterations + 1):
             iterations_used = iteration
-            # Hybrid search: RRF(vector, full-text) for better recall on exact terms
-            results = await self._store.hybrid_search(current_query, top_k=base_n)
+            results = await self._store.vector_search(current_query, top_k=base_n, text_filter=True)
             new_episode_uids = [r[1] for r in results if r[1] not in all_episode_uids]
 
             if new_episode_uids:
@@ -98,6 +97,7 @@ class ChainOfQueryAgent:
                 response_model=SufficiencyResponse,
                 fallback=SufficiencyResponse(),
                 max_tokens=256,  # SUFFICIENT/INSUFFICIENT + confidence + short reasoning
+                assistant_prefix='{"sufficiency_decision": "',
             )
             sufficiency = _suf.value
 

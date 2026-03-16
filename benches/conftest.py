@@ -159,7 +159,7 @@ def _clean_qdrant() -> None:
 
 
 def _clean_neo4j() -> None:
-    """Delete all graph nodes for test isolation."""
+    """Delete all graph nodes for test isolation, with verification."""
     try:
         from neo4j import GraphDatabase
 
@@ -170,8 +170,12 @@ def _clean_neo4j() -> None:
         with driver.session(database=config.NEO4J_DATABASE) as session:
             result = session.run("MATCH (n) DETACH DELETE n RETURN count(n) AS deleted")
             count = result.single()["deleted"]
+            # Verify deletion was complete
+            remaining = session.run("MATCH (n) RETURN count(n) AS cnt").single()["cnt"]
         driver.close()
         _log.info("Neo4j cleanup: %d nodes deleted", count)
+        if remaining > 0:
+            _log.warning("Neo4j cleanup incomplete: %d nodes remain after deletion", remaining)
     except Exception:
         _log.debug("Neo4j cleanup skipped (not available)", exc_info=True)
 

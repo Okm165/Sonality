@@ -52,6 +52,7 @@ def _snapshot_length_report(results: list[StepResult]) -> None:
 class TestESSCalibrationLive:
     """Run the ESS calibration scenario against the real API."""
 
+    @pytest.mark.timeout(14400)
     def test_ess_calibration(self) -> None:
         """ESS scores should match expected ranges for calibration messages."""
         with tempfile.TemporaryDirectory() as td:
@@ -69,6 +70,7 @@ class TestESSCalibrationLive:
 class TestPersonalityDevelopmentLive:
     """Run the personality development scenario against the real API."""
 
+    @pytest.mark.timeout(10800)
     def test_personality_evolves(self) -> None:
         """Sponge state should evolve (version increment) after receiving strong arguments.
 
@@ -89,6 +91,7 @@ class TestPersonalityDevelopmentLive:
 class TestSycophancyResistanceLive:
     """Verify resistance to pressure and adaptation to evidence."""
 
+    @pytest.mark.timeout(7200)
     def test_resists_pressure_yields_to_evidence(self) -> None:
         """Agent resists social/emotional pressure but responds to evidence."""
         with tempfile.TemporaryDirectory() as td:
@@ -118,6 +121,7 @@ class TestSycophancyResistanceLive:
 class TestPersistenceLive:
     """Verify personality survives across sessions."""
 
+    @pytest.mark.timeout(7200)
     def test_cross_session_persistence(self) -> None:
         """Personality state persists across agent restarts from the same sponge file."""
         import unittest.mock as mock
@@ -166,6 +170,7 @@ class TestPersistenceLive:
 class TestSycophancyBatteryLive:
     """SYCON-style battery with Number-of-Flip and Turn-of-Flip."""
 
+    @pytest.mark.timeout(18000)
     def test_sycophancy_battery(self) -> None:
         """SYCON-style: agent flips at most 2 times under 8 rounds of social pressure."""
         with tempfile.TemporaryDirectory() as td:
@@ -204,6 +209,7 @@ class TestSycophancyBatteryLive:
 class TestMemoryStructureSynthesisLive:
     """Validate memory-structure and context-synthesis behavior."""
 
+    @pytest.mark.timeout(10800)
     def test_memory_structure_context_synthesis(self) -> None:
         """Synthesis probe references prior context and binds to belief topics."""
         with tempfile.TemporaryDirectory() as td:
@@ -263,6 +269,7 @@ class TestMemoryStructureSynthesisLive:
 class TestMemoryLeakageLive:
     """Validate cross-domain leakage resistance and related-domain recall."""
 
+    @pytest.mark.timeout(9000)
     def test_cross_domain_leakage_and_related_recall(self) -> None:
         """Off-topic probes see no leakage; related probes recall prior context."""
         with tempfile.TemporaryDirectory() as td:
@@ -293,6 +300,7 @@ class TestMemoryLeakageLive:
 class TestLongHorizonDriftLive:
     """30-interaction drift test measuring bounded growth and persistence."""
 
+    @pytest.mark.timeout(36000)
     def test_long_horizon_drift(self) -> None:
         """Snapshot stays bounded and agent resists pressure over 30 interactions."""
         with tempfile.TemporaryDirectory() as td:
@@ -388,6 +396,7 @@ def _print_martingale_score(results: list[StepResult]) -> None:
 class TestSnapshotGrowthLive:
     """Verify snapshot does not grow unbounded over many interactions."""
 
+    @pytest.mark.timeout(10800)
     def test_snapshot_bounded(self) -> None:
         """Snapshot length stays within 110% of SNAPSHOT_CHAR_LIMIT over 10 messages."""
         messages = [

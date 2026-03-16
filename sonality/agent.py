@@ -41,8 +41,8 @@ from .memory import (
     DatabaseConnections,
     DerivativeChunker,
     DualEpisodeStore,
+    Embedder,
     EventBoundaryDetector,
-    ExternalEmbedder,
     ForgettingEngine,
     MemoryGraph,
     QueryCategory,
@@ -68,7 +68,7 @@ from .memory import (
 )
 from .memory.context_format import format_episode_line
 from .prompts import REFLECTION_PROMPT, build_system_prompt
-from .provider import ChatResult, chat_completion
+from .provider import ChatResult, chat_completion, interaction_active
 
 log = logging.getLogger(__name__)
 
@@ -202,7 +202,7 @@ class ModelUsage:
 @dataclass(frozen=True, slots=True)
 class RuntimeComponents:
     db: DatabaseConnections
-    embedder: ExternalEmbedder
+    embedder: Embedder
     graph: MemoryGraph
     dual_store: DualEpisodeStore
     stm: ShortTermMemory
@@ -300,7 +300,7 @@ class SonalityAgent:
     async def _init_new_architecture(self) -> RuntimeComponents:
         """Initialize Neo4j + Qdrant + embedding components."""
         db = await DatabaseConnections.create()
-        embedder = ExternalEmbedder()
+        embedder = Embedder()
         graph = MemoryGraph(db.neo4j_driver)
         chunker = DerivativeChunker(embedder)
         dual_store = DualEpisodeStore(graph, db.qdrant, chunker, embedder)
@@ -341,6 +341,9 @@ class SonalityAgent:
     def shutdown(self) -> None:
         """Gracefully shut down background threads and database connections."""
         self._summarizer.stop()
+        # Drain the semantic worker before stopping so that any episodes enqueued
+        # during the session are fully processed before the Qdrant client closes.
+        self._semantic_worker.drain(timeout=120.0)
         self._semantic_worker.stop()
         try:
             self._run_async(self._db.close())
@@ -354,6 +357,14 @@ class SonalityAgent:
 
         This is the canonical orchestration entrypoint used by the CLI.
         """
+        interaction_active.set()
+        try:
+            return self._respond_inner(user_message)
+        finally:
+            interaction_active.clear()
+
+    def _respond_inner(self, user_message: str) -> str:
+        """Internal implementation of respond(); called with interaction_active set."""
         _t0 = time.perf_counter()
         log.info("=== Interaction #%d ===", self.sponge.interaction_count + 1)
         log.info("User: %.120s", user_message)
@@ -605,28 +616,34 @@ class SonalityAgent:
 
     async def _retrieve_new_arch(self, user_message: str) -> list[str]:
         """Full retrieval pipeline: route → search → expand → rerank."""
+        import time as _time_module
+
         # Skip routing when there are no stored episodes to retrieve.
         if not self._dual_store.has_episodes:
             log.debug("Retrieval skipped: no episodes in store")
             return []
 
         # Step 3: Route query (offload LLM call to thread to avoid blocking event loop)
+        _t_route = _time_module.perf_counter()
         stm_context = self._stm.get_recent_context()
         decision = await asyncio.to_thread(
             self._query_router.route, user_message, stm_context
         )
+        _route_elapsed = _time_module.perf_counter() - _t_route
 
         log.info(
-            "Query routing: category=%s n_results=%d temporal=%s semantic=%s",
+            "Query routing: category=%s n_results=%d temporal=%s semantic=%s (%.1fs)",
             decision.category,
             decision.n_results,
             decision.temporal_expansion,
             decision.semantic_memory,
+            _route_elapsed,
         )
         if decision.category == QueryCategory.NONE:
             return []
 
         # Step 4: Retrieve based on category
+        _t_search = _time_module.perf_counter()
         if decision.category == QueryCategory.MULTI_ENTITY:
             split_result = await self._split_agent.retrieve(
                 user_message, n_per_sub=decision.n_results
@@ -659,6 +676,7 @@ class SonalityAgent:
             )
             episodes = topic_hits + await self._graph.get_episodes(episode_uids)
         episodes = list({episode.uid: episode for episode in episodes}.values())
+        _search_elapsed = _time_module.perf_counter() - _t_search
 
         # Step 5: Temporal expansion
         if decision.temporal_expansion is TemporalExpansionDecision.EXPAND and episodes:
@@ -673,8 +691,10 @@ class SonalityAgent:
                 episodes.extend(extra)
 
         # Step 7: LLM Listwise Rerank (offload to thread — LLM call is blocking)
+        _t_rerank = _time_module.perf_counter()
         if len(episodes) > 1:
             episodes = await asyncio.to_thread(rerank_episodes, user_message, episodes)
+        _rerank_elapsed = _time_module.perf_counter() - _t_rerank
 
         selected = episodes[: decision.n_results]
         semantic_context: list[str] = []
@@ -703,10 +723,13 @@ class SonalityAgent:
             for ep in selected
         ]
         log.info(
-            "Retrieval: category=%s n_episodes=%d n_semantic=%d | episodes=%s",
+            "Retrieval: category=%s n_episodes=%d n_semantic=%d route=%.1fs search=%.1fs rerank=%.1fs | episodes=%s",
             decision.category,
             len(selected),
             len(semantic_context),
+            _route_elapsed,
+            _search_elapsed,
+            _rerank_elapsed,
             [(ep.uid[:8], (ep.summary or ep.content)[:50]) for ep in selected],
         )
         return [*episode_context, *semantic_context]
@@ -717,6 +740,7 @@ class SonalityAgent:
         response = await self._db.qdrant.query_points(
             collection_name="semantic_features",
             query=query_embedding,
+            using="dense",
             limit=top_k,
             with_payload=True,
         )
@@ -751,7 +775,11 @@ class SonalityAgent:
         """
         log.info("--- Post-processing ---")
 
-        ess = self._classify_ess(user_message)
+        try:
+            ess = self._classify_ess(user_message)
+        except Exception:
+            log.exception("ESS classification failed completely, using safe fallback")
+            ess = classifier_exception_fallback(user_message)
         self.last_ess = ess
         self._log_ess(ess, user_message)
         log.info(
@@ -795,17 +823,6 @@ class SonalityAgent:
         if not episode_uid:
             log.warning("Dual-store write failed; skipping post-processing belief update")
 
-        # Queue for semantic feature extraction (include ESS context so the worker
-        # can distinguish low-evidence chit-chat from belief-shaping exchanges)
-        if episode_uid:
-            ess_line = (
-                f"ESS: {ess.score:.2f} ({ess.reasoning_type}) | "
-                f"direction={ess.opinion_direction} | "
-                f"topics={list(ess.topics)}"
-            )
-            content = f"User: {user_message}\nAssistant: {agent_response}\n{ess_line}"
-            self._semantic_worker.enqueue(episode_uid, content)
-
         # Manipulative/invalid interactions should not mutate personality state.
         # debunked_claim: conclusively refuted claims must never update beliefs.
         # social_pressure / emotional_appeal: coercive but no evidential content.
@@ -840,15 +857,18 @@ class SonalityAgent:
         # Facts are stored regardless, but opinion staging is LLM-decided via
         # belief_update_recommended field (replaces hardcoded score thresholds).
         if episode_uid:
-            self._extract_knowledge(
-                user_message,
-                agent_response,
-                ess,
-                episode_uid,
-                stage_opinions=not manipulative and ess.belief_update_recommended,
-            )
-            # Normalize topics in freshly-staged knowledge updates (same LLM canon logic as ESS topics)
-            self._normalize_staged_topics()
+            try:
+                self._extract_knowledge(
+                    user_message,
+                    agent_response,
+                    ess,
+                    episode_uid,
+                    stage_opinions=not manipulative and ess.belief_update_recommended,
+                )
+                # Normalize topics in freshly-staged knowledge updates
+                self._normalize_staged_topics()
+            except Exception:
+                log.exception("Knowledge extraction failed (outer guard)")
 
         # Persist STM to Neo4j
         try:
@@ -923,6 +943,20 @@ class SonalityAgent:
                 ess.reasoning_type,
             )
         self._log_health_event()
+
+        # Enqueue semantic feature extraction only after ALL inline LLM calls
+        # (ESS, boundary, chunking, knowledge extraction, opinion provenance,
+        # disagreement detection, insight, reflection) are complete. This prevents
+        # the background SemanticIngestionWorker from grabbing the LLM semaphore
+        # and blocking any foreground post-processing call for the current interaction.
+        if episode_uid:
+            ess_line = (
+                f"ESS: {ess.score:.2f} ({ess.reasoning_type}) | "
+                f"direction={ess.opinion_direction} | "
+                f"topics={list(ess.topics)}"
+            )
+            content = f"User: {user_message}\nAssistant: {agent_response}\n{ess_line}"
+            self._semantic_worker.enqueue(episode_uid, content)
 
         self.sponge.save(config.SPONGE_FILE, config.SPONGE_HISTORY_DIR)
         self._log_interaction_summary(ess)
@@ -1045,6 +1079,7 @@ class SonalityAgent:
                 ),
                 response_model=TopicCanonResponse,
                 fallback=TopicCanonResponse(mappings={t: t for t in uncached}),
+                assistant_prefix='{"mappings": {',
             )
             for raw in uncached:
                 canonical = llm_result.value.mappings.get(raw, raw).strip().lower() or raw
@@ -1092,6 +1127,7 @@ class SonalityAgent:
                 response_model=TopicCanonResponse,
                 fallback=TopicCanonResponse(mappings={raw: raw for raw, _ in need_llm}),
                 max_tokens=256,  # {"topic_raw": "canonical"} mapping — small output
+                assistant_prefix='{"mappings": {',
             )
             for raw, _ in need_llm:
                 canonical = llm_result.value.mappings.get(raw, raw).strip().lower() or raw
@@ -1230,6 +1266,7 @@ class SonalityAgent:
                 response_model=DisagreementDetectionResponse,
                 fallback=DisagreementDetectionResponse(),
                 max_tokens=256,  # verdict + strength + short reasoning
+                assistant_prefix='{"disagreement_verdict": "',
             )
         except Exception:
             return False
@@ -1599,6 +1636,7 @@ class SonalityAgent:
             response_model=ReflectionGateResponse,
             fallback=ReflectionGateResponse(trigger=ReflectionGateDecision.SKIP),
             max_tokens=128,  # SKIP / PERIODIC / EVENT_DRIVEN + short reasoning
+            assistant_prefix='{"trigger": "',
         )
         if not result.success:
             return ReflectionGate(
@@ -1767,6 +1805,7 @@ class SonalityAgent:
             ),
             response_model=BatchBeliefDecayResponse,
             fallback=BatchBeliefDecayResponse(decisions=[]),
+            assistant_prefix='{"decisions": [',
         )
         dropped: list[str] = []
         decisions_by_topic = {d.topic: d for d in result.value.decisions}
@@ -1818,6 +1857,7 @@ class SonalityAgent:
             prompt=BATCH_ENTRENCHMENT_DETECTION_PROMPT.format(beliefs_json=beliefs_json),
             response_model=BatchEntrenchmentResponse,
             fallback=BatchEntrenchmentResponse(entrenched=[]),
+            assistant_prefix='{"entrenched": [',
         )
         valid_topics = {topic for topic, _, _ in candidates}
         entrenched = [d.topic for d in result.value.entrenched if d.topic in valid_topics]
@@ -1955,6 +1995,7 @@ class SonalityAgent:
                 model=self.ess_model,
                 max_tokens=config.FAST_LLM_MAX_TOKENS,
                 messages=({"role": "user", "content": prompt},),
+                enable_thinking=False,
             )
             reflected_snapshot = completion.text.strip()
             self._apply_reflection_snapshot(

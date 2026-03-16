@@ -99,6 +99,7 @@ class _StepBaseline:
     snapshot: str
     opinion_vectors: dict[str, float]
     staged_updates: int
+    staged_update_ids: frozenset[int]  # id() of each staged update object
     pending_insights: int
     episode_count: int
 
@@ -113,6 +114,7 @@ def _capture_step_baseline(agent: SonalityAgent) -> _StepBaseline:
         snapshot=sponge.snapshot,
         opinion_vectors=dict(sponge.opinion_vectors),
         staged_updates=len(sponge.staged_opinion_updates),
+        staged_update_ids=frozenset(id(u) for u in sponge.staged_opinion_updates),
         pending_insights=len(sponge.pending_insights),
         episode_count=0,
     )
@@ -136,8 +138,10 @@ def _build_step_result(
     opinions_changed = before.opinion_vectors.keys() != opinion_vectors_after.keys() or any(
         abs(opinion_vectors_after[t] - v) > 1e-9 for t, v in before.opinion_vectors.items()
     )
-    staged_updates_added = staged_updates_after > before.staged_updates
-    staged_updates_committed = staged_updates_after < before.staged_updates
+    # Use object identity to detect gross additions even when simultaneous commits mask the net count.
+    staged_ids_after = frozenset(id(u) for u in sponge.staged_opinion_updates)
+    staged_updates_added = bool(staged_ids_after - before.staged_update_ids)
+    staged_updates_committed = bool(before.staged_update_ids - staged_ids_after)
     version_bumped = sponge.version > before.sponge_version
     pending_insights_added = pending_insights_after > before.pending_insights
     memory_update_observed = (
@@ -357,6 +361,21 @@ def _append_disagreement_failures(e: StepExpectation, result: StepResult) -> Non
         )
 
 
+def _append_topics_contain_failures(e: StepExpectation, result: StepResult) -> None:
+    """Append failures when expected topics are absent from the tracked topic set."""
+    if not e.topics_contain:
+        return
+    tracked_normalized = {_normalize_text_for_match(t) for t in result.topics_tracked}
+    for expected in e.topics_contain:
+        norm = _normalize_text_for_match(expected)
+        # Allow partial match: "open_source" matches "open source governance",
+        # "productivity" matches "work productivity", etc.
+        if not any(norm in tracked or tracked.startswith(norm) for tracked in tracked_normalized):
+            result.failures.append(
+                f"Topic '{expected}' not found in tracked topics {sorted(result.topics_tracked)}"
+            )
+
+
 def _append_snapshot_text_failures(e: StepExpectation, result: StepResult) -> None:
     """Append snapshot mention/non-mention contract failures."""
     normalized_snapshot = _normalize_text_for_match(result.snapshot_after)
@@ -403,7 +422,7 @@ def _check_expectations(
     _append_reasoning_direction_failures(e, result)
     _append_update_policy_failures(e, result)
     _append_disagreement_failures(e, result)
-
+    _append_topics_contain_failures(e, result)
     _append_snapshot_text_failures(e, result)
     _append_response_text_failures(e, result)
 

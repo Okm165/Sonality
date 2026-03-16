@@ -136,6 +136,7 @@ class ConsolidationEngine:
             response_model=ConsolidationReadinessResponse,
             fallback=ConsolidationReadinessResponse(),
             max_tokens=256,  # ready/not_ready + short reasoning
+            assistant_prefix='{"readiness_decision": "',
         )
         if not result.success:
             log.warning(
@@ -168,6 +169,7 @@ class ConsolidationEngine:
                 model=config.FAST_LLM_MODEL,
                 max_tokens=config.FAST_LLM_MAX_TOKENS,
                 messages=({"role": "user", "content": prompt},),
+                enable_thinking=False,
             )
             return completion.text.strip()
         except Exception:
