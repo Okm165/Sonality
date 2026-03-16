@@ -125,8 +125,10 @@ def llm_call[T: BaseModel](
     log.debug("llm_call schema=%s model=%s prompt=%.80r", schema_name, model, prompt)
     last_error = ""
     raw_text = ""
+    attempts_made = 0
 
     for attempt in range(1, max_retries + 1):
+        attempts_made = attempt
         try:
             raw_text = _raw_call(
                 prompt=prompt,
@@ -241,7 +243,8 @@ def llm_call[T: BaseModel](
             break  # Don't retry on unexpected errors
 
     log.error(
-        "llm_call exhausted %d retries schema=%s. Last error: %s",
+        "llm_call failed after %d/%d attempts schema=%s: %s",
+        attempts_made,
         max_retries,
         schema_name,
         last_error,
@@ -250,6 +253,6 @@ def llm_call[T: BaseModel](
         value=fallback,
         success=False,
         error=last_error,
-        attempts=max_retries,
+        attempts=attempts_made,
         raw_text=raw_text,
     )

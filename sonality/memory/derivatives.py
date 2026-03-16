@@ -88,6 +88,9 @@ class DerivativeChunker:
             prompt=CHUNKING_PROMPT.format(text=text),
             response_model=ChunkingResponse,
             fallback=ChunkingResponse(chunks=[]),
+            # 5–15 chunks × ~40 tokens each; no benefit in retrying if server is busy.
+            max_tokens=512,
+            max_retries=1,
         )
         if result.success:
             # Filter out placeholder/empty chunks from template-copying LLM responses

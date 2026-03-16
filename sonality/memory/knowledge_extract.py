@@ -124,7 +124,7 @@ def _split_windows(text: str) -> list[tuple[str, str]]:
                         "content": WINDOW_CONTEXT_SUMMARY_PROMPT.format(text=window_text[:3000]),
                     },
                 ),
-                max_tokens=config.FAST_LLM_MAX_TOKENS,
+                max_tokens=128,  # 2-4 sentence summary; no need for full FAST_LLM_MAX_TOKENS
             )
             prev_summary = result.text.strip()
         except Exception:

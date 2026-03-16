@@ -229,11 +229,13 @@ class SemanticIngestionWorker:
         )
 
         # 4 commands × ~100 tokens each + JSON overhead — needs more than the 1024 default.
+        # max_retries=1: if server is busy, skip this episode rather than blocking for 90s.
         result = llm_call(
             prompt=prompt,
             response_model=FeatureExtractionResponse,
             fallback=FeatureExtractionResponse(),
             max_tokens=config.FAST_LLM_MAX_TOKENS * 2,
+            max_retries=1,
         )
         if not result.success:
             log.debug("Feature extraction failed: %s", result.error)
@@ -351,6 +353,8 @@ class SemanticIngestionWorker:
             prompt=FEATURE_CONSOLIDATION_PROMPT.format(category=category, features=features_text),
             response_model=FeatureConsolidationResponse,
             fallback=FeatureConsolidationResponse(),
+            max_tokens=512,  # SKIP or 2 merges — small output
+            max_retries=1,
         )
         if not result.success:
             log.debug("Feature consolidation LLM failed: %s", result.error)

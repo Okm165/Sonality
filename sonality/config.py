@@ -89,6 +89,10 @@ RETRIEVAL_CONFIDENCE_THRESHOLD: Final = _env_float("SONALITY_RETRIEVAL_CONFIDENC
 RETRIEVAL_OVER_FETCH_FACTOR: Final = _env_int("SONALITY_RETRIEVAL_OVER_FETCH_FACTOR", 3)
 MAX_RERANK_CANDIDATES: Final = _env_int("SONALITY_MAX_RERANK_CANDIDATES", 25)
 
+# Per-HTTP-request timeout for LLM calls. The 35B model typically responds in 55s;
+# 90s gives a generous buffer. Increase for very large models (e.g. 70B+).
+LLM_REQUEST_TIMEOUT: Final = _env_int("SONALITY_LLM_TIMEOUT", 90)
+
 # Timeout (seconds) for async operations run from sync context via run_coroutine_threadsafe.
 # Increase for slow local LLMs that need > 120 s per inference call.
 ASYNC_TIMEOUT: Final = _env_int("SONALITY_ASYNC_TIMEOUT", 300)

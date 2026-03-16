@@ -19,7 +19,7 @@ log = logging.getLogger(__name__)
 # Embedding calls are excluded (different endpoint, much faster).
 _LLM_SEMAPHORE: threading.Semaphore = threading.Semaphore(1)
 
-_LLM_REQUEST_TIMEOUT: int = 60  # seconds; 2 failed retries x 60s = ~124s max per call
+_LLM_REQUEST_TIMEOUT: int = config.LLM_REQUEST_TIMEOUT  # seconds per attempt
 
 
 def llm_semaphore_idle() -> bool:
@@ -277,10 +277,15 @@ def _post_json(
                 detail = "<failed to read error payload>"
             raise RuntimeError(f"Provider HTTP {status}: {detail}") from exc
         except URLError as exc:
-            reason = str(exc.reason) if hasattr(exc, "reason") else str(exc)
-            # DNS failures won't resolve in seconds — fail immediately so the
-            # caller's retry loop can decide whether to re-attempt.
-            if "name resolution" in reason.lower() or "errno -3" in reason.lower():
+            reason = exc.reason if hasattr(exc, "reason") else None
+            # Timeouts mean the server is busy generating — retrying immediately
+            # won't help and wastes N × timeout seconds. Fail fast so the caller
+            # can decide whether to retry.
+            if isinstance(reason, TimeoutError):
+                raise RuntimeError(f"Provider transport error: {reason}") from exc
+            reason_str = str(reason) if reason else str(exc)
+            # DNS failures won't resolve in seconds — fail immediately.
+            if "name resolution" in reason_str.lower() or "errno -3" in reason_str.lower():
                 raise RuntimeError(f"Provider network error: {exc}") from exc
             if attempt < max_attempts:
                 wait = 1.5**attempt
@@ -293,7 +298,11 @@ def _post_json(
                 time.sleep(wait)
                 continue
             raise RuntimeError(f"Provider network error: {exc}") from exc
-        except (TimeoutError, ConnectionError, OSError) as exc:
+        except TimeoutError as exc:
+            # Direct TimeoutError (e.g. from socket layer escaping URLError wrapping).
+            # Same reasoning: fail fast, no retry.
+            raise RuntimeError(f"Provider transport error: {exc}") from exc
+        except (ConnectionError, OSError) as exc:
             if attempt < max_attempts:
                 wait = 1.5**attempt
                 log.warning(
