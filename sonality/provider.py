@@ -279,7 +279,7 @@ def _post_json(
         except URLError as exc:
             reason = exc.reason if hasattr(exc, "reason") else None
             # Timeouts mean the server is busy generating — retrying immediately
-            # won't help and wastes N × timeout seconds. Fail fast so the caller
+            # won't help and wastes N x timeout seconds. Fail fast so the caller
             # can decide whether to retry.
             if isinstance(reason, TimeoutError):
                 raise RuntimeError(f"Provider transport error: {reason}") from exc

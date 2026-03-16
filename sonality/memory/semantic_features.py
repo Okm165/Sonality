@@ -228,7 +228,7 @@ class SemanticIngestionWorker:
             existing_features=existing,
         )
 
-        # 4 commands × ~100 tokens each + JSON overhead — needs more than the 1024 default.
+        # 4 commands x ~100 tokens each + JSON overhead - needs more than the 1024 default.
         # max_retries=1: if server is busy, skip this episode rather than blocking for 90s.
         result = llm_call(
             prompt=prompt,

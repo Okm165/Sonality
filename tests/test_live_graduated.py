@@ -30,10 +30,8 @@ from sonality.llm.caller import LLMCallResult, llm_call
 from sonality.memory.embedder import ExternalEmbedder
 from sonality.provider import chat_completion, parse_json_object
 
-# Tests in TestParserRobustness do NOT call the LLM and run without -m live.
-# All other classes require a live LLM/DB and are skipped without -m live.
-_live = pytest.mark.live
-pytestmark = pytest.mark.live
+# Top-level parser tests do NOT call the LLM and run without -m live.
+# All test classes below require a live LLM/DB and are marked at class level.
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -127,6 +125,8 @@ def test_parse_json_object_strips_fences() -> None:
 class TestL0Connectivity:
     """Verify the two endpoints are reachable before anything else."""
 
+    pytestmark = pytest.mark.live
+
     def test_llm_endpoint_reachable(self) -> None:
         """GET /models succeeds and returns JSON with at least one model."""
         t = time.perf_counter()
@@ -160,6 +160,8 @@ class TestL0Connectivity:
 
 class TestL1RawResponse:
     """Verify the LLM returns usable text and embeddings have the right shape."""
+
+    pytestmark = pytest.mark.live
 
     def test_llm_returns_non_empty_text(self) -> None:
         """Single-sentence prompt → non-empty text response."""
@@ -239,6 +241,8 @@ class _SimpleSchema(BaseModel):
 
 class TestL2StructuredParsing:
     """Verify llm_call extracts schemas correctly and ESS classifies coherently."""
+
+    pytestmark = pytest.mark.live
 
     def test_llm_call_parses_simple_schema(self) -> None:
         """llm_call extracts a two-field schema from an unambiguous prompt."""
@@ -360,6 +364,8 @@ class TestL2rRepeatability:
     This isolates whether failures are model variance or structural prompt problems.
     """
 
+    pytestmark = pytest.mark.live
+
     def _run_n(
         self,
         prompt: str,
@@ -479,6 +485,8 @@ def qdrant_url() -> str:
 class TestL3MemoryPrimitives:
     """Verify vector storage and semantic retrieval work at the primitive level."""
 
+    pytestmark = pytest.mark.live
+
     def test_qdrant_vector_insert_and_exact_retrieval(self, qdrant_url: str) -> None:
         """Insert one embedding row, retrieve it by UID, verify it round-trips."""
         from qdrant_client import QdrantClient
@@ -595,6 +603,8 @@ class TestL2xPerPromptParsing:
     ACTUAL Pydantic model that consumes it, so failures point to the
     real production parse path.
     """
+
+    pytestmark = pytest.mark.live
 
     # --- ESS path diagnostics ---
 
@@ -872,7 +882,7 @@ class TestL2xPerPromptParsing:
                 yield cls._normalize
 
             @classmethod
-            def _normalize(cls, v: object) -> "BeliefDecayResponse":
+            def _normalize(cls, v: object) -> BeliefDecayResponse:
                 if isinstance(v, list):
                     return cls(decisions=[BeliefDecayDecision(**d) if isinstance(d, dict) else d for d in v])
                 return cls.model_validate(v)
@@ -915,6 +925,8 @@ class TestL2xPerPromptParsing:
 
 class TestL3xMemoryStoreRetrieve:
     """Test the full episode store → retrieve pipeline with real DB + embedding."""
+
+    pytestmark = pytest.mark.live
 
     def test_derivative_chunker_produces_embeddings(self) -> None:
         """DerivativeChunker.chunk_and_embed returns ≥1 derivatives with correct dim."""

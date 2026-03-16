@@ -93,9 +93,12 @@ MAX_RERANK_CANDIDATES: Final = _env_int("SONALITY_MAX_RERANK_CANDIDATES", 25)
 # 90s gives a generous buffer. Increase for very large models (e.g. 70B+).
 LLM_REQUEST_TIMEOUT: Final = _env_int("SONALITY_LLM_TIMEOUT", 90)
 
-# Timeout (seconds) for async operations run from sync context via run_coroutine_threadsafe.
-# Increase for slow local LLMs that need > 120 s per inference call.
-ASYNC_TIMEOUT: Final = _env_int("SONALITY_ASYNC_TIMEOUT", 300)
+# Timeout for async ops dispatched from the sync context via run_coroutine_threadsafe.
+# Must exceed the maximum realistic duration of any single coroutine, which in the
+# worst case is: semaphore_queue_wait + max_retries x LLM_REQUEST_TIMEOUT.
+# Default: 5 x LLM_REQUEST_TIMEOUT covers one queued call (3 retries) + current call
+# (2 retries) with fail-fast TimeoutErrors: 5 x 90 = 450 s.
+ASYNC_TIMEOUT: Final = _env_int("SONALITY_ASYNC_TIMEOUT", LLM_REQUEST_TIMEOUT * 5)
 
 
 def missing_live_api_config() -> tuple[str, ...]:

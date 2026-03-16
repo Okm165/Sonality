@@ -98,6 +98,7 @@ class EventBoundaryDetector:
             prompt=prompt,
             response_model=BoundaryDetectionResponse,
             fallback=BoundaryDetectionResponse(),
+            max_tokens=256,  # BOUNDARY/CONTINUE + type + short reasoning
         )
         if not result.success:
             log.warning(

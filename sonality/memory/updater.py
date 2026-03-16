@@ -62,7 +62,7 @@ def extract_insight(
         response_model=InsightExtractionResponse,
         fallback=InsightExtractionResponse(),
         model=model,
-        max_tokens=config.FAST_LLM_MAX_TOKENS,
+        max_tokens=256,  # SKIP or one short sentence — small output
     )
     if not result.success:
         log.warning("Insight extraction parse failed (returning empty): %s", result.error)

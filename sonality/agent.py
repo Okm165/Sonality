@@ -1091,6 +1091,7 @@ class SonalityAgent:
                 prompt=prompt,
                 response_model=TopicCanonResponse,
                 fallback=TopicCanonResponse(mappings={raw: raw for raw, _ in need_llm}),
+                max_tokens=256,  # {"topic_raw": "canonical"} mapping — small output
             )
             for raw, _ in need_llm:
                 canonical = llm_result.value.mappings.get(raw, raw).strip().lower() or raw
@@ -1228,6 +1229,7 @@ class SonalityAgent:
                 prompt=prompt,
                 response_model=DisagreementDetectionResponse,
                 fallback=DisagreementDetectionResponse(),
+                max_tokens=256,  # verdict + strength + short reasoning
             )
         except Exception:
             return False
@@ -1596,6 +1598,7 @@ class SonalityAgent:
             prompt=prompt,
             response_model=ReflectionGateResponse,
             fallback=ReflectionGateResponse(trigger=ReflectionGateDecision.SKIP),
+            max_tokens=128,  # SKIP / PERIODIC / EVENT_DRIVEN + short reasoning
         )
         if not result.success:
             return ReflectionGate(

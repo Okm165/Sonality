@@ -298,6 +298,8 @@ async def assess_belief_evidence_batch(
         ]
     )
     # Each topic assessment needs ~300 output tokens; scale to avoid truncation.
+    # max_retries=2 caps worst-case at 2x LLM_REQUEST_TIMEOUT, keeping this call
+    # well within ASYNC_TIMEOUT even when a background worker holds the semaphore.
     batch_max_tokens = max(config.FAST_LLM_MAX_TOKENS, len(topics) * 300)
     result = await asyncio.to_thread(
         llm_call,
@@ -305,12 +307,19 @@ async def assess_belief_evidence_batch(
         response_model=BatchBeliefUpdateResponse,
         fallback=fallback,
         max_tokens=batch_max_tokens,
+        max_retries=2,
     )
     if not result.success:
-        # Network or persistent errors: don't cascade N sequential calls that will also fail.
-        if "network" in result.error.lower() or "name resolution" in result.error.lower():
+        # Server-side errors (transport timeout, network failure) mean the server is busy.
+        # Do NOT cascade to N sequential calls — they will all fail the same way.
+        error_lower = result.error.lower()
+        is_server_error = any(
+            kw in error_lower
+            for kw in ("transport error", "network", "name resolution", "timed out")
+        )
+        if is_server_error:
             log.warning(
-                "Batch belief assessment network error (%s); skipping graph edges for %d topics",
+                "Batch belief assessment server error (%s); skipping graph edges for %d topics",
                 result.error,
                 len(topics),
             )

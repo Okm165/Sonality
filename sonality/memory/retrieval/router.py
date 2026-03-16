@@ -81,6 +81,7 @@ class QueryRouter:
             prompt=prompt,
             response_model=RoutingResponse,
             fallback=RoutingResponse(),
+            max_tokens=256,  # category + depth + flags + short reasoning
         )
 
         if result.success:

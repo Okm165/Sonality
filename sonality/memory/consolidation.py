@@ -135,6 +135,7 @@ class ConsolidationEngine:
             prompt=prompt,
             response_model=ConsolidationReadinessResponse,
             fallback=ConsolidationReadinessResponse(),
+            max_tokens=256,  # ready/not_ready + short reasoning
         )
         if not result.success:
             log.warning(

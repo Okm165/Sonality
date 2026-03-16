@@ -65,6 +65,7 @@ def rerank_episodes(
         prompt=prompt,
         response_model=RerankResponse,
         fallback=RerankResponse(ranking=list(range(1, len(to_rank) + 1))),
+        max_tokens=256,  # list of ints + short reasoning
     )
 
     if result.success:
