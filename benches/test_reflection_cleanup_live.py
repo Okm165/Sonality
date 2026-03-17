@@ -25,7 +25,7 @@ from unittest import mock
 import pytest
 from neo4j import GraphDatabase
 from qdrant_client import QdrantClient
-from qdrant_client.models import PointStruct
+from qdrant_client.models import Filter, FilterSelector, PointStruct
 
 from sonality import config
 
@@ -47,7 +47,7 @@ def _reset_dbs() -> None:
     qdrant = QdrantClient(url=config.QDRANT_URL)
     for collection in ["derivatives", "semantic_features"]:
         if qdrant.collection_exists(collection):
-            qdrant.delete(collection_name=collection, points_selector={"filter": {}})
+            qdrant.delete(collection_name=collection, points_selector=FilterSelector(filter=Filter()))
     qdrant.close()
 
     driver = GraphDatabase.driver(config.NEO4J_URL, auth=(config.NEO4J_USER, config.NEO4J_PASSWORD))

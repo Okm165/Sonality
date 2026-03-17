@@ -22,6 +22,7 @@ from unittest import mock
 import pytest
 from neo4j import GraphDatabase
 from qdrant_client import QdrantClient
+from qdrant_client import models as qdrant_models
 
 from sonality import config
 
@@ -43,7 +44,9 @@ def reset_databases() -> None:
         if qdrant.collection_exists(collection):
             qdrant.delete(
                 collection_name=collection,
-                points_selector={"filter": {}},
+                points_selector=qdrant_models.FilterSelector(
+                    filter=qdrant_models.Filter()
+                ),
             )
     qdrant.close()
 

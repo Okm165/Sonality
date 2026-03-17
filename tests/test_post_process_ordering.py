@@ -17,6 +17,8 @@ import threading
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from sonality.ess import ESSResult
+
 
 def _build_mock_agent() -> tuple[Any, list[str], asyncio.AbstractEventLoop]:
     """Return (mock_agent, call_log, event_loop).
@@ -74,14 +76,42 @@ def _build_mock_agent() -> tuple[Any, list[str], asyncio.AbstractEventLoop]:
     agent._store_episode_new_arch = MagicMock(return_value=episode_uid)
     agent._try_consolidate_segment = MagicMock()
 
-    default_ess = classifier_exception_fallback("user message")
+    from sonality.ess import (
+        InternalConsistencyStatus,
+        KnowledgeDensity,
+        OpinionDirection,
+        ReasoningType,
+        SourceReliability,
+        UrgencyLevel,
+    )
+
+    # Substantive ESS so all gates pass (not manipulative, not no_argument).
+    # Tests that need the exception fallback override _classify_ess themselves.
+    default_ess = ESSResult(
+        score=0.6,
+        reasoning_type=ReasoningType.EMPIRICAL_DATA,
+        source_reliability=SourceReliability.INFORMED_OPINION,
+        internal_consistency=InternalConsistencyStatus.CONSISTENT,
+        novelty=0.5,
+        topics=("test_topic",),
+        summary="User presents test evidence.",
+        opinion_direction=OpinionDirection.SUPPORTS,
+        knowledge_density=KnowledgeDensity.MODERATE,
+        belief_update_recommended=False,
+        urgency=UrgencyLevel.STANDARD,
+        defaulted_fields=(),
+        default_severity="none",
+        attempt_count=1,
+        input_tokens=10,
+        output_tokens=10,
+    )
 
     def recording(name: str, return_value: Any = None) -> MagicMock:
         m = MagicMock()
         m.side_effect = lambda *a, **kw: (call_log.append(name), return_value)[1]
         return m
 
-    # _classify_ess returns the default fallback ESS and logs it.
+    # _classify_ess returns a substantive ESS so _extract_knowledge is not gated out.
     agent._classify_ess = MagicMock(
         side_effect=lambda *a, **kw: (call_log.append("classify_ess"), default_ess)[1]
     )
