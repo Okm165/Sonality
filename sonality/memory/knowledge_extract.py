@@ -20,13 +20,15 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
+from typing import Any, cast
 
 from pydantic import BaseModel, Field, model_validator
 from qdrant_client import AsyncQdrantClient
-from qdrant_client.models import FieldCondition, Filter, MatchValue, PointStruct
+from qdrant_client.models import FieldCondition, Filter, MatchValue, PointIdsList, PointStruct
 
 from .. import config
 from ..llm.caller import llm_call
@@ -56,7 +58,10 @@ class PropositionType(StrEnum):
 
 class ExtractedProposition(BaseModel):
     text: str
-    type: PropositionType = PropositionType.NOISE
+    # Default to FACT: the extraction prompt tells the model to exclude noise items,
+    # so un-typed propositions (where the model omitted the field) should be treated
+    # as facts rather than silently discarded by the NOISE filter.
+    type: PropositionType = PropositionType.FACT
     confidence: float = 0.5
     source_entity: str = ""
     key_concepts: list[str] = Field(default_factory=list)
@@ -70,10 +75,20 @@ class ExtractionResponse(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def normalize_response(cls, data: object) -> object:
-        """Handle bare-list LLM responses (model returned key_concepts or prop dicts directly)."""
+        """Handle bare-list and bare-dict LLM responses.
+
+        Covers three cases from truncated or malformed LLM output:
+        1. Bare list: model returned [{...}, {...}] instead of {"propositions": [...]}
+        2. Bare proposition dict: extract_last_json_object recovered a single inner
+           proposition dict when the outer {"propositions": [...]} was truncated —
+           wrap it rather than silently producing an empty propositions list.
+        3. Normal {"propositions": [...]} — pass through unchanged.
+        """
         if isinstance(data, list):
-            # Accept a bare list of proposition dicts; discard bare strings (key_concepts output errors)
             return {"propositions": [x for x in data if isinstance(x, dict)]}
+        if isinstance(data, dict) and "propositions" not in data and "text" in data:
+            # Bare proposition dict recovered from truncated output
+            return {"propositions": [data]}
         return data
 
 
@@ -158,7 +173,7 @@ def _extract_propositions(text: str, preceding_context: str = "") -> list[Extrac
         prompt=KNOWLEDGE_EXTRACTION_PROMPT.format(text=prompt_text),
         response_model=ExtractionResponse,
         fallback=ExtractionResponse(),
-        max_tokens=384,  # 4-6 propositions (prefill forces JSON, ~60 tokens each)
+        max_tokens=1024,  # up to 15 propositions x ~60 tokens each + overhead
         max_retries=1,  # fail fast; retrying rarely helps prose-drift failures
         assistant_prefix='{"propositions": [',  # prefill forces JSON output, bypasses prose drift
     )
@@ -199,11 +214,15 @@ async def _load_existing_knowledge_embeddings(
     result: list[tuple[str, str, list[float]]] = []
     for point in results:
         if point.vector and point.payload:
-            vec = (
+            raw_vec = (
                 point.vector
                 if isinstance(point.vector, list)
                 else next(iter(point.vector.values()))
             )
+            # Narrow to flat float list; skip sparse/nested vectors.
+            if not isinstance(raw_vec, list) or (raw_vec and not isinstance(raw_vec[0], float)):
+                continue
+            vec: list[float] = cast(list[float], raw_vec)
             uid = str(point.payload.get("uid", "") or point.id or "")
             result.append((uid, str(point.payload.get("value", "")), vec))
     return result
@@ -287,13 +306,15 @@ async def _deduplicate_against_existing(
                 )
                 if results and results[0].payload:
                     point = results[0]
-                    old_citations = point.payload.get("episode_citations", []) or []
+                    payload = point.payload
+                    assert payload is not None
+                    old_citations = payload.get("episode_citations", []) or []
                     new_citations = list(dict.fromkeys([*old_citations, episode_uid]))
                     await qdrant.set_payload(
                         collection_name="semantic_features",
                         payload={
                             "confidence": min(
-                                0.99, max(float(point.payload.get("confidence", 0)), new_confidence)
+                                0.99, max(float(payload.get("confidence") or 0), new_confidence)
                             ),
                             "episode_citations": new_citations,
                             "updated_at": datetime.now(UTC).isoformat(),
@@ -568,7 +589,7 @@ async def consolidate_knowledge(
         try:
             await qdrant.delete(
                 collection_name="semantic_features",
-                points_selector=uids_to_delete,
+                points_selector=PointIdsList(points=cast(Sequence[str | int], uids_to_delete)),  # type: ignore[arg-type]
             )
             log.info(
                 "Consolidation: pruned %d entries (weak + contradictions)", len(uids_to_delete)
@@ -582,10 +603,10 @@ async def consolidate_knowledge(
         merged_text = merge.get("merged", "")
         if not source_uids or not merged_text or not isinstance(source_uids, list):
             continue
-        uid = next((u for u in source_uids if isinstance(u, str) and u in valid_uids), None)
-        if uid:
-            merge_updates.append((str(merged_text), uid))
-            log.info("Consolidation: merged uid=%s -> '%s'", uid[:8], str(merged_text)[:50])
+        merge_uid = next((u for u in source_uids if isinstance(u, str) and u in valid_uids), None)
+        if merge_uid:
+            merge_updates.append((str(merged_text), merge_uid))
+            log.info("Consolidation: merged uid=%s -> '%s'", merge_uid[:8], str(merged_text)[:50])
     if merge_updates:
         try:
             for merged_text, uid in merge_updates:
@@ -634,7 +655,10 @@ async def prune_stale_knowledge(
         if p.payload and float(p.payload.get("confidence", 1.0)) < min_confidence
     ]
     if to_delete:
-        await qdrant.delete(collection_name="semantic_features", points_selector=to_delete)
+        await qdrant.delete(
+            collection_name="semantic_features",
+            points_selector=PointIdsList(points=cast(Sequence[str | int], to_delete)),  # type: ignore[arg-type]
+        )
     pruned = len(to_delete)
     if pruned:
         log.info("Knowledge pruning: removed %d low-confidence stale entries", pruned)
@@ -683,9 +707,14 @@ async def retrieve_relevant_knowledge(
         return []
 
     rows = [
-        (p.payload.get("tag"), p.payload.get("value"), p.payload.get("confidence"), p.score)
+        (
+            str(p.payload.get("tag") or ""),
+            str(p.payload.get("value") or ""),
+            float(p.payload.get("confidence") or 0),
+            float(p.score),
+        )
         for p in results
-        if p.payload and float(p.payload.get("confidence", 0)) >= min_confidence
+        if p.payload and float(p.payload.get("confidence") or 0) >= min_confidence
     ]
 
     if not rows:
@@ -694,9 +723,9 @@ async def retrieve_relevant_knowledge(
     log.debug(
         "Knowledge retrieval: %d results (top similarity=%.3f, conf range=%.2f–%.2f)",
         len(rows),
-        float(rows[0][3]),
-        min(float(r[2]) for r in rows),
-        max(float(r[2]) for r in rows),
+        rows[0][3],
+        min(r[2] for r in rows),
+        max(r[2] for r in rows),
     )
     return [
         f"[{tag}] (confidence={confidence:.2f}) {value}"
@@ -723,7 +752,7 @@ class DetectedCorrelation:
 class CorrelationDetectionResponse(BaseModel):
     """LLM response for correlation detection."""
 
-    correlations: list[dict[str, object]] = Field(default_factory=list)
+    correlations: list[dict[str, Any]] = Field(default_factory=list)
 
 
 async def detect_correlations(
@@ -786,7 +815,7 @@ async def detect_correlations(
             corr_type = str(corr.get("type", "")).upper()
             if corr_type not in valid_types:
                 continue
-            strength = float(corr.get("strength", 0.0))
+            strength = float(corr.get("strength") or 0.0)
             if strength < 0.3:
                 continue
             correlation = DetectedCorrelation(

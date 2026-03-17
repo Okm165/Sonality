@@ -73,6 +73,11 @@ class FeatureExtractionResponse(BaseModel):
             return {"commands": data}
         if isinstance(data, dict) and "command" in data and "commands" not in data:
             return {"commands": [data]}
+        if isinstance(data, dict) and "commands" in data:
+            # Drop malformed/empty command dicts the LLM emits as "no features" signals.
+            cmds = data.get("commands", [])
+            if isinstance(cmds, list):
+                data = {**data, "commands": [c for c in cmds if isinstance(c, dict) and c.get("command")]}
         return data
 
 

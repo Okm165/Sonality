@@ -75,7 +75,7 @@ def assess_health(sponge: SpongeState) -> HealthReport:
     )
 
     prompt = HEALTH_ASSESSMENT_PROMPT.format(
-        snapshot=sponge.snapshot[:500],
+        snapshot=sponge.snapshot,
         beliefs_summary=beliefs_summary,
         recent_shifts=recent_shifts,
         interaction_count=sponge.interaction_count,

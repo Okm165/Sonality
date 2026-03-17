@@ -8,7 +8,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import math
-from typing import Final
+from typing import Any, Final
 
 from .. import config
 
@@ -37,7 +37,7 @@ class Embedder:
     Thread-safe: FastEmbed handles internal synchronization.
     """
 
-    _model: object = None
+    _model: Any = None
 
     def __init__(self, cache_size: int = 10000) -> None:
         from fastembed import TextEmbedding
@@ -45,7 +45,7 @@ class Embedder:
         if Embedder._model is None:
             log.info("Loading dense embedding model: %s", DENSE_MODEL)
             Embedder._model = TextEmbedding(model_name=DENSE_MODEL)
-        self._model_ref = Embedder._model
+        self._model_ref: Any = Embedder._model
         self._cache: dict[str, list[float]] = {}
         self._max_cache = cache_size
 
@@ -58,7 +58,7 @@ class Embedder:
         key = hashlib.md5(query.encode(), usedforsecurity=False).hexdigest()
         if key in self._cache:
             return self._cache[key]
-        result = next(iter(self._model_ref.query_embed(query))).tolist()  # type: ignore[union-attr]
+        result: list[float] = next(iter(self._model_ref.query_embed(query))).tolist()
         if len(self._cache) < self._max_cache:
             self._cache[key] = result
         return result
@@ -68,4 +68,4 @@ class Embedder:
         if not documents:
             return []
         truncated = [doc[: config.EMBEDDING_MAX_CHARS] for doc in documents]
-        return [emb.tolist() for emb in self._model_ref.passage_embed(truncated)]  # type: ignore[union-attr]
+        return [emb.tolist() for emb in self._model_ref.passage_embed(truncated)]

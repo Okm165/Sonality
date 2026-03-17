@@ -9,8 +9,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import cast
 
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.models import (
@@ -18,6 +20,7 @@ from qdrant_client.models import (
     Filter,
     MatchText,
     MatchValue,
+    PointIdsList,
     PointStruct,
     QuantizationSearchParams,
     SearchParams,
@@ -189,14 +192,16 @@ class DualEpisodeStore:
             log.debug("Embedding unavailable; falling back to text-only search", exc_info=True)
             return await self._text_only_search(query, top_k)
 
-        must = [FieldCondition(key="archived", match=MatchValue(value=False))]
-        should = [FieldCondition(key="text", match=MatchText(text=query))] if text_filter else None
+        must: list[FieldCondition] = [FieldCondition(key="archived", match=MatchValue(value=False))]
+        should: list[FieldCondition] | None = (
+            [FieldCondition(key="text", match=MatchText(text=query))] if text_filter else None
+        )
 
         response = await self._qdrant.query_points(
             collection_name="derivatives",
             query=query_embedding,
             using="dense",
-            query_filter=Filter(must=must, should=should),
+            query_filter=Filter(must=must, should=should),  # type: ignore[arg-type]
             limit=top_k,
             with_payload=True,
             search_params=SearchParams(
@@ -274,7 +279,7 @@ class DualEpisodeStore:
         if qdrant_only:
             await self._qdrant.delete(
                 collection_name="derivatives",
-                points_selector=qdrant_only,
+                points_selector=PointIdsList(points=cast(Sequence[str | int], qdrant_only)),  # type: ignore[arg-type]
             )
             log.warning("Cleaned %d Qdrant-only orphan derivatives", len(qdrant_only))
 
