@@ -56,7 +56,7 @@ Conditionally (when ESS reliability gates pass):
 10. **STM segment consolidation** — background worker periodically summarizes and consolidates episode segments
 
 **Key implementation details:**
-- **All** LLM calls keep model reasoning enabled (`chat_template_kwargs: {"enable_thinking": true}`), but returned text is scrubbed of chain-of-thought. This preserves reasoning quality while preventing thinking traces from appearing in user-visible output.
+- **Structured LLM calls** (ESS classification, routing, retrieval, extraction) use `enable_thinking=False` because thinking mode is incompatible with JSON prefill and hurts structured-output accuracy. The **main chat response** also uses `enable_thinking=False` to prevent deliberation markers leaking into user-visible output; reasoning quality is preserved by the model's training rather than explicit chain-of-thought. Background tasks that already use a system JSON prompt (`llm_call`) always disable thinking for the same reason.
 - A `threading.Semaphore(1)` serializes all LLM HTTP calls to prevent overwhelming single-threaded local inference servers.
 - `SemanticIngestionWorker` runs on its own dedicated `asyncio` event loop in a background thread with its own async Qdrant client, eliminating cross-loop contention. Embeddings are computed synchronously in the worker thread before submitting the DB write to the async path.
 - **Per-reasoning-type magnitude caps** (aligned with AGM minimal change principle): empirical_data ≤ 0.20, expert_opinion ≤ 0.14, logical_argument ≤ 0.10, anecdotal ≤ 0.06, debunked_claim = 0.0, social_pressure ≤ 0.02 per update. Prevents a single high-ESS turn from jumping opinion vectors by 0.8+.
@@ -181,14 +181,13 @@ Schema definitions are centralized in `sonality/schema.py` as the single source 
 **Common commands:**
 
 ```bash
-make db-up          # Start database containers
-make db-down        # Stop containers
-make db-reset       # Delete all data and restart (fresh state)
-make db-clear       # Clear data, preserve schema
-make db-init-neo4j  # Manually run Neo4j schema script
+make db-up     # Start database containers
+make db-down   # Stop containers
+make db-reset  # Delete all data and restart (fresh state; schema applied on next run)
+make db-clear  # Clear data, preserve schema
 ```
 
-**Schema regeneration:** If you modify `sonality/schema.py`, run `make schema-scripts` to regenerate `scripts/init_neo4j.cypher`. Qdrant collections are initialized at runtime.
+**Schema regeneration:** If you modify `sonality/schema.py`, regenerate `scripts/init_neo4j.cypher` by running the schema exporter in `sonality/schema.py` directly. Qdrant collections are initialized at runtime by `sonality.schema.init_qdrant_collections()`.
 
 ## REPL Commands
 
@@ -327,18 +326,17 @@ tests/
 │   └── S7 Extended           # 15-turn scenario with contradiction
 │
 benches/
-├── test_teaching_suite_live.py  # 60-pack teaching scenarios
-├── test_psych_stability_live.py # Psychological batteries (VRIN, ASCH)
-└── test_ess_calibration_live.py # ESS classifier calibration
+├── test_teaching_suite_live.py       # 60-pack teaching scenarios
+├── test_knowledge_acquisition_live.py # K1-K32 knowledge acquisition batteries
+├── test_psych_stability_live.py      # B1-B10 psychological stability batteries
+├── test_knowledge_accumulation_bench.py # 6-domain accumulation bench
+└── test_ess_calibration_live.py      # ESS classifier calibration
 ```
 
-**Validation status (Session 11):**
-- Unit tests: 23/23 ✅
-- Memory tests: 13/13 ✅
-- L0-L3x Infrastructure: 21/25 ✅ (4 network timeouts with local Tailscale endpoint)
-- S1-S7 Behavioral: 32/33 ✅ (1 timeout on 25-minute extended scenario)
-- Psychological Batteries: B1-B7: 5/6 ✅ (1 network error)
-- Total validated: **87/90** tests passing (3 failures due to network/timeout infrastructure, not code)
+**Validation status:**
+- Unit tests: 73/73 ✅ (`make test`)
+- Bench contracts (non-live): 80/80 ✅ (`make bench-contracts`)
+- Use `make check` to run all no-key quality gates. Use `make check-ci` for CI parity (adds format-check).
 
 ## Development
 
@@ -351,6 +349,9 @@ make docs          # build documentation (output in site/)
 make docs-serve    # serve docs locally with live reload
 make preflight-live  # validate live API config and model selection
 make preflight-live-probe  # run tiny real API call (catches provider/policy issues)
+make bench-knowledge-acquisition    # run K1-K32 knowledge acquisition battery
+make bench-psych-stability          # run B1-B10 psychological stability battery
+make bench-knowledge-accumulation   # run 6-domain knowledge accumulation bench
 make bench-teaching  # run teaching benchmark suite (API key required)
 make bench-teaching-pulse  # 2-pack pulse for fastest go/no-go signal
 make bench-teaching-rapid  # single-replicate triage slice for fast signal

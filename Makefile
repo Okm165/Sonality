@@ -52,7 +52,7 @@ install-dev: ## Install with dev dependencies (ruff, pytest, mypy)
 
 # --- Database ---
 
-.PHONY: db-up db-down db-reset db-init-neo4j db-clear
+.PHONY: db-up db-down db-reset db-clear
 db-up: ## Start database containers (Neo4j + Qdrant)
 	docker compose up -d neo4j qdrant
 
@@ -62,14 +62,7 @@ db-down: ## Stop database containers
 db-reset: db-down ## Reset databases (delete all data and restart)
 	docker volume rm -f sonality_neo4j_data sonality_qdrant_data sonality_neo4j_logs 2>/dev/null || true
 	docker compose up -d neo4j qdrant
-	@echo "Waiting for databases to be ready..."
-	@sleep 10
-	@$(MAKE) db-init-neo4j
-
-db-init-neo4j: ## Initialize Neo4j schema using cypher-shell (run after db-up)
-	@echo "Initializing Neo4j schema..."
-	docker compose exec -T neo4j cypher-shell -u neo4j -p sonality_password --file /scripts/init_neo4j.cypher || \
-		echo "Neo4j init failed or already initialized (schema is idempotent)"
+	@echo "Databases reset. Schema is applied automatically on next 'make run'."
 
 db-clear: ## Clear all data from databases while preserving schema
 	@echo "Clearing Qdrant collections..."
@@ -138,7 +131,7 @@ test-live-report: ## Run live tests with detailed output
 	@echo ""
 	@echo "Live test report written to test-live-report.xml"
 
-.PHONY: memory-diagnostics memory-diagnostics-fix bench-teaching bench-teaching-lean bench-teaching-high bench-teaching-profile bench-teaching-smoke bench-teaching-pulse bench-teaching-rapid bench-teaching-first-signal bench-plan-segments bench-teaching-segmented bench-select-failures-last bench-teaching-failures-last bench-teaching-contextual bench-teaching-hotspots bench-select-hotspots-last bench-teaching-hotspots-auto bench-teaching-safety bench-teaching-development bench-teaching-iterate bench-memory bench-personality bench-report-last bench-report-failures-last bench-report-root bench-report-memory-root bench-report-beliefs-last bench-report-insights-root bench-report-delta-last bench-signal-gate-last
+.PHONY: memory-diagnostics memory-diagnostics-fix bench-teaching bench-teaching-lean bench-teaching-high bench-teaching-profile bench-teaching-smoke bench-teaching-pulse bench-teaching-rapid bench-teaching-first-signal bench-plan-segments bench-teaching-segmented bench-select-failures-last bench-teaching-failures-last bench-teaching-contextual bench-teaching-hotspots bench-select-hotspots-last bench-teaching-hotspots-auto bench-teaching-safety bench-teaching-development bench-teaching-iterate bench-memory bench-personality bench-knowledge-accumulation bench-knowledge-accumulation-clean bench-report-last bench-report-failures-last bench-report-root bench-report-memory-root bench-report-beliefs-last bench-report-insights-root bench-report-delta-last bench-signal-gate-last
 bench-teaching: ## Run teaching benchmark suite (default profile, API required)
 	$(BENCH_TEACHING_BASE) --bench-profile default \
 		--bench-pack-group $(BENCH_PACK_GROUP) --bench-packs "$(BENCH_PACKS)"
@@ -313,11 +306,23 @@ memory-diagnostics: ## Run Neo4j + Qdrant memory health diagnostics
 memory-diagnostics-fix: ## Run memory diagnostics and auto-fix orphan derivatives
 	uv run python scripts/memory_diagnostics.py --fix-orphans
 
-bench-memory: ## Run memory-structure and memory-leakage benchmark slices
+bench-memory: preflight-live ## Run memory-structure and memory-leakage benchmark slices
 	$(BENCH_TEACHING_BASE) --bench-profile default --bench-pack-group memory
 
-bench-personality: ## Run personality-development benchmark slices
+bench-personality: preflight-live ## Run personality-development benchmark slices
 	$(BENCH_TEACHING_BASE) --bench-profile default --bench-pack-group personality
+
+bench-knowledge-acquisition: preflight-live ## Run knowledge acquisition battery (K1-K32): extraction, recall, misinformation, epistemic humility, etc.
+	uv run pytest benches/test_knowledge_acquisition_live.py -m "bench and live" -v -s --tb=short
+
+bench-psych-stability: preflight-live ## Run psychological stability battery (B1-B10): Asch, Festinger, gaslighting, flattery, etc.
+	uv run pytest benches/test_psych_stability_live.py -m "bench and live" -v -s --tb=short
+
+bench-knowledge-accumulation: preflight-live ## Run 6-domain knowledge accumulation bench (data kept for manual DB inspection)
+	uv run pytest benches/test_knowledge_accumulation_bench.py -m "bench and live" -v -s --tb=short
+
+bench-knowledge-accumulation-clean: bench-knowledge-accumulation ## Run knowledge accumulation bench then purge DB data
+	$(MAKE) db-clear
 
 bench-report-last: ## Print compact summary for latest benchmark run
 	@uv run python -c "exec('''import json\nimport sys\nfrom pathlib import Path\n\n\ndef topic_preview(rows: object, limit: int = 5) -> str:\n    if not isinstance(rows, list):\n        return \"\"\n    chunks: list[str] = []\n    for row in rows[:limit]:\n        if not isinstance(row, dict):\n            continue\n        topic = row.get(\"topic\")\n        delta = row.get(\"abs_delta_total\")\n        if not isinstance(topic, str):\n            continue\n        if isinstance(delta, (int, float)) and not isinstance(delta, bool):\n            chunks.append(f\"{topic}:{delta:.3f}\")\n        else:\n            chunks.append(topic)\n    return \", \".join(chunks)\n\n\nroot = Path(\"$(BENCH_OUTPUT_ROOT)\")\nruns = sorted(\n    (run for run in root.iterdir() if run.is_dir()),\n    key=lambda run: run.stat().st_mtime,\n    reverse=True,\n) if root.exists() else []\nif not runs:\n    print(\"No benchmark runs found.\")\n    sys.exit(0)\n\nrun_dir = runs[0]\nprint(f\"Run directory: {run_dir}\")\nsummary_path = run_dir / \"run_summary.json\"\nerror_path = run_dir / \"run_error.json\"\nhealth_path = run_dir / \"health_summary_report.json\"\n\nif summary_path.exists():\n    summary = json.loads(summary_path.read_text(encoding=\"utf-8\"))\n    hard_blockers = summary.get(\"hard_blockers\", [])\n    soft_blockers = summary.get(\"soft_blockers\", [])\n    pack_scope = summary.get(\"pack_scope\", {})\n    profile_name = (\n        summary.get(\"profile\")\n        or summary.get(\"profile_name\")\n        or summary.get(\"health_summary\", {}).get(\"profile\")\n    )\n    selected_count = pack_scope.get(\"selected_count\") if isinstance(pack_scope, dict) else None\n    if selected_count is None:\n        pack_rows = summary.get(\"pack_results\", [])\n        if isinstance(pack_rows, list):\n            selected_count = len(\n                {\n                    row.get(\"pack\")\n                    for row in pack_rows\n                    if isinstance(row, dict) and isinstance(row.get(\"pack\"), str)\n                }\n            )\n    print(f\"Profile: {profile_name} | Selected packs: {selected_count}\")\n    print(\n        f\"Decision: {summary.get('decision')} | Replicates: {summary.get('replicates_executed')} \"\n        f\"| Stop: {summary.get('stop_reason')}\"\n    )\n    print(f\"Hard blockers ({len(hard_blockers)}): {hard_blockers}\")\n    print(f\"Soft blockers ({len(soft_blockers)}): {soft_blockers}\")\n\n    default_rate = summary.get(\"ess_default_summary\", {}).get(\"defaulted_step_rate\")\n    retry_rate = summary.get(\"ess_retry_summary\", {}).get(\"retry_step_rate\")\n    print(f\"ESS defaults/retries: {default_rate} / {retry_rate}\")\n\n    cost = summary.get(\"cost_summary\", {})\n    print(\n        f\"Cost: calls={cost.get('total_calls')} tokens={cost.get('total_tokens')} \"\n        f\"steps={cost.get('total_steps')}\"\n    )\n\n    isolation = summary.get(\"run_isolation_summary\", {}).get(\"summary\", {})\n    if isolation:\n        print(\n            f\"Isolation: status={isolation.get('overall_status')} \"\n            f\"seed_fail={isolation.get('seed_state_fail_count')} \"\n            f\"interaction_chain_fail={isolation.get('interaction_chain_fail_count')} \"\n            f\"episode_chain_fail={isolation.get('episode_chain_fail_count')}\"\n        )\n\n    validity = summary.get(\"memory_validity_summary\", {}).get(\"summary\", {})\n    if validity:\n        print(\n            f\"Memory validity: status={validity.get('overall_status')} \"\n            f\"policy_violations={validity.get('update_policy_violation_count')} \"\n            f\"direction_mismatches={validity.get('direction_mismatch_count')} \"\n            f\"memory_write_rate={validity.get('memory_write_rate')}\"\n        )\n        preview = topic_preview(validity.get(\"top_belief_topic_deltas\"))\n        if preview:\n            print(f\"Top belief-topic deltas: {preview}\")\n\n    validity_signals = summary.get(\"memory_validity_summary\", {}).get(\"release_signals\", {})\n    if isinstance(validity_signals, dict):\n        policy_packs = validity_signals.get(\"packs_with_update_policy_violations\", [])\n        direction_packs = validity_signals.get(\"packs_with_direction_mismatches\", [])\n        if policy_packs:\n            print(f\"Validity critical packs: {policy_packs}\")\n        if direction_packs:\n            print(f\"Direction-mismatch packs: {direction_packs}\")\n\n    release = summary.get(\"release_readiness\", {})\n    print(\n        f\"Release readiness: {release.get('overall')} \"\n        f\"| {release.get('recommended_action')}\"\n    )\n\n    pack_results = summary.get(\"pack_results\", [])\n    if pack_results:\n        print(\"Pack snapshot (lowest pass_rate first):\")\n        ordered = sorted(pack_results, key=lambda row: row.get(\"pass_rate\", 0.0))\n        for row in ordered[:10]:\n            pass_rate = row.get(\"pass_rate\", 0.0)\n            print(\n                f\"  {row.get('pack')}: {row.get('passed_steps')}/{row.get('total_steps')} \"\n                f\"({pass_rate:.0%}) gate={row.get('gate_passed')} \"\n                f\"hard_failures={len(row.get('hard_failures', []))}\"\n            )\n\n    if health_path.exists():\n        health = json.loads(health_path.read_text(encoding=\"utf-8\"))\n        health_summary = health.get(\"summary\", {})\n        print(\n            f\"Health: status={health_summary.get('overall_status')} \"\n            f\"flagged_row_rate={health_summary.get('flagged_row_rate')} \"\n            f\"memory_update_rate={health_summary.get('memory_update_rate')}\"\n        )\n        critical_packs = health.get(\"release_signals\", {}).get(\"critical_packs\", [])\n        if critical_packs:\n            print(f\"Critical packs: {critical_packs}\")\nelif error_path.exists():\n    error = json.loads(error_path.read_text(encoding=\"utf-8\"))\n    print(f\"Run failed: {error.get('error_type')}\")\n    print(f\"Error: {error.get('error')}\")\n    print(f\"Pack keys: {error.get('pack_keys')}\")\nelse:\n    print(\"No run_summary.json or run_error.json in latest run directory.\")\n''')"
@@ -373,10 +378,10 @@ shifts: ## Show recent personality shifts
 
 .PHONY: docs docs-serve
 docs: ## Build documentation site (output in site/)
-	uv run --with zensical zensical build
+	uv run --with zensical python -m zensical build
 
 docs-serve: ## Serve documentation locally with live reload
-	uv run --with zensical zensical serve
+	uv run --with zensical python -m zensical serve
 
 # --- Utility ---
 
