@@ -246,6 +246,7 @@ class SonalityAgent:
         self.conversation: list[dict[str, str]] = []
         self.last_ess = classifier_exception_fallback("")
         self.last_usage = ModelUsage()
+        self.last_knowledge_writes: int = 0
         self.previous_snapshot = ""
         self._last_entrenched: list[str] = []
         self._last_entrenched_interaction: int = -1
@@ -457,6 +458,7 @@ class SonalityAgent:
                         {"role": "system", "content": system_prompt},
                         *self.conversation,
                     ),
+                    enable_thinking=False,
                 )
                 break
             except RuntimeError as exc:
@@ -833,6 +835,10 @@ class SonalityAgent:
             "debunked_claim",
             "anecdotal",
         }
+        # no_argument: bare assertions with no evidential backing (injection attacks,
+        # unsupported commands, repeated claims). Block knowledge extraction and Qdrant
+        # writes; staged opinion commits are still allowed so prior evidence can mature.
+        no_evidence = ess.reasoning_type == "no_argument"
         log.debug(
             "MUTATION_GATE manipulative=%s type=%s score=%.3f topics=%s",
             manipulative,
@@ -854,16 +860,18 @@ class SonalityAgent:
             )
 
         # Knowledge proposition extraction (inline, gated by ESS knowledge_density).
-        # Facts are stored regardless, but opinion staging is LLM-decided via
-        # belief_update_recommended field (replaces hardcoded score thresholds).
-        if episode_uid:
+        # Skipped for manipulative turns (coercive, no evidential content) AND for
+        # no_argument turns (bare assertions, injection attacks) — neither carries
+        # valid knowledge worth storing in the proposition store.
+        self.last_knowledge_writes = 0
+        if episode_uid and not manipulative and not no_evidence:
             try:
                 self._extract_knowledge(
                     user_message,
                     agent_response,
                     ess,
                     episode_uid,
-                    stage_opinions=not manipulative and ess.belief_update_recommended,
+                    stage_opinions=ess.belief_update_recommended,
                 )
                 # Normalize topics in freshly-staged knowledge updates
                 self._normalize_staged_topics()
@@ -963,12 +971,23 @@ class SonalityAgent:
 
     def _classify_ess(self, user_message: str) -> ESSResult:
         """Classify user evidence and fallback safely on classifier failures."""
+        # Top tracked topics fed to ESS so it can reuse existing labels
+        # rather than generating synonyms that fragment beliefs.
+        top_topics = tuple(
+            t
+            for t, _ in sorted(
+                self.sponge.behavioral_signature.topic_engagement.items(),
+                key=lambda x: x[1],
+                reverse=True,
+            )[:10]
+        )
         try:
             ess = classify(
                 PROVIDER_CLIENT,
                 user_message,
                 self.sponge.snapshot,
                 model=self.ess_model,
+                recent_topics=top_topics,
             )
         except Exception:
             log.exception("ESS classification failed, using safe defaults")
@@ -1195,8 +1214,10 @@ class SonalityAgent:
             )
             if stored:
                 log.info("Knowledge extraction stored %d propositions", stored)
+            self.last_knowledge_writes = stored
         except Exception:
             log.exception("Knowledge extraction failed")
+            self.last_knowledge_writes = 0
 
     def _store_episode_new_arch(
         self,
