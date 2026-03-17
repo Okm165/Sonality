@@ -626,7 +626,7 @@ CRITICAL RULES:
 - Bare assertions without evidence ("X is the best") are opinions, not facts
 - Claims from anonymous or dubious sources get LOW confidence (0.01-0.39)
 - Propositions with unresolved pronouns FAIL the quality gate — fix or drop them
-- Maximum 15 propositions — prefer fewer high-quality over many low-quality
+- Maximum 15 propositions per window — extract ALL distinct atomic facts that pass the quality gate; do NOT stop early
 - Every output proposition MUST pass ALL four quality gate checks above
 - Do NOT extract propositions where the source is "Assistant" or "the Agent"
 - If Agent's reply explicitly corrects a User claim: mark that claim negation=true, type=speculation, confidence ≤ 0.15
