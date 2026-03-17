@@ -441,7 +441,7 @@ def parse_json_object(text: str) -> dict[str, object]:
     except json.JSONDecodeError:
         pass
     try:
-        return extract_last_json_object(stripped)
+        return extract_last_json_object(stripped) or {}
     except ValueError:
         return {}
 

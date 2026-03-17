@@ -11,6 +11,7 @@ import logging
 import threading
 import time
 import uuid
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
@@ -32,7 +33,7 @@ def _get_agent() -> SonalityAgent:
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     log.info("Initializing Sonality agent for API server")
     _agent_store["agent"] = SonalityAgent()
     yield

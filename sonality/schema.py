@@ -6,8 +6,9 @@ and state persistence (sponge, STM). Qdrant handles vector storage.
 
 from __future__ import annotations
 
-from typing import Final
+from typing import Any, Final
 
+from qdrant_client import AsyncQdrantClient
 from qdrant_client.models import (
     Distance,
     HnswConfigDiff,
@@ -17,10 +18,11 @@ from qdrant_client.models import (
     ScalarQuantizationConfig,
     ScalarType,
     TextIndexParams,
+    TextIndexType,
     VectorParams,
 )
 
-QDRANT_COLLECTIONS: Final[dict[str, dict]] = {
+QDRANT_COLLECTIONS: Final[dict[str, dict[str, Any]]] = {
     "derivatives": {
         "vectors_config": {
             "dense": VectorParams(size=1024, distance=Distance.COSINE, on_disk=False),
@@ -116,7 +118,7 @@ NEO4J_IMAGE: Final[str] = "neo4j:5"
 QDRANT_IMAGE: Final[str] = "qdrant/qdrant:latest"
 
 
-async def init_qdrant_collections(client) -> None:
+async def init_qdrant_collections(client: AsyncQdrantClient) -> None:
     """Initialize Qdrant collections with optimized schemas."""
     from qdrant_client.models import TokenizerType
 
@@ -140,7 +142,7 @@ async def init_qdrant_collections(client) -> None:
                     collection_name=name,
                     field_name=text_field,
                     field_schema=TextIndexParams(
-                        type="text",
+                        type=TextIndexType.TEXT,
                         tokenizer=TokenizerType.WORD,
                         min_token_len=2,
                         max_token_len=20,

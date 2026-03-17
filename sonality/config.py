@@ -55,6 +55,10 @@ QDRANT_URL: Final = _env_str("SONALITY_QDRANT_URL", "http://localhost:6333")
 # --- Embedding (local FastEmbed bge-large-en-v1.5, 1024 dims) ---
 EMBEDDING_DIMENSIONS: Final = 1024
 EMBEDDING_MAX_CHARS: Final = _env_int("SONALITY_EMBEDDING_MAX_CHARS", 2000)
+# Optional API-based embedding override (falls back to local FastEmbed when unset).
+EMBEDDING_API_KEY: Final = _env_str("SONALITY_EMBEDDING_API_KEY", "")
+EMBEDDING_BASE_URL: Final = _env_str("SONALITY_EMBEDDING_BASE_URL", "")
+EMBEDDING_SEND_DIMENSIONS: Final = _env_str("SONALITY_EMBEDDING_SEND_DIMENSIONS", "false").lower() == "true"
 
 # --- Qdrant search tuning ---
 QDRANT_SEARCH_EF: Final = _env_int("SONALITY_QDRANT_SEARCH_EF", 128)
@@ -76,10 +80,9 @@ RETRIEVAL_CONFIDENCE_THRESHOLD: Final = _env_float("SONALITY_RETRIEVAL_CONFIDENC
 RETRIEVAL_OVER_FETCH_FACTOR: Final = _env_int("SONALITY_RETRIEVAL_OVER_FETCH_FACTOR", 3)
 MAX_RERANK_CANDIDATES: Final = _env_int("SONALITY_MAX_RERANK_CANDIDATES", 25)
 
-# Per-HTTP-request timeout for LLM calls. 90s is sufficient for the chat response,
-# but knowledge extraction (1500-token prompt + 512-token output) needs ~130-150s on
-# a 35B model at ~4 tok/s. 180s gives a safe buffer for all task types.
-# Increase further for 70B+ models or throttled endpoints.
+# Per-HTTP-request timeout for LLM calls. 90s is sufficient for most calls; 180s
+# covers knowledge extraction (1500-token prompt + up to 1024-token output) on
+# slower endpoints. Increase further for 70B+ models or throttled endpoints.
 LLM_REQUEST_TIMEOUT: Final = _env_int("SONALITY_LLM_TIMEOUT", 180)
 
 # Timeout for async ops dispatched from the sync context via run_coroutine_threadsafe.
