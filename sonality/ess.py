@@ -225,7 +225,13 @@ ESS_TOOL: Final = {
             },
             "summary": {
                 "type": "string",
-                "description": "One-sentence summary of the interaction.",
+                "description": (
+                    "One-sentence third-person summary of what the USER asserts or asks, in concrete "
+                    "specific terms. State the actual subject matter directly: name the claim, study, "
+                    "or data point. Do NOT use vague meta-descriptions like 'User discusses X' or "
+                    "'User asks about X' — instead write what they assert: "
+                    "'User presents Stanford (2022) data showing hybrid work lowers productivity.'"
+                ),
             },
             "opinion_direction": {
                 "type": "string",
@@ -526,7 +532,7 @@ def _run_classification_attempts(
     attempts_executed = 0
     total_input_tokens = 0
     total_output_tokens = 0
-    bad_fields: set[str] = set()
+    bad_fields: frozenset[str] = frozenset()
     for attempt in range(MAX_ESS_RETRIES):
         attempts_executed = attempt + 1
         if attempt == 0:
@@ -556,7 +562,7 @@ def _run_classification_attempts(
         else:
             completion = chat_completion(
                 model=model,
-                max_tokens=256,  # ESS tool call: ~150 tokens for score+type+topics+summary
+                max_tokens=384,  # ESS tool call: 11 fields including one-sentence summary
                 temperature=0.0,
                 messages=(
                     {
@@ -574,11 +580,13 @@ def _run_classification_attempts(
             if not data:
                 data = parse_json_object(completion.text)
 
+        if not data:
+            data = {}
         missing = REQUIRED_FIELDS - set(data.keys())
         required_coercions = _required_field_coercions(data) if not missing else ()
         if not missing and not required_coercions:
             break
-        bad_fields = missing | set(required_coercions)
+        bad_fields = missing | frozenset(required_coercions)
         log.warning(
             "ESS attempt %d/%d missing fields %s malformed_required %s",
             attempt + 1,
@@ -741,6 +749,7 @@ def classify(
     user_message: str,
     sponge_snapshot: str,
     model: str = config.ESS_MODEL,
+    recent_topics: tuple[str, ...] = (),
 ) -> ESSResult:
     """Classify evidence strength of the user's message.
 
@@ -749,10 +758,15 @@ def classify(
     (up to 50pp shift from attribution labels — ESS should evaluate user input only).
     Assumes classifier outputs may be malformed; coercion/default tracking is
     preserved in the result for downstream safety gating and auditing.
+
+    recent_topics: top tracked topic labels from sponge — passed so the model
+    can reuse existing labels and avoid generating synonyms that fragment beliefs.
     """
+    tracked = ", ".join(recent_topics) if recent_topics else "none yet"
     prompt = ESS_CLASSIFICATION_PROMPT.format(
         user_message=user_message,
         sponge_snapshot=sponge_snapshot,
+        tracked_topics=tracked,
     )
     log.info("ESS classifying message (%d chars)", len(user_message))
     attempts = _run_classification_attempts(client, prompt, model)
@@ -764,16 +778,28 @@ def classify(
             payload.defaulted_fields,
         )
 
-    # Consistency guard: empirical_data and expert_opinion inherently carry
-    # learnable content, so knowledge_density=NONE is contradictory.
+    # Consistency guard: substantive reasoning types inherently carry learnable
+    # content, so knowledge_density=NONE is contradictory for them.
+    # logical_argument with score >= 0.30 also qualifies — a real argument with
+    # named concepts and structured reasoning is worth extracting propositions from.
     kd = payload.knowledge_density
-    if kd == KnowledgeDensity.NONE and payload.reasoning_type in (
-        ReasoningType.EMPIRICAL_DATA,
-        ReasoningType.EXPERT_OPINION,
-        ReasoningType.NEWS_REPORT,
+    if kd == KnowledgeDensity.NONE and (
+        payload.reasoning_type in (
+            ReasoningType.EMPIRICAL_DATA,
+            ReasoningType.EXPERT_OPINION,
+            ReasoningType.NEWS_REPORT,
+        )
+        or (
+            payload.reasoning_type is ReasoningType.LOGICAL_ARGUMENT
+            and payload.score >= 0.30
+        )
     ):
         kd = KnowledgeDensity.LOW
-        log.debug("ESS: upgraded knowledge_density NONE→LOW for type=%s", payload.reasoning_type)
+        log.debug(
+            "ESS: upgraded knowledge_density NONE→LOW for type=%s score=%.2f",
+            payload.reasoning_type,
+            payload.score,
+        )
 
     result = ESSResult(
         score=_clamp(payload.score),
