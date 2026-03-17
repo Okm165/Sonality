@@ -62,6 +62,7 @@ boundary_type must be: topic_shift, goal_change, explicit_transition, or none.""
 REFLECTION_GATE_PROMPT: Final = """\
 Decide whether the agent should run reflection this turn.
 
+interaction_count={interaction_count} (total interactions)
 window_interactions={window_interactions} (interactions since last reflection)
 target_cadence={target_cadence}
 pending_insights={pending_insights}
@@ -99,6 +100,8 @@ Key distinctions:
 - "What do you know about X?" → SIMPLE (single lookup), NOT TEMPORAL
 - "What's your view on X?" → BELIEF_QUERY, NOT SIMPLE
 - "What did we discuss earlier?" → TEMPORAL (needs chronological order)
+- "How did you handle X earlier in this conversation?" → TEMPORAL (retrospective, needs conversation history)
+- "Looking back on this conversation, how did you respond to Y?" → TEMPORAL (retrospective self-assessment)
 - Presenting factual claims for the agent to respond to → NONE (no retrieval needed)
 
 Also determine:
