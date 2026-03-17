@@ -11,7 +11,7 @@ import uuid
 from dataclasses import dataclass, field
 
 from qdrant_client import QdrantClient
-from qdrant_client.models import FieldCondition, Filter, MatchValue, PointStruct
+from qdrant_client.models import FieldCondition, Filter, MatchValue, PointIdsList, PointStruct
 
 from sonality import config
 
@@ -104,7 +104,10 @@ def clear_knowledge_features() -> int:
     if results:
         uids = [str(p.payload.get("uid", "")) for p in results if p.payload]
         if uids:
-            client.delete(collection_name="semantic_features", points_selector=uids)
+            client.delete(
+                collection_name="semantic_features",
+                points_selector=PointIdsList(points=uids),
+            )
     client.close()
     return count
 
@@ -120,7 +123,7 @@ def seed_knowledge_features(facts: list[dict[str, object]]) -> int:
     points = [
         PointStruct(
             id=str(uuid.uuid5(uuid.NAMESPACE_OID, str(fact["uid"]))),
-            vector=[0.0] * 768,  # placeholder vector
+            vector={"dense": [0.0] * config.EMBEDDING_DIMENSIONS},
             payload={
                 "uid": str(uuid.uuid5(uuid.NAMESPACE_OID, str(fact["uid"]))),
                 "category": "knowledge",
