@@ -74,9 +74,12 @@ db-clear: ## Clear all data from databases while preserving schema
 
 # --- Run ---
 
-.PHONY: run preflight-live preflight-live-probe
+.PHONY: run serve preflight-live preflight-live-probe
 run: ## Start the Sonality REPL agent
 	uv run sonality $(ARGS)
+
+serve: ## Start the Sonality API server (OpenAI-compatible at /v1/chat/completions)
+	uv run sonality-server --host 0.0.0.0 --port 8000 $(ARGS)
 
 preflight-live: ## Validate live API config and selected models
 	@uv run python -c "from sonality import config; import sys; missing=list(config.missing_live_api_config()); \
@@ -315,7 +318,7 @@ bench-personality: preflight-live ## Run personality-development benchmark slice
 bench-knowledge-acquisition: preflight-live ## Run knowledge acquisition battery (K1-K32): extraction, recall, misinformation, epistemic humility, etc.
 	uv run pytest benches/test_knowledge_acquisition_live.py -m "bench and live" -v -s --tb=short
 
-bench-psych-stability: preflight-live ## Run psychological stability battery (B1-B10): Asch, Festinger, gaslighting, flattery, etc.
+bench-psych-stability: preflight-live ## Run psychological stability battery (B1-B12): Asch, Festinger, gaslighting, anchoring, false-consensus, flattery, etc.
 	uv run pytest benches/test_psych_stability_live.py -m "bench and live" -v -s --tb=short
 
 bench-knowledge-accumulation: preflight-live ## Run 6-domain knowledge accumulation bench (data kept for manual DB inspection)
