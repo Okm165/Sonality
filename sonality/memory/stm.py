@@ -119,8 +119,14 @@ class ShortTermMemory:
         """Load STM state from Neo4j."""
         try:
             async with neo4j_driver.session(database=config.NEO4J_DATABASE) as session:
+                # MERGE ensures the node and its properties exist, preventing Neo4j
+                # property-key-not-found notifications on first access after a fresh DB.
                 result = await session.run(
-                    "MATCH (s:STMState {session_id: 'default'}) RETURN s.running_summary, s.message_buffer"
+                    """
+                    MERGE (s:STMState {session_id: 'default'})
+                    ON CREATE SET s.running_summary = '', s.message_buffer = '[]', s.last_updated = datetime()
+                    RETURN s.running_summary, s.message_buffer
+                    """
                 )
                 record = await result.single()
                 if record:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import hashlib
 import json
 import logging
 import threading
@@ -178,7 +179,13 @@ class BatchEntrenchmentResponse(BaseModel):
     @classmethod
     def normalize_list(cls, data: object) -> object:
         if isinstance(data, list):
+            # Discard numeric indices (model bug: [1, 3, 4] instead of [{topic: ...}])
+            data = [item for item in data if isinstance(item, dict)]
             return {"entrenched": data}
+        if isinstance(data, dict):
+            items = data.get("entrenched", [])
+            if isinstance(items, list):
+                data = {"entrenched": [item for item in items if isinstance(item, dict)]}
         return data
 
 
@@ -252,6 +259,8 @@ class SonalityAgent:
         self._last_entrenched_interaction: int = -1
         # LLM-based topic normalization cache: raw_lower → canonical_lower
         self._topic_canon_cache: dict[str, str] = {}
+        # Content dedup ring buffer: SHA-256 hex of recently ingested texts (capped at 200)
+        self._ingest_seen_hashes: list[str] = []
 
         # Background event loop for async database operations
         self._loop = asyncio.new_event_loop()
@@ -529,6 +538,21 @@ class SonalityAgent:
         _t0 = time.perf_counter()
         log.info("=== Ingest #%d ===", self.sponge.interaction_count + 1)
         log.info("Content: %.200s", text)
+
+        # Ingest-level content dedup: skip identical articles seen in the last 200 ingests.
+        content_hash = hashlib.sha256(text.encode()).hexdigest()
+        if content_hash in self._ingest_seen_hashes:
+            log.warning(
+                "INGEST_DUPLICATE skipping identical content (hash=%s) — "
+                "article already processed this session",
+                content_hash[:12],
+            )
+            self.sponge.interaction_count += 1
+            return self.last_ess
+        self._ingest_seen_hashes.append(content_hash)
+        if len(self._ingest_seen_hashes) > 200:
+            self._ingest_seen_hashes.pop(0)
+
         log.debug(
             "INGEST_STATE sponge=v%d interactions=%d beliefs=%d staged=%d",
             self.sponge.version,
@@ -643,6 +667,19 @@ class SonalityAgent:
                     staged_before,
                     len(self.sponge.staged_opinion_updates),
                 )
+                # Record total committed shift so the reflection gate's recent_mag
+                # accumulates correctly (only MAJOR individual beliefs called record_shift
+                # before, leaving cumulative ingest shifts invisible to event-driven reflection).
+                total_committed_mag = sum(
+                    abs(float(s.split(":")[1].split("(")[0]))
+                    for s in committed
+                    if ":" in s
+                )
+                if total_committed_mag > 0.01:
+                    self.sponge.record_shift(
+                        description=f"Ingest #{self.sponge.interaction_count} committed {len(committed)} beliefs",
+                        magnitude=total_committed_mag,
+                    )
             elif staged_before > 0:
                 log.debug(
                     "INGEST_STAGED_PENDING %d updates not yet due (interaction=%d)",
@@ -1111,7 +1148,9 @@ class SonalityAgent:
 
     # Embedding similarity thresholds for topic resolution (per plan PATCH 3)
     _TOPIC_AUTO_MERGE_THRESHOLD: float = 0.92  # Auto-merge if similarity >= this
-    _TOPIC_LLM_HINT_THRESHOLD: float = 0.80  # Include in LLM prompt if >= this
+    _TOPIC_LLM_HINT_THRESHOLD: float = 0.70  # Include in LLM prompt if >= this
+    # Subtopic suffix patterns: "{base} conflict" → "{base}" when base is a known topic.
+    _TOPIC_SUBTOPIC_SUFFIXES: Final = (" conflict", " war", " crisis", " situation", " issue")
 
     def _normalize_topics_llm(self, raw_topics: tuple[str, ...]) -> tuple[str, ...]:
         """Map ESS topic labels to canonical forms using embedding-assisted resolution.
@@ -1145,6 +1184,12 @@ class SonalityAgent:
                 result.append(self._topic_canon_cache[lower])
                 continue
             dehyphenated = lower.replace("-", " ")
+            # Subtopic suffix collapse: "iran conflict" → "iran" when "iran" is known.
+            base_stripped = next(
+                (dehyphenated.removesuffix(sfx) for sfx in self._TOPIC_SUBTOPIC_SUFFIXES
+                 if dehyphenated.endswith(sfx) and dehyphenated.removesuffix(sfx) in existing),
+                None,
+            )
             if lower in existing:
                 self._topic_canon_cache[lower] = lower
                 result.append(lower)
@@ -1152,6 +1197,10 @@ class SonalityAgent:
                 self._topic_canon_cache[lower] = dehyphenated
                 log.debug("Topic hyphen-normalized: '%s' → '%s'", lower, dehyphenated)
                 result.append(dehyphenated)
+            elif base_stripped:
+                self._topic_canon_cache[lower] = base_stripped
+                log.debug("Topic subtopic-collapsed: '%s' → '%s'", lower, base_stripped)
+                result.append(base_stripped)
             else:
                 uncached.append(lower)
 
@@ -1284,7 +1333,11 @@ class SonalityAgent:
             ess.score,
             episode_uid[:8],
         )
-        text = f"User: {user_message}\nAssistant: {agent_response}"
+        text = (
+            f"User: {user_message}\nAssistant: {agent_response}"
+            if agent_response
+            else user_message
+        )
         try:
             stored = self._run_async(
                 extract_and_store_knowledge(
@@ -1982,11 +2035,12 @@ class SonalityAgent:
         )
         gate = self._reflection_gate()
         log.info(
-            "REFLECT_GATE trigger=%s label=%s window=%d/%d pending_insights=%d "
-            "staged=%d beliefs=%d recent_mag=%.3f",
+            "REFLECT_GATE trigger=%s label=%s window=%d cadence=%d min=%d "
+            "pending_insights=%d staged=%d beliefs=%d recent_mag=%.3f",
             gate.trigger,
             gate.trigger_label,
             gate.window_interactions,
+            config.REFLECTION_EVERY,
             self._MIN_WINDOW_FOR_EVENT_DRIVEN,
             len(self.sponge.pending_insights),
             len(self.sponge.staged_opinion_updates),
@@ -2049,7 +2103,23 @@ class SonalityAgent:
         except Exception:
             log.debug("Knowledge pruning failed", exc_info=True)
 
-        # Forgetting: assess and archive low-importance episodes
+        # Fetch recent episodes BEFORE forgetting so the snapshot has context to work with.
+        try:
+            recent_episodes = (
+                self._run_async(
+                    self._graph.list_recent_episode_context(min(config.REFLECTION_EVERY, 10))
+                )
+                or []
+            )
+        except Exception:
+            log.debug("Reflection episode retrieval failed", exc_info=True)
+            recent_episodes = []
+        if not recent_episodes:
+            log.info("No episodes for reflection, skipping")
+            self.sponge.last_reflection_at = self.sponge.interaction_count
+            return
+
+        # Forgetting: assess and archive low-importance episodes (after fetching context above)
         try:
             self._run_async(self._run_forgetting_cycle())
         except Exception:
@@ -2084,21 +2154,6 @@ class SonalityAgent:
                 log.warning("Health assessment concerns: %s", health.concerns)
         except Exception:
             log.debug("LLM health assessment failed", exc_info=True)
-
-        try:
-            recent_episodes = (
-                self._run_async(
-                    self._graph.list_recent_episode_context(min(config.REFLECTION_EVERY, 10))
-                )
-                or []
-            )
-        except Exception:
-            log.debug("Reflection episode retrieval failed", exc_info=True)
-            recent_episodes = []
-        if not recent_episodes:
-            log.info("No episodes for reflection, skipping")
-            self.sponge.last_reflection_at = self.sponge.interaction_count
-            return
 
         prompt = self._reflection_prompt(gate.trigger_label, recent_episodes)
 
@@ -2246,15 +2301,64 @@ class SonalityAgent:
         )
 
     def _log_health_event(self) -> None:
-        """Write lightweight health diagnostics for drift/sycophancy detection."""
+        """Write lightweight health diagnostics for drift/sycophancy/saturation detection."""
         words = self.sponge.snapshot.split()
         unique_ratio = len(set(w.lower() for w in words)) / len(words) if words else 0.0
-        metas = list(self.sponge.belief_meta.values())
-        high_conf = sum(1 for m in metas if m.confidence > 0.5)
+        metas = list(self.sponge.belief_meta.items())
+        high_conf = sum(1 for _, m in metas if m.confidence > 0.5)
         high_conf_ratio = high_conf / len(metas) if metas else 0.0
         disagreement = self.sponge.behavioral_signature.disagreement_rate
 
         warnings: list[str] = []
+
+        # Belief saturation: beliefs pinned at extremes can't absorb new evidence correctly.
+        saturated = [
+            t for t, _ in metas if abs(self.sponge.opinion_vectors.get(t, 0.0)) >= 0.95
+        ]
+        if saturated:
+            warnings.append(f"saturated_beliefs:{','.join(saturated[:5])}")
+            log.warning(
+                "BELIEF_SATURATION %d beliefs pinned at ±0.95+: %s | "
+                "these topics resist new evidence — consider decay or manual review",
+                len(saturated),
+                saturated[:5],
+            )
+
+        # Sycophancy indicator: all beliefs positive, no negative opinions formed.
+        opinions = self.sponge.opinion_vectors
+        if len(opinions) >= 5:
+            pos_count = sum(1 for v in opinions.values() if v > 0.1)
+            neg_count = sum(1 for v in opinions.values() if v < -0.1)
+            if neg_count == 0 and pos_count >= 5:
+                warnings.append("all_positive_beliefs")
+                log.warning(
+                    "SYCOPHANCY_RISK all %d tracked beliefs are positive (neg=0) — "
+                    "agent may not be forming critical/opposing views",
+                    pos_count,
+                )
+            elif pos_count > 0 and neg_count > 0:
+                log.debug(
+                    "BELIEF_BALANCE pos=%d neg=%d neutral=%d",
+                    pos_count,
+                    neg_count,
+                    len(opinions) - pos_count - neg_count,
+                )
+
+        # Stale-but-alive: beliefs with no recent reinforcement (last > 10 interactions ago)
+        # that are still at extreme positions — they should have decayed by now.
+        stale_extreme = [
+            t
+            for t, m in metas
+            if self.sponge.interaction_count - m.last_reinforced > 10
+            and abs(self.sponge.opinion_vectors.get(t, 0.0)) > 0.7
+        ]
+        if stale_extreme:
+            log.warning(
+                "STALE_EXTREME_BELIEFS %d beliefs unreinforced >10 interactions but still extreme: %s",
+                len(stale_extreme),
+                stale_extreme[:5],
+            )
+            warnings.append(f"stale_extreme:{','.join(stale_extreme[:3])}")
 
         # Use cached result from this turn's reflection call to avoid extra LLM call.
         entrenched = list(self._last_entrenched)
@@ -2275,6 +2379,7 @@ class SonalityAgent:
                 "snapshot_unique_ratio": round(unique_ratio, 3),
                 "pending_insights": len(self.sponge.pending_insights),
                 "staged_updates": len(self.sponge.staged_opinion_updates),
+                "saturated_beliefs": saturated,
                 "entrenched": entrenched,
                 "contradictions": contradictions,
                 "warnings": warnings,

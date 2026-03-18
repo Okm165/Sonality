@@ -499,9 +499,9 @@ class MemoryGraph:
                 MATCH (s:Segment)
                 WHERE coalesce(s.consolidated, false) = false
                   AND s.segment_id <> $exclude_segment_id
-                  AND s.episode_count >= 2
+                  AND coalesce(s.episode_count, 0) >= 2
                 RETURN s.segment_id AS segment_id
-                ORDER BY s.end_time DESC, s.start_time DESC
+                ORDER BY coalesce(s.end_time, s.start_time, datetime()) DESC
                 LIMIT $limit
                 """,
                 exclude_segment_id=exclude_segment_id,

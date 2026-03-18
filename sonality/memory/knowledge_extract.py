@@ -197,35 +197,29 @@ def _extract_propositions(text: str, preceding_context: str = "") -> list[Extrac
     ]
 
 
-async def _load_existing_knowledge_embeddings(
+async def _find_nearest_knowledge(
     qdrant: AsyncQdrantClient,
-    limit: int = 500,
-) -> list[tuple[str, str, list[float]]]:
-    """Load existing knowledge feature (uid, value, vector) triples for dedup comparison."""
-    results, _ = await qdrant.scroll(
+    embedding: list[float],
+) -> tuple[str, float] | None:
+    """Find the nearest knowledge feature to the given embedding using ANN.
+
+    Returns (uid, score) of the nearest match above DEDUP_THRESHOLD_EXISTING, or None.
+    Replaces full-scan scroll with O(log N) vector search for scalable dedup.
+    """
+    results = await qdrant.search(
         collection_name="semantic_features",
-        scroll_filter=Filter(
+        query_vector=embedding,
+        query_filter=Filter(
             must=[FieldCondition(key="category", match=MatchValue(value="knowledge"))]
         ),
-        limit=limit,
-        with_payload=["uid", "value"],
-        with_vectors=True,
+        limit=1,
+        with_payload=["uid"],
+        score_threshold=DEDUP_THRESHOLD_EXISTING,
     )
-    result: list[tuple[str, str, list[float]]] = []
-    for point in results:
-        if point.vector and point.payload:
-            raw_vec = (
-                point.vector
-                if isinstance(point.vector, list)
-                else next(iter(point.vector.values()))
-            )
-            # Narrow to flat float list; skip sparse/nested vectors.
-            if not isinstance(raw_vec, list) or (raw_vec and not isinstance(raw_vec[0], float)):
-                continue
-            vec: list[float] = cast(list[float], raw_vec)
-            uid = str(point.payload.get("uid", "") or point.id or "")
-            result.append((uid, str(point.payload.get("value", "")), vec))
-    return result
+    if results:
+        uid = str(results[0].payload.get("uid", "") if results[0].payload else "") or str(results[0].id)
+        return uid, results[0].score
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -262,7 +256,6 @@ def _deduplicate_intrabatch(
 
 async def _deduplicate_against_existing(
     batch: list[tuple[ExtractedProposition, list[float]]],
-    existing: list[tuple[str, str, list[float]]],
     qdrant: AsyncQdrantClient,
     episode_uid: str,
 ) -> list[tuple[ExtractedProposition, list[float]]]:
@@ -271,20 +264,14 @@ async def _deduplicate_against_existing(
     When a proposition is semantically similar to an existing one, instead of
     silently dropping it we boost the existing entry's confidence and add the
     episode citation (MMA 2025: evidence accumulation via repeated mentions).
-    Uses UID-based updates to avoid fragile exact-text matching.
+    Uses Qdrant ANN search instead of a full O(N) scroll for scalable dedup.
     """
     kept: list[tuple[ExtractedProposition, list[float]]] = []
     boosts: list[tuple[str, float]] = []  # (existing_uid, new_confidence)
     for prop, emb in batch:
-        match_uid = next(
-            (
-                uid
-                for uid, _text, ex_emb in existing
-                if cosine_similarity(emb, ex_emb) > DEDUP_THRESHOLD_EXISTING
-            ),
-            None,
-        )
-        if match_uid:
+        match = await _find_nearest_knowledge(qdrant, emb)
+        if match:
+            match_uid, _score = match
             boosts.append((match_uid, prop.confidence))
             log.debug("Evidence boost queued for uid=%s", match_uid[:8])
         else:
@@ -445,9 +432,7 @@ async def extract_and_store_knowledge(
 
     batch = _deduplicate_intrabatch(all_propositions, new_embeddings)
     log.debug("Intra-batch dedup: %d → %d", len(all_propositions), len(batch))
-    existing = await _load_existing_knowledge_embeddings(qdrant)
-    log.debug("Existing knowledge entries for dedup: %d", len(existing))
-    kept = await _deduplicate_against_existing(batch, existing, qdrant, episode_uid)
+    kept = await _deduplicate_against_existing(batch, qdrant, episode_uid)
     log.debug(
         "After existing dedup: %d kept, %d evidence-boosted", len(kept), len(batch) - len(kept)
     )

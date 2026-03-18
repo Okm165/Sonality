@@ -332,6 +332,7 @@ Uncertainty calibration (use supporting_count and contradicting_count from each 
 - mixed evidence: new_uncertainty 0.4–0.7
 
 direction: float -1.0 to +1.0. Positive means the evidence argues FOR this topic being real/important/valid (should push opinion MORE POSITIVE). Negative means the evidence argues AGAINST it. Absolute scale — not relative to the current belief.
+SATURATION RULE: If current_value is already at ±1.0, the belief is saturated. Use |direction| ≤ 0.3 unless this episode contains clear contradictory or disconfirming evidence — do not pile further strong positive evidence onto an already maxed-out belief.
 evidence_strength and new_uncertainty: floats 0.0 to 1.0.
 update_magnitude: MAJOR (shift ≥0.3), MINOR (shift <0.3), or NONE.
 contraction_action: CONTRACT or NONE.
@@ -392,11 +393,11 @@ Signs of entrenchment:
 - Few or no contradicting episodes considered
 - High confidence despite limited evidence diversity
 
-Output ONLY a JSON array, one entry per entrenched belief (omit non-entrenched ones):
-[{{"topic": "nuclear_energy", "reasoning": "All 5 updates agreed with the existing stance; no contradictory episodes considered."}}]
+Output ONLY a JSON object with an "entrenched" array. Each entry must use the exact "topic" string key from the list above (not an array index). Omit non-entrenched beliefs.
+Example: {{"entrenched": [{{"topic": "nuclear_energy", "reasoning": "All 5 updates agreed with the existing stance."}}]}}
 
-Return an empty array [] if no entrenchment detected.
-Your response must end with ONLY the JSON array."""
+Return {{"entrenched": []}} if no entrenchment detected.
+Your response must end with ONLY the JSON object."""
 
 # --- Health Assessment ---
 HEALTH_ASSESSMENT_PROMPT: Final = """\

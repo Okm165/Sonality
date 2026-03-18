@@ -420,7 +420,7 @@ class SemanticIngestionWorker:
             prompt=FEATURE_CONSOLIDATION_PROMPT.format(category=category, features=features_text),
             response_model=FeatureConsolidationResponse,
             fallback=FeatureConsolidationResponse(),
-            max_tokens=512,  # SKIP or 2 merges — small output
+            max_tokens=1024,  # SKIP or 2 merges with full UIDs and canonical values
             max_retries=1,
             assistant_prefix='{"consolidation_decision": "',
         )
