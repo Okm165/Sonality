@@ -12,6 +12,8 @@ from typing import Final
 
 from pydantic import BaseModel, Field, model_validator
 
+from .. import config
+
 log = logging.getLogger(__name__)
 
 SEED_SNAPSHOT: Final = (
@@ -390,7 +392,32 @@ class SpongeState(BaseModel):
                 new_uncertainty=min(valid_uncertainties) if valid_uncertainties else -1.0,
             )
             applied.append(f"{topic}:{net:+.4f} ({evidence_increment} staged)")
+
+        self._prune_weak_beliefs()
         return applied
+
+    def _prune_weak_beliefs(self) -> None:
+        """Drop the lowest-value beliefs when belief count exceeds MAX_BELIEFS.
+
+        Value = confidence * evidence_count * abs(position). Weak, low-evidence,
+        weak-position beliefs (e.g. transient news names) are evicted first.
+        """
+        if len(self.opinion_vectors) <= config.MAX_BELIEFS:
+            return
+        excess = len(self.opinion_vectors) - config.MAX_BELIEFS
+
+        def _score(topic: str) -> float:
+            pos = abs(self.opinion_vectors.get(topic, 0.0))
+            meta = self.belief_meta.get(topic)
+            conf = meta.confidence if meta else 0.0
+            ev = meta.evidence_count if meta else 1
+            return pos * conf * ev
+
+        ranked = sorted(self.opinion_vectors, key=_score)
+        for topic in ranked[:excess]:
+            self.opinion_vectors.pop(topic, None)
+            self.belief_meta.pop(topic, None)
+            log.info("BELIEF_PRUNED capacity=%d evicted=%r (low value)", config.MAX_BELIEFS, topic)
 
     def record_shift(self, description: str, magnitude: float) -> None:
         """Append a bounded history entry describing a personality change."""

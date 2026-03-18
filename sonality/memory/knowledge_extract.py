@@ -85,10 +85,15 @@ class ExtractionResponse(BaseModel):
         3. Normal {"propositions": [...]} — pass through unchanged.
         """
         if isinstance(data, list):
-            return {"propositions": [x for x in data if isinstance(x, dict)]}
+            return {"propositions": [x for x in data if isinstance(x, dict) and "text" in x]}
         if isinstance(data, dict) and "propositions" not in data and "text" in data:
             # Bare proposition dict recovered from truncated output
             return {"propositions": [data]}
+        if isinstance(data, dict) and "propositions" in data:
+            # Filter out empty proposition objects (LLM returns [{}] for no-content)
+            props = data["propositions"]
+            if isinstance(props, list):
+                data = {"propositions": [x for x in props if isinstance(x, dict) and "text" in x]}
         return data
 
 

@@ -558,18 +558,26 @@ class MemoryGraph:
             for record in records
         ]
 
-    async def get_forgetting_candidates(self, *, limit: int = 20) -> list[EpisodeNode]:
-        """Fetch oldest low-utility raw episodes eligible for forgetting assessment."""
+    async def get_forgetting_candidates(
+        self, *, limit: int = 20, min_age_minutes: int = 60
+    ) -> list[EpisodeNode]:
+        """Fetch low-utility raw episodes eligible for forgetting assessment.
+
+        Only considers episodes older than min_age_minutes to prevent the forgetting
+        cycle from immediately archiving just-ingested episodes.
+        """
         async with self._driver.session(database=_DB) as session:
             result = await session.run(
                 """
                 MATCH (e:Episode)
                 WHERE NOT e.archived AND e.consolidation_level = 1
+                  AND e.created_at < datetime() - duration({minutes: $min_age_minutes})
                 RETURN e
                 ORDER BY e.utility_score ASC, e.created_at ASC
                 LIMIT $limit
                 """,
                 limit=limit,
+                min_age_minutes=min_age_minutes,
             )
             records = [record async for record in result]
             return [_record_to_episode(record["e"]) for record in records]

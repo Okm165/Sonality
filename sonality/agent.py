@@ -144,7 +144,7 @@ class BeliefDecayDecision(BaseModel):
 
     topic: str
     action: BeliefDecayAction = BeliefDecayAction.RETAIN
-    new_confidence: float = 0.0
+    new_confidence: float | None = None
     reasoning: str = ""
 
 
@@ -1792,7 +1792,7 @@ class SonalityAgent:
             prompt=prompt,
             response_model=ReflectionGateResponse,
             fallback=ReflectionGateResponse(trigger=ReflectionGateDecision.SKIP),
-            max_tokens=128,  # SKIP / PERIODIC / EVENT_DRIVEN + short reasoning
+            max_tokens=256,  # SKIP / PERIODIC / EVENT_DRIVEN + reasoning (128 too low, truncates)
             assistant_prefix='{"trigger": "',
         )
         if not result.success:
@@ -1975,7 +1975,8 @@ class SonalityAgent:
                 del self.sponge.belief_meta[topic]
                 self.sponge.opinion_vectors.pop(topic, None)
             elif decision.action is BeliefDecayAction.DECAY:
-                meta.confidence = max(0.0, min(1.0, decision.new_confidence))
+                new_conf = decision.new_confidence if decision.new_confidence is not None else meta.confidence * 0.8
+                meta.confidence = max(0.0, min(1.0, new_conf))
                 meta.uncertainty = 1.0 - meta.confidence
                 log.debug(
                     "Belief decay: %s confidence → %.2f (%s)",
