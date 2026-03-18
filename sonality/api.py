@@ -111,7 +111,11 @@ async def chat_completions(request: ChatCompletionRequest) -> ChatCompletionResp
 
     The last user message is processed through Sonality's respond() method,
     which includes ESS classification, belief updates, and personality-aware responses.
+    Streaming is not supported; requests with stream=True return 501.
     """
+    if request.stream:
+        raise HTTPException(status_code=501, detail="Streaming not supported")
+
     agent = _get_agent()
 
     user_messages = [m for m in request.messages if m.role == "user"]
@@ -236,7 +240,7 @@ async def simple_chat(request: SimpleChatRequest) -> SimpleChatResponse:
     agent = _get_agent()
     with _agent_lock:
         response_text = agent.respond(request.message)
-    ess = agent.last_ess
+        ess = agent.last_ess
     return SimpleChatResponse(
         response=response_text,
         ess_score=ess.score,
@@ -331,7 +335,7 @@ async def ingest(request: IngestRequest) -> IngestResponse:
 
 @app.get("/beliefs", response_model=list[BeliefResponse])
 async def get_beliefs() -> list[BeliefResponse]:
-    """Return all current belief states."""
+    """Return all current belief states, sorted by absolute position strength."""
     agent = _get_agent()
     beliefs = [
         BeliefResponse(
@@ -342,7 +346,7 @@ async def get_beliefs() -> list[BeliefResponse]:
             uncertainty=b.uncertainty,
         )
         for topic in agent.sponge.opinion_vectors
-        for b in [agent.sponge.get_belief(topic)]
+        for b in (agent.sponge.get_belief(topic),)
     ]
     return sorted(beliefs, key=lambda b: abs(b.position), reverse=True)
 
