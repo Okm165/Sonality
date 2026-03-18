@@ -79,6 +79,7 @@ def assess_health(sponge: SpongeState) -> HealthReport:
         beliefs_summary=beliefs_summary,
         recent_shifts=recent_shifts,
         interaction_count=sponge.interaction_count,
+        respond_count=sponge.behavioral_signature.respond_count,
         disagreement_rate=f"{sponge.behavioral_signature.disagreement_rate:.2f}",
         belief_count=len(sponge.belief_meta),
         high_conf_count=high_conf_count,

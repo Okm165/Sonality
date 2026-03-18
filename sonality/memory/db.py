@@ -17,9 +17,10 @@ from ..schema import NEO4J_SCHEMA_STATEMENTS, init_qdrant_collections
 
 log = logging.getLogger(__name__)
 
-# Neo4j emits INFORMATION-level GqlStatus notifications when IF NOT EXISTS constraints
-# already exist. These are harmless but very verbose in test/startup logs.
-logging.getLogger("neo4j.notifications").setLevel(logging.WARNING)
+# Suppress Neo4j property-not-found notifications: Segment nodes are created without
+# optional properties (consolidated, end_time, start_time). All queries use coalesce()
+# to handle missing properties gracefully, so these notifications are benign noise.
+logging.getLogger("neo4j.notifications").setLevel(logging.ERROR)
 
 
 @dataclass

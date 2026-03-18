@@ -271,4 +271,11 @@ regardless of new evidence? Preserve every concrete opinion and distinctive \
 trait that remains supported. Removing a trait is losing identity.
 
 Output a revised personality snapshot. Natural-language narrative, not bullet \
-points. Keep under {max_tokens} tokens."""
+points. Keep under {max_tokens} tokens.
+
+Language calibration: Match confidence language to actual belief confidence scores.
+- conf >= 0.90: "I know / I'm certain / I hold firmly"
+- conf 0.70–0.89: "I believe / I think / evidence suggests"
+- conf 0.50–0.69: "I lean toward / I suspect / it seems likely"
+- conf < 0.50: "I'm uncertain / I haven't formed a clear view"
+Do NOT use "unwavering confidence" or "definitive proof" for topics with conf < 0.90."""

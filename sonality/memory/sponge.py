@@ -59,6 +59,7 @@ class BehavioralSignature(BaseModel):
     """Behavioral aggregates used for longitudinal personality diagnostics."""
 
     disagreement_rate: float = 0.0
+    respond_count: int = 0  # Only conversational turns (respond()), not ingests
     topic_engagement: dict[str, int] = Field(default_factory=dict)
 
 
@@ -438,15 +439,17 @@ class SpongeState(BaseModel):
         engagement[topic] = engagement.get(topic, 0) + 1
 
     def note_disagreement(self) -> None:
-        """Record that the latest interaction structurally disagreed."""
-        n = self.interaction_count or 1
+        """Record that the latest conversational turn structurally disagreed."""
+        self.behavioral_signature.respond_count += 1
+        n = self.behavioral_signature.respond_count
         self.behavioral_signature.disagreement_rate = (
             self.behavioral_signature.disagreement_rate * (n - 1) + 1.0
         ) / n
 
     def note_agreement(self) -> None:
-        """Record that the latest interaction did not structurally disagree."""
-        n = self.interaction_count or 1
+        """Record that the latest conversational turn did not structurally disagree."""
+        self.behavioral_signature.respond_count += 1
+        n = self.behavioral_signature.respond_count
         self.behavioral_signature.disagreement_rate = (
             self.behavioral_signature.disagreement_rate * (n - 1)
         ) / n
