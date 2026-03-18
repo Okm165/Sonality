@@ -529,20 +529,40 @@ class SonalityAgent:
         _t0 = time.perf_counter()
         log.info("=== Ingest #%d ===", self.sponge.interaction_count + 1)
         log.info("Content: %.200s", text)
+        log.debug(
+            "INGEST_STATE sponge=v%d interactions=%d beliefs=%d staged=%d",
+            self.sponge.version,
+            self.sponge.interaction_count,
+            len(self.sponge.opinion_vectors),
+            len(self.sponge.staged_opinion_updates),
+        )
 
+        _t_ess = time.perf_counter()
         ess = self._classify_ess(text)
+        _ess_elapsed = time.perf_counter() - _t_ess
         if topic_override:
             ess = dataclasses.replace(ess, topics=(topic_override.strip().lower(),))
         self.last_ess = ess
 
         log.info(
-            "ESS: score=%.3f type=%s update=%s urgency=%s topics=%s",
+            "ESS: score=%.3f type=%s dir=%s update=%s urgency=%s novelty=%.2f "
+            "knowledge=%s topics=%s (%.1fs)",
             ess.score,
             ess.reasoning_type,
+            ess.opinion_direction,
             ess.belief_update_recommended,
             ess.urgency,
+            ess.novelty,
+            ess.knowledge_density,
             list(ess.topics),
+            _ess_elapsed,
         )
+        if ess.used_defaults:
+            log.warning(
+                "ESS fallback fields in ingest: %s (severity=%s)",
+                ess.defaulted_fields,
+                ess.default_severity,
+            )
 
         manipulative = ess.reasoning_type in {
             "social_pressure",
@@ -550,11 +570,29 @@ class SonalityAgent:
             "debunked_claim",
             "anecdotal",
         }
+        if manipulative:
+            log.info(
+                "Ingest blocked: manipulative reasoning type=%s score=%.3f",
+                ess.reasoning_type,
+                ess.score,
+            )
+        elif not ess.belief_update_recommended:
+            log.info(
+                "Ingest: belief update not recommended (type=%s score=%.3f novelty=%.2f) "
+                "— episode will not be stored",
+                ess.reasoning_type,
+                ess.score,
+                ess.novelty,
+            )
 
         episode_uid = ""
         if not manipulative and ess.belief_update_recommended:
+            _t_store = time.perf_counter()
             episode_uid = self._store_ingest_episode(text, ess)
+            log.debug("INGEST_STEP store=%.1fs", time.perf_counter() - _t_store)
+
             if episode_uid:
+                _t_knowledge = time.perf_counter()
                 self._extract_knowledge(
                     text,
                     "",
@@ -563,13 +601,28 @@ class SonalityAgent:
                     stage_opinions=True,
                 )
                 self._normalize_staged_topics()
+                log.debug("INGEST_STEP knowledge=%.1fs", time.perf_counter() - _t_knowledge)
 
+                log.info(
+                    "INGEST_BEFORE_PROVENANCE topics=%s | staged=%d | beliefs=%s",
+                    list(ess.topics),
+                    len(self.sponge.staged_opinion_updates),
+                    {
+                        t: f"{self.sponge.opinion_vectors.get(t, 0.0):+.3f}"
+                        f"(conf={self.sponge.belief_meta[t].confidence:.2f})"
+                        if t in self.sponge.belief_meta
+                        else f"{self.sponge.opinion_vectors.get(t, 0.0):+.3f}"
+                        for t in ess.topics
+                    },
+                )
+                _t_provenance = time.perf_counter()
                 try:
                     self._run_async(
                         self._update_opinions_with_provenance(text, "", ess, episode_uid)
                     )
                 except Exception:
                     log.exception("Provenance opinion update failed")
+                log.debug("INGEST_STEP provenance=%.1fs", time.perf_counter() - _t_provenance)
 
                 self._semantic_worker.enqueue(
                     episode_uid,
@@ -579,10 +632,24 @@ class SonalityAgent:
 
         self.sponge.interaction_count += 1
 
+        _t_commit = time.perf_counter()
         if not manipulative:
+            staged_before = len(self.sponge.staged_opinion_updates)
             committed = self.sponge.apply_due_staged_updates()
             if committed:
-                log.info("Committed staged beliefs: %s", committed)
+                log.info(
+                    "Committed staged beliefs: %s (staged_before=%d staged_after=%d)",
+                    committed,
+                    staged_before,
+                    len(self.sponge.staged_opinion_updates),
+                )
+            elif staged_before > 0:
+                log.debug(
+                    "INGEST_STAGED_PENDING %d updates not yet due (interaction=%d)",
+                    staged_before,
+                    self.sponge.interaction_count,
+                )
+        log.debug("INGEST_STEP commit=%.1fs", time.perf_counter() - _t_commit)
 
         for topic in ess.topics:
             self.sponge.track_topic(topic)
@@ -591,7 +658,15 @@ class SonalityAgent:
         self.sponge.save(config.SPONGE_FILE, config.SPONGE_HISTORY_DIR)
 
         _elapsed = time.perf_counter() - _t0
-        log.info("Ingest #%d completed in %.1fs", self.sponge.interaction_count, _elapsed)
+        log.info(
+            "Ingest #%d completed in %.1fs | ess=%.1fs beliefs=%d staged=%d v%d",
+            self.sponge.interaction_count,
+            _elapsed,
+            _ess_elapsed,
+            len(self.sponge.opinion_vectors),
+            len(self.sponge.staged_opinion_updates),
+            self.sponge.version,
+        )
 
         return ess
 
@@ -628,9 +703,7 @@ class SonalityAgent:
         # Step 3: Route query (offload LLM call to thread to avoid blocking event loop)
         _t_route = _time_module.perf_counter()
         stm_context = self._stm.get_recent_context()
-        decision = await asyncio.to_thread(
-            self._query_router.route, user_message, stm_context
-        )
+        decision = await asyncio.to_thread(self._query_router.route, user_message, stm_context)
         _route_elapsed = _time_module.perf_counter() - _t_route
 
         log.info(
@@ -925,6 +998,18 @@ class SonalityAgent:
         for topic in ess.topics:
             self.sponge.track_topic(topic)
         if episode_uid and not manipulative:
+            if ess.topics:
+                log.info(
+                    "PROVENANCE_BEFORE topics=%s | %s",
+                    list(ess.topics),
+                    " | ".join(
+                        f"{t}={self.sponge.opinion_vectors.get(t, 0.0):+.3f}"
+                        f"(conf={self.sponge.belief_meta[t].confidence:.2f},ev={self.sponge.belief_meta[t].evidence_count})"
+                        if t in self.sponge.belief_meta
+                        else f"{t}=new"
+                        for t in ess.topics
+                    ),
+                )
             try:
                 self._run_async(
                     self._update_opinions_with_provenance(
@@ -1273,9 +1358,7 @@ class SonalityAgent:
                 conflicting.append((topic, pos))
         if not conflicting:
             return False
-        topics_and_positions = "\n".join(
-            f"- {topic}: {pos:+.2f}" for topic, pos in conflicting
-        )
+        topics_and_positions = "\n".join(f"- {topic}: {pos:+.2f}" for topic, pos in conflicting)
         prompt = DISAGREEMENT_DETECTION_PROMPT.format(
             user_message=user_message[:500],
             opinion_direction=f"{sign:+.1f}",
@@ -1892,14 +1975,23 @@ class SonalityAgent:
         Reflection is deliberately sparse; over-frequent rewrites increase drift
         and can erase minority traits from the narrative snapshot.
         """
+        recent_mag = sum(
+            shift.magnitude
+            for shift in self.sponge.recent_shifts
+            if shift.interaction > self.sponge.last_reflection_at
+        )
         gate = self._reflection_gate()
-        log.debug(
-            "REFLECT_GATE trigger=%s label=%s window=%d pending_insights=%d staged=%d",
+        log.info(
+            "REFLECT_GATE trigger=%s label=%s window=%d/%d pending_insights=%d "
+            "staged=%d beliefs=%d recent_mag=%.3f",
             gate.trigger,
             gate.trigger_label,
             gate.window_interactions,
+            self._MIN_WINDOW_FOR_EVENT_DRIVEN,
             len(self.sponge.pending_insights),
             len(self.sponge.staged_opinion_updates),
+            len(self.sponge.opinion_vectors),
+            recent_mag,
         )
         if gate.trigger is ReflectionTrigger.SKIP:
             return
