@@ -283,10 +283,17 @@ class SpongeState(BaseModel):
                 new_uncertainty=new_uncertainty,
             )
         )
+        current_pos = self.opinion_vectors.get(topic, 0.0)
+        same_dir = (current_pos * signed) >= 0
+        dir_label = "reinforce" if same_dir and abs(current_pos) > 0.05 else (
+            "oppose" if not same_dir and abs(current_pos) > 0.05 else "init"
+        )
         log.debug(
-            "STAGED_UPDATE topic=%s | mag=%+.3f | due=%d | prov=%.40s",
+            "STAGED_UPDATE topic=%s | mag=%+.3f | prior_pos=%+.3f | %s | due=#%d | prov=%.60s",
             topic,
             signed,
+            current_pos,
+            dir_label,
             due,
             provenance.replace("\n", " "),
         )
@@ -320,10 +327,50 @@ class SpongeState(BaseModel):
         applied: list[str] = []
         for topic, updates in grouped.items():
             net = sum(u.signed_magnitude for u in updates)
+            prior_pos = self.opinion_vectors.get(topic, 0.0)
+            # Log per-update breakdown before netting so cancellations are visible
+            if len(updates) > 1:
+                update_parts = " + ".join(
+                    f"{u.signed_magnitude:+.4f}(#{u.staged_at})"
+                    for u in updates
+                )
+                log.info(
+                    "STAGED_NET topic=%s prior=%+.3f | %s = net %+.4f",
+                    topic,
+                    prior_pos,
+                    update_parts,
+                    net,
+                )
+                # Warn if updates cancel each other (oscillation or conflicting evidence)
+                positive_sum = sum(u.signed_magnitude for u in updates if u.signed_magnitude > 0)
+                negative_sum = sum(u.signed_magnitude for u in updates if u.signed_magnitude < 0)
+                if positive_sum > 0 and negative_sum < 0:
+                    cancel_ratio = min(positive_sum, abs(negative_sum)) / (positive_sum + abs(negative_sum))
+                    if cancel_ratio > 0.3:
+                        log.warning(
+                            "STAGED_OSCILLATION topic=%s: conflicting staged updates cancel "
+                            "%.0f%% | pos_sum=%+.4f neg_sum=%+.4f net=%+.4f",
+                            topic,
+                            cancel_ratio * 100,
+                            positive_sum,
+                            negative_sum,
+                            net,
+                        )
             if abs(net) < 1e-4:
+                log.debug(
+                    "STAGED_CANCEL topic=%s: net %.6f below threshold, skipping commit",
+                    topic,
+                    net,
+                )
                 continue
             direction = 1.0 if net > 0 else -1.0
             magnitude = min(abs(net), 0.25)
+            if abs(net) > 0.25:
+                log.warning(
+                    "STAGED_CAPPED topic=%s: net %+.4f exceeds MAX_SINGLE_UPDATE (0.25), capped",
+                    topic,
+                    net,
+                )
             evidence_increment = len(updates)
             provenance = updates[-1].provenance
             # Apply the LLM-assessed uncertainty from the most recent staged update.
