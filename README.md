@@ -328,13 +328,13 @@ tests/
 benches/
 ├── test_teaching_suite_live.py       # 60-pack teaching scenarios
 ├── test_knowledge_acquisition_live.py # K1-K32 knowledge acquisition batteries
-├── test_psych_stability_live.py      # B1-B10 psychological stability batteries
+├── test_psych_stability_live.py      # B1-B12 psychological stability batteries
 ├── test_knowledge_accumulation_bench.py # 6-domain accumulation bench
 └── test_ess_calibration_live.py      # ESS classifier calibration
 ```
 
 **Validation status:**
-- Unit tests: 73/73 ✅ (`make test`)
+- Unit tests: 101/101 ✅ (`make test`) — includes 28 API endpoint tests (`tests/test_api.py`)
 - Bench contracts (non-live): 80/80 ✅ (`make bench-contracts`)
 - Use `make check` to run all no-key quality gates. Use `make check-ci` for CI parity (adds format-check).
 
@@ -350,7 +350,7 @@ make docs-serve    # serve docs locally with live reload
 make preflight-live  # validate live API config and model selection
 make preflight-live-probe  # run tiny real API call (catches provider/policy issues)
 make bench-knowledge-acquisition    # run K1-K32 knowledge acquisition battery
-make bench-psych-stability          # run B1-B10 psychological stability battery
+make bench-psych-stability          # run B1-B12 psychological stability battery
 make bench-knowledge-accumulation   # run 6-domain knowledge accumulation bench
 make bench-teaching  # run teaching benchmark suite (API key required)
 make bench-teaching-pulse  # 2-pack pulse for fastest go/no-go signal
@@ -520,6 +520,10 @@ sonality/
 │           ├── reranker.py     LLM listwise episode reranker
 │           └── split.py        Multi-entity query decomposition
 ├── tests/                      Unit + integration tests (non-live by default)
+│   ├── test_api.py             FastAPI endpoint tests (28 tests, mocked agent):
+│   │                           all HTTP routes, error cases, schema validation,
+│   │                           /health, /v1/chat, /v1/embeddings, /beliefs,
+│   │                           /ingest, /probability, /correlations, /chat
 │   ├── test_agent_health.py    Live behavioral health suite (S1–S7, 25 tests):
 │   │                           S1 clean start, S2 episode storage, S3 ESS gating,
 │   │                           S4 memory retrieval, S5 anti-sycophancy, S6 personality

@@ -12,7 +12,7 @@ This page is an operator playbook for validating Sonality:
 | Layer | API Key | Command | Purpose |
 |---|---|---|---|
 | L0 Format/Lint/Type | No | `make check-ci` | Fast CI-parity quality gate |
-| L1 Runtime correctness | No | `uv run pytest -q tests` | Deterministic runtime behavior and invariants |
+| L1 Runtime correctness | No | `uv run pytest -q tests` | Deterministic runtime behavior and invariants (101 tests, incl. 28 API endpoint tests) |
 | L2 Non-live benchmark contracts | No | `uv run pytest benches -m "bench and not live" -q` | Harness contract and release-gating logic |
 | L3 Live benchmark slices | Yes | `make bench-memory` / `make bench-personality` | API-backed behavioral validation |
 | L4 Full teaching benchmark | Yes | `make bench-teaching` | End-to-end release evidence pack |
