@@ -369,15 +369,17 @@ Beliefs to assess:
 {beliefs_json}
 
 For each belief consider:
-- How central is it to the agent's identity?
-- Has enough time passed (gap) that it might be outdated?
-- Is it foundational and should persist regardless of reinforcement?
+- How central is it to the agent's identity vs. a transient news factoid?
+- Has enough time passed (gap) without reinforcement that it is outdated?
+- Is evidence_count low (≤ 2-3)? Single-mention entity beliefs (person names, specific bills,
+  city/state names from one article) should be FORGOTTEN if gap > 10 and confidence < 0.5.
+- Broad themes (iran, technology, economy) deserve RETAIN even if stale.
 
 Output ONLY a JSON array, one entry per belief:
-[{{"topic": "nuclear_energy", "action": "RETAIN", "new_confidence": 0.72, "reasoning": "Belief is well-supported and recently reinforced; no staleness detected."}}]
+[{{"topic": "nuclear_energy", "action": "RETAIN", "new_confidence": 0.72, "reasoning": "Foundational geopolitical theme; retain despite gap."}}]
 
 action must be exactly RETAIN, DECAY, or FORGET.
-new_confidence must be 0.0–1.0.
+new_confidence required for RETAIN and DECAY (0.0–1.0); omit or set null for FORGET.
 RETAIN keeps confidence unchanged; DECAY reduces it; FORGET removes the belief entirely.
 Your response must end with ONLY the JSON array."""
 

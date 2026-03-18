@@ -1939,7 +1939,7 @@ class SonalityAgent:
                 if self.sponge.interaction_count - meta.last_reinforced >= 5
             ],
             reverse=True,
-        )[:10]
+        )[:20]
         if not stale_candidates:
             return []
 
@@ -1962,6 +1962,7 @@ class SonalityAgent:
             ),
             response_model=BatchBeliefDecayResponse,
             fallback=BatchBeliefDecayResponse(decisions=[]),
+            max_tokens=1024,  # 20 decisions × ~50 tokens each
             assistant_prefix='{"decisions": [',
         )
         dropped: list[str] = []
