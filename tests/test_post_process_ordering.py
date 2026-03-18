@@ -124,9 +124,7 @@ def _build_mock_agent() -> tuple[Any, list[str], asyncio.AbstractEventLoop]:
         call_log.append("opinion_provenance")
 
     agent._update_opinions_with_provenance = fake_provenance
-    agent._run_async = (
-        lambda coro: asyncio.run_coroutine_threadsafe(coro, loop).result(timeout=5)
-    )
+    agent._run_async = lambda coro: asyncio.run_coroutine_threadsafe(coro, loop).result(timeout=5)
 
     agent._detect_disagreement = MagicMock(
         side_effect=lambda *a, **kw: (call_log.append("detect_disagreement"), False)[1]
@@ -249,7 +247,8 @@ class TestPostProcessOrdering:
 
         # All these must precede enqueue
         must_precede = [
-            m for m in ("classify_ess", "extract_knowledge", "extract_insight", "maybe_reflect")
+            m
+            for m in ("classify_ess", "extract_knowledge", "extract_insight", "maybe_reflect")
             if m in call_log
         ]
         for method in must_precede:
@@ -261,13 +260,15 @@ class TestPostProcessOrdering:
 
         # enqueue must be the last LLM-calling operation
         llm_ops = {
-            "classify_ess", "extract_knowledge", "normalize_topics",
-            "opinion_provenance", "detect_disagreement", "extract_insight",
+            "classify_ess",
+            "extract_knowledge",
+            "normalize_topics",
+            "opinion_provenance",
+            "detect_disagreement",
+            "extract_insight",
             "maybe_reflect",
         }
-        last_llm_idx = max(
-            (call_log.index(m) for m in llm_ops if m in call_log), default=-1
-        )
+        last_llm_idx = max((call_log.index(m) for m in llm_ops if m in call_log), default=-1)
         assert enqueue_idx > last_llm_idx, (
             f"enqueue() ({enqueue_idx}) is not the last LLM operation. "
             f"Last LLM call was at {last_llm_idx}. Full order: {call_log}"
@@ -314,8 +315,10 @@ class TestESSFailureRecovery:
 
         # classifier_exception_fallback should produce a safe, non-updating ESS
         ess = classifier_exception_fallback("some message")
-        print(f"\n  Fallback ESS: score={ess.score:.3f} type={ess.reasoning_type} "
-              f"belief_update_recommended={ess.belief_update_recommended}")
+        print(
+            f"\n  Fallback ESS: score={ess.score:.3f} type={ess.reasoning_type} "
+            f"belief_update_recommended={ess.belief_update_recommended}"
+        )
 
         assert ess.score == 0.0, (
             f"Fallback ESS score must be 0.0 to prevent updates, got {ess.score}"

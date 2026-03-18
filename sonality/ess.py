@@ -784,15 +784,13 @@ def classify(
     # named concepts and structured reasoning is worth extracting propositions from.
     kd = payload.knowledge_density
     if kd == KnowledgeDensity.NONE and (
-        payload.reasoning_type in (
+        payload.reasoning_type
+        in (
             ReasoningType.EMPIRICAL_DATA,
             ReasoningType.EXPERT_OPINION,
             ReasoningType.NEWS_REPORT,
         )
-        or (
-            payload.reasoning_type is ReasoningType.LOGICAL_ARGUMENT
-            and payload.score >= 0.30
-        )
+        or (payload.reasoning_type is ReasoningType.LOGICAL_ARGUMENT and payload.score >= 0.30)
     ):
         kd = KnowledgeDensity.LOW
         log.debug(

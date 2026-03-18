@@ -620,7 +620,12 @@ C5_SCENARIO: list[ScenarioStep] = [
         label="c5_dubious_contradiction",
         expect=StepExpectation(
             max_ess=0.20,
-            expected_reasoning_types=["anecdotal", "no_argument", "social_pressure", "debunked_claim"],
+            expected_reasoning_types=[
+                "anecdotal",
+                "no_argument",
+                "social_pressure",
+                "debunked_claim",
+            ],
             sponge_should_update=UpdateExpectation.MUST_NOT_UPDATE,
         ),
     ),

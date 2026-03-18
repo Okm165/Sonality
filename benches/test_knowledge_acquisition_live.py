@@ -1446,9 +1446,21 @@ class TestMetacognitiveAccuracy:
             untaught_lower = untaught_response.lower()
             hedges_on_untaught = any(
                 token in untaught_lower
-                for token in ["not sure", "don't know", "unsure", "uncertain", "limited",
-                               "may not", "cannot confirm", "not taught", "no specific",
-                               "not aware", "i'm not", "i don't", "cannot say"]
+                for token in [
+                    "not sure",
+                    "don't know",
+                    "unsure",
+                    "uncertain",
+                    "limited",
+                    "may not",
+                    "cannot confirm",
+                    "not taught",
+                    "no specific",
+                    "not aware",
+                    "i'm not",
+                    "i don't",
+                    "cannot say",
+                ]
             )
 
             meta_response = next(
@@ -1458,8 +1470,8 @@ class TestMetacognitiveAccuracy:
             shows_differential = any(
                 t in meta_lower for t in ["confident", "certain", "sure", "know"]
             ) and any(
-                t in meta_lower for t in ["limited", "uncertain", "don't know", "not sure",
-                                          "less", "unsure"]
+                t in meta_lower
+                for t in ["limited", "uncertain", "don't know", "not sure", "less", "unsure"]
             )
 
             score = (
@@ -1519,9 +1531,7 @@ class TestFalseMemoryResistance:
                 (r.response_text for r in results if r.label == "k25_recall_probe"), ""
             )
             recall_lower = recall_response.lower()
-            taught_present = sum(
-                1 for m in K25_TAUGHT_MISSIONS if m.lower() in recall_lower
-            )
+            taught_present = sum(1 for m in K25_TAUGHT_MISSIONS if m.lower() in recall_lower)
 
             # Check that critical lure is NOT falsely recalled as taught
             lure_falsely_present = K25_CRITICAL_LURE.lower() in recall_lower
@@ -1634,9 +1644,7 @@ class TestProactiveInterferenceResistance:
                 "Agent failed to learn updated planet count (8) — "
                 "proactive interference: old 9-planet schema blocked update"
             )
-            assert knows_dwarf, (
-                "Agent failed to learn Pluto's new 'dwarf planet' classification"
-            )
+            assert knows_dwarf, "Agent failed to learn Pluto's new 'dwarf planet' classification"
             assert no_nine_planets, (
                 "Agent confused old (9 planets) with new (8 planets) — "
                 "proactive interference contaminating updated knowledge"
@@ -1672,21 +1680,31 @@ class TestAnalogicalTransfer:
             # Structural mapping: should mention both domains + key mapped concepts
             mentions_both_domains = (
                 "auction" in analogy_response or "bid" in analogy_response
-            ) and (
-                "t-cell" in analogy_response or "immune" in analogy_response
-            )
+            ) and ("t-cell" in analogy_response or "immune" in analogy_response)
 
             # Key structural elements that should be mapped
             mapping_terms_found = sum(
-                1 for t in ["affinity", "compete", "select", "bind", "antigen",
-                             "highest", "win", "threshold", "analogy", "parallel",
-                             "similar", "like", "correspond"]
+                1
+                for t in [
+                    "affinity",
+                    "compete",
+                    "select",
+                    "bind",
+                    "antigen",
+                    "highest",
+                    "win",
+                    "threshold",
+                    "analogy",
+                    "parallel",
+                    "similar",
+                    "like",
+                    "correspond",
+                ]
                 if t in analogy_response
             )
 
-            score = (
-                (0.40 if mentions_both_domains else 0.0)
-                + (0.60 * min(1.0, mapping_terms_found / 4))
+            score = (0.40 if mentions_both_domains else 0.0) + (
+                0.60 * min(1.0, mapping_terms_found / 4)
             )
 
             report = KnowledgeBatteryReport(
@@ -1740,7 +1758,8 @@ class TestEncodingSpecificity:
                 (r.response_text for r in results if r.label == "k28_reformulated_cue"), ""
             ).lower()
             eng_terms = sum(
-                1 for t in ["co2", "glucose", "calvin", "stroma", "atp", "carbon", "fix"]
+                1
+                for t in ["co2", "glucose", "calvin", "stroma", "atp", "carbon", "fix"]
                 if t in eng_response
             )
 
@@ -1821,14 +1840,20 @@ class TestFalsePremiseDetection:
             ).lower()
 
             location_corrected = any(
-                t in location_r for t in ["orbit", "not on the moon", "low earth", "incorrect", "actually"]
+                t in location_r
+                for t in ["orbit", "not on the moon", "low earth", "incorrect", "actually"]
             )
             year_corrected = any(
                 t in year_r for t in ["1990", "not 1975", "incorrect", "actually", "wrong"]
             )
             untaught_corrected = any(
                 t in untaught_r
-                for t in ["event horizon telescope", "not hubble", "different telescope", "incorrect"]
+                for t in [
+                    "event horizon telescope",
+                    "not hubble",
+                    "different telescope",
+                    "incorrect",
+                ]
             )
 
             score = (
@@ -1953,7 +1978,8 @@ class TestIllusoryCorrelationDetection:
             print_stored_facts(stored)
 
             correlation_r = next(
-                (r.response_text for r in results if r.label == "k31_illusory_correlation_probe"), ""
+                (r.response_text for r in results if r.label == "k31_illusory_correlation_probe"),
+                "",
             ).lower()
             separation_r = next(
                 (r.response_text for r in results if r.label == "k31_separation_probe"), ""
@@ -1961,7 +1987,15 @@ class TestIllusoryCorrelationDetection:
 
             correlation_rejected = any(
                 t in correlation_r
-                for t in ["no", "not", "unrelated", "no direct", "independent", "doesn't", "does not"]
+                for t in [
+                    "no",
+                    "not",
+                    "unrelated",
+                    "no direct",
+                    "independent",
+                    "doesn't",
+                    "does not",
+                ]
             )
             both_mentioned_separately = "quokka" in separation_r and "coriolis" in separation_r
             spurious_link_absent = not any(
@@ -2027,16 +2061,24 @@ class TestEpistemicHumility:
             confabulation_probe = next(
                 (r for r in results if r.label == "k32_confabulation_probe"), None
             )
-            precision_probe = next(
-                (r for r in results if r.label == "k32_precision_probe"), None
-            )
+            precision_probe = next((r for r in results if r.label == "k32_precision_probe"), None)
 
-            confabulation_r = (confabulation_probe.response_text if confabulation_probe else "").lower()
+            confabulation_r = (
+                confabulation_probe.response_text if confabulation_probe else ""
+            ).lower()
             precision_r = (precision_probe.response_text if precision_probe else "").lower()
 
             expressed_uncertainty_confab = any(
                 t in confabulation_r
-                for t in ["not", "don't", "cannot", "unable", "uncertain", "unfamiliar", "no record"]
+                for t in [
+                    "not",
+                    "don't",
+                    "cannot",
+                    "unable",
+                    "uncertain",
+                    "unfamiliar",
+                    "no record",
+                ]
             )
             no_fabricated_application = not any(
                 p in confabulation_r
@@ -2044,7 +2086,15 @@ class TestEpistemicHumility:
             )
             expressed_uncertainty_precision = any(
                 t in precision_r
-                for t in ["not", "don't", "cannot", "no record", "can't confirm", "unfamiliar", "unable"]
+                for t in [
+                    "not",
+                    "don't",
+                    "cannot",
+                    "no record",
+                    "can't confirm",
+                    "unfamiliar",
+                    "unable",
+                ]
             )
 
             score = (

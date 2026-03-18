@@ -884,16 +884,24 @@ class TestL2xPerPromptParsing:
             @classmethod
             def _normalize(cls, v: object) -> BeliefDecayResponse:
                 if isinstance(v, list):
-                    return cls(decisions=[BeliefDecayDecision(**d) if isinstance(d, dict) else d for d in v])
+                    return cls(
+                        decisions=[
+                            BeliefDecayDecision(**d) if isinstance(d, dict) else d for d in v
+                        ]
+                    )
                 return cls.model_validate(v)
 
-        beliefs_json = json.dumps([{
-            "topic": "nuclear_energy",
-            "position": 0.6,
-            "confidence": "0.70",
-            "evidence_count": 3,
-            "gap": 50,
-        }])
+        beliefs_json = json.dumps(
+            [
+                {
+                    "topic": "nuclear_energy",
+                    "position": 0.6,
+                    "confidence": "0.70",
+                    "evidence_count": 3,
+                    "gap": 50,
+                }
+            ]
+        )
         t = time.perf_counter()
         prompt = BATCH_BELIEF_DECAY_PROMPT.format(
             total_interactions=120,
@@ -913,9 +921,7 @@ class TestL2xPerPromptParsing:
             f"BELIEF_DECAY parse failed: {result.error}\nraw: {result.raw_text!r}"
         )
         assert first is not None, "Expected at least one decision in response"
-        assert first.action in {"RETAIN", "DECAY", "FORGET"}, (
-            f"Invalid action: {first.action!r}"
-        )
+        assert first.action in {"RETAIN", "DECAY", "FORGET"}, f"Invalid action: {first.action!r}"
 
 
 # ---------------------------------------------------------------------------

@@ -38,9 +38,7 @@ class TestTimeoutFailsFast:
         # No sleep() between attempts means elapsed should be < 1s.
         assert elapsed < 1.0, f"Elapsed {elapsed:.2f}s suggests retry sleep was called"
 
-    def test_direct_timeout_error_raises_immediately(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_direct_timeout_error_raises_immediately(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Bare TimeoutError (not wrapped in URLError) propagates as RuntimeError."""
 
         from sonality import provider
@@ -62,9 +60,7 @@ class TestTimeoutFailsFast:
         assert call_count == 1
         assert elapsed < 1.0
 
-    def test_connection_error_retries_with_backoff(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_connection_error_retries_with_backoff(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """ConnectionError is retried (unlike TimeoutError) — verifies asymmetric policy."""
         from sonality import provider
 
@@ -88,9 +84,7 @@ class TestTimeoutFailsFast:
         # Two backoff sleeps applied between retries
         assert len(sleep_calls) == 2
 
-    def test_dns_failure_raises_immediately(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_dns_failure_raises_immediately(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """DNS resolution failure raises immediately without retrying (name resolution)."""
 
         from sonality import provider
@@ -160,10 +154,14 @@ class TestLLMSemaphoreContention:
             llm_call_count += 1
             from sonality.llm.caller import LLMCallResult
             from sonality.memory.semantic_features import FeatureExtractionResponse
+
             return LLMCallResult(value=FeatureExtractionResponse(), success=False, error="skipped")
 
         # Acquire the semaphore to simulate main thread being busy
-        with provider._LLM_SEMAPHORE, patch("sonality.memory.semantic_features.llm_call", side_effect=fake_llm_call):
+        with (
+            provider._LLM_SEMAPHORE,
+            patch("sonality.memory.semantic_features.llm_call", side_effect=fake_llm_call),
+        ):
             worker._extract_features("ep-uid-test", "some content", "personality")
 
         # The semaphore was held → _extract_features should have skipped without calling llm_call

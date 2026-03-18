@@ -44,9 +44,7 @@ def reset_databases() -> None:
         if qdrant.collection_exists(collection):
             qdrant.delete(
                 collection_name=collection,
-                points_selector=qdrant_models.FilterSelector(
-                    filter=qdrant_models.Filter()
-                ),
+                points_selector=qdrant_models.FilterSelector(filter=qdrant_models.Filter()),
             )
     qdrant.close()
 

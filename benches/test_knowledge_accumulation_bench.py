@@ -1,14 +1,14 @@
 """Knowledge accumulation bench for manual DB inspection.
 
-Runs a 35-step, 6-domain teaching session and leaves all data in Neo4j + Qdrant
+Runs a 33-step, 6-domain teaching session and leaves all data in Neo4j + Qdrant
 for post-run manual exploration. Reports extraction statistics and memory coverage.
 
 Usage:
   make bench-knowledge-accumulation         # run and keep data
   make bench-knowledge-accumulation-clean   # run and purge afterwards
 
-Domains: astrophysics, neuroscience, climate, economics,
-         philosophy_of_science, biotechnology + 3 cross-domain probes.
+Domains: astrophysics (6), neuroscience (6), climate (5), economics (4),
+         philosophy_of_science (4), biotechnology (5), + 3 cross-domain probes.
 
 After the bench, inspect the databases:
   Neo4j:  bolt://localhost:7687  (browser: http://localhost:7474)
@@ -64,7 +64,7 @@ def _print_summary(results: list, sponge_version: int, tags: dict[str, int]) -> 
     print("  Knowledge Accumulation Bench — Results")
     print("═" * 60)
     print(f"  Steps total  : {total}")
-    print(f"  Steps passed : {passed}  ({100*passed//total}%)")
+    print(f"  Steps passed : {passed}  ({100 * passed // total}%)")
     print(f"  Sponge final : v{sponge_version}")
     print()
     print("  Domain breakdown:")
@@ -118,9 +118,7 @@ def test_knowledge_accumulation_bench() -> None:
         "domains": {
             domain: {
                 "labels": labels,
-                "passed": sum(
-                    1 for r in results if r.label in labels and r.passed
-                ),
+                "passed": sum(1 for r in results if r.label in labels and r.passed),
                 "total": len(labels),
             }
             for domain, labels in _DOMAIN_LABELS.items()

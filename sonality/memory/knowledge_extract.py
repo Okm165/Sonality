@@ -181,7 +181,7 @@ def _extract_propositions(text: str, preceding_context: str = "") -> list[Extrac
         # The model sometimes tries to output an empty array `[]` but corrupts the JSON
         # when the assistant_prefix forces `[` — treat this as "nothing to extract".
         raw = result.error.lower()
-        is_empty_attempt = any(kw in raw for kw in ('["]}', '[]', '"]}', '["'))
+        is_empty_attempt = any(kw in raw for kw in ('["]}', "[]", '"]}', '["'))
         if is_empty_attempt:
             log.debug("Knowledge extraction: model signalled empty list (no propositions)")
             return []

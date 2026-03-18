@@ -58,7 +58,9 @@ EMBEDDING_MAX_CHARS: Final = _env_int("SONALITY_EMBEDDING_MAX_CHARS", 2000)
 # Optional API-based embedding override (falls back to local FastEmbed when unset).
 EMBEDDING_API_KEY: Final = _env_str("SONALITY_EMBEDDING_API_KEY", "")
 EMBEDDING_BASE_URL: Final = _env_str("SONALITY_EMBEDDING_BASE_URL", "")
-EMBEDDING_SEND_DIMENSIONS: Final = _env_str("SONALITY_EMBEDDING_SEND_DIMENSIONS", "false").lower() == "true"
+EMBEDDING_SEND_DIMENSIONS: Final = (
+    _env_str("SONALITY_EMBEDDING_SEND_DIMENSIONS", "false").lower() == "true"
+)
 
 # --- Qdrant search tuning ---
 QDRANT_SEARCH_EF: Final = _env_int("SONALITY_QDRANT_SEARCH_EF", 128)

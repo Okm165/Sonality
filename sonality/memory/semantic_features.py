@@ -77,7 +77,10 @@ class FeatureExtractionResponse(BaseModel):
             # Drop malformed/empty command dicts the LLM emits as "no features" signals.
             cmds = data.get("commands", [])
             if isinstance(cmds, list):
-                data = {**data, "commands": [c for c in cmds if isinstance(c, dict) and c.get("command")]}
+                data = {
+                    **data,
+                    "commands": [c for c in cmds if isinstance(c, dict) and c.get("command")],
+                }
         return data
 
 
@@ -175,7 +178,9 @@ class SemanticIngestionWorker:
         t.start()
         drained = done.wait(timeout=timeout)
         if not drained:
-            log.warning("Semantic worker drain timed out after %.0fs; queue may have pending items", timeout)
+            log.warning(
+                "Semantic worker drain timed out after %.0fs; queue may have pending items", timeout
+            )
         return drained
 
     def stop(self) -> None:
@@ -249,8 +254,13 @@ class SemanticIngestionWorker:
                 log.debug("Semantic worker stopping mid-episode at category=%s", category)
                 return
             if interaction_active.is_set():
-                log.debug("Semantic worker pausing mid-episode: interaction active at category=%s", category)
-                self._queue.put((episode_uid, content, tuple(target_cats[target_cats.index(category):])))
+                log.debug(
+                    "Semantic worker pausing mid-episode: interaction active at category=%s",
+                    category,
+                )
+                self._queue.put(
+                    (episode_uid, content, tuple(target_cats[target_cats.index(category) :]))
+                )
                 return
             try:
                 self._extract_features(episode_uid, content, category)

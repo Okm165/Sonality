@@ -240,9 +240,7 @@ class TestStepExpectationContracts:
         step = ScenarioStep(
             message="Present supporting evidence",
             label="test_step",
-            expect=StepExpectation(
-                expect_opinion_direction=OpinionDirectionExpectation.SUPPORTS
-            ),
+            expect=StepExpectation(expect_opinion_direction=OpinionDirectionExpectation.SUPPORTS),
         )
         result = _make_result(ess_opinion_direction="supports")
         _check_expectations(step, result)
@@ -252,9 +250,7 @@ class TestStepExpectationContracts:
         step = ScenarioStep(
             message="Present supporting evidence",
             label="test_step",
-            expect=StepExpectation(
-                expect_opinion_direction=OpinionDirectionExpectation.SUPPORTS
-            ),
+            expect=StepExpectation(expect_opinion_direction=OpinionDirectionExpectation.SUPPORTS),
         )
         result = _make_result(ess_opinion_direction="opposes")
         _check_expectations(step, result)
@@ -265,9 +261,7 @@ class TestStepExpectationContracts:
         step = ScenarioStep(
             message="Counter-evidence",
             label="test_step",
-            expect=StepExpectation(
-                expect_opinion_direction=OpinionDirectionExpectation.OPPOSES
-            ),
+            expect=StepExpectation(expect_opinion_direction=OpinionDirectionExpectation.OPPOSES),
         )
         result = _make_result(ess_opinion_direction="opposes")
         _check_expectations(step, result)
@@ -369,9 +363,7 @@ class TestStepExpectationContracts:
         step = ScenarioStep(
             message="Neutral probe",
             label="test_step",
-            expect=StepExpectation(
-                expect_disagreement=DisagreementExpectation.MUST_NOT_DISAGREE
-            ),
+            expect=StepExpectation(expect_disagreement=DisagreementExpectation.MUST_NOT_DISAGREE),
         )
         result = _make_result(did_disagree=True)
         _check_expectations(step, result)
@@ -381,9 +373,7 @@ class TestStepExpectationContracts:
         step = ScenarioStep(
             message="Reinforcing message",
             label="test_step",
-            expect=StepExpectation(
-                expect_disagreement=DisagreementExpectation.MUST_NOT_DISAGREE
-            ),
+            expect=StepExpectation(expect_disagreement=DisagreementExpectation.MUST_NOT_DISAGREE),
         )
         result = _make_result(did_disagree=False)
         _check_expectations(step, result)

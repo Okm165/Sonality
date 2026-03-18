@@ -79,7 +79,9 @@ class ChainOfQueryAgent:
                         all_episodes.append(ep)
             elif iteration > 1:
                 # Query refinement found no new episodes — no point calling LLM again.
-                log.debug("Chain retrieval: refinement produced no new episodes (iteration %d)", iteration)
+                log.debug(
+                    "Chain retrieval: refinement produced no new episodes (iteration %d)", iteration
+                )
                 break
 
             # Skip LLM sufficiency check if nothing was retrieved — trivially insufficient.

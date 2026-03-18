@@ -874,7 +874,8 @@ class MemoryGraph:
                     {DISCUSSES: {orientation: 'UNDIRECTED'}}
                 )
             """)
-            result = await session.run("""
+            result = await session.run(
+                """
                 CALL gds.nodeSimilarity.stream('episode_similarity', {
                     topK: $top_k,
                     similarityCutoff: $min_sim
@@ -884,7 +885,11 @@ class MemoryGraph:
                 WHERE e1.uid = $uid AND e2:Episode
                 RETURN e2.uid AS similar_uid, similarity
                 ORDER BY similarity DESC
-            """, uid=episode_uid, top_k=top_k, min_sim=min_similarity)
+            """,
+                uid=episode_uid,
+                top_k=top_k,
+                min_sim=min_similarity,
+            )
             records = [r async for r in result]
             await session.run("CALL gds.graph.drop('episode_similarity', false)")
             return [(str(r["similar_uid"]), float(r["similarity"])) for r in records]
@@ -894,25 +899,32 @@ class MemoryGraph:
     ) -> list[EpisodeNode]:
         """Get most important episodes by PageRank score."""
         async with self._driver.session(database=_DB) as session:
-            result = await session.run("""
+            result = await session.run(
+                """
                 MATCH (e:Episode)
                 WHERE NOT e.archived AND coalesce(e.importance_score, 0) >= $min_imp
                 RETURN e
                 ORDER BY e.importance_score DESC
                 LIMIT $limit
-            """, min_imp=min_importance, limit=limit)
+            """,
+                min_imp=min_importance,
+                limit=limit,
+            )
             return [_record_to_episode(r["e"]) async for r in result]
 
     async def get_topic_community(self, topic: str) -> list[str]:
         """Get all topics in the same community as the given topic."""
         async with self._driver.session(database=_DB) as session:
-            result = await session.run("""
+            result = await session.run(
+                """
                 MATCH (t1:Topic {name: $topic})
                 MATCH (t2:Topic)
                 WHERE t2.community_id = t1.community_id AND t2.name <> $topic
                 RETURN t2.name AS topic
                 ORDER BY t2.episode_count DESC
-            """, topic=topic.strip().lower())
+            """,
+                topic=topic.strip().lower(),
+            )
             return [str(r["topic"]) async for r in result]
 
 

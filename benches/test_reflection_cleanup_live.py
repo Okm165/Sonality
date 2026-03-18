@@ -47,7 +47,9 @@ def _reset_dbs() -> None:
     qdrant = QdrantClient(url=config.QDRANT_URL)
     for collection in ["derivatives", "semantic_features"]:
         if qdrant.collection_exists(collection):
-            qdrant.delete(collection_name=collection, points_selector=FilterSelector(filter=Filter()))
+            qdrant.delete(
+                collection_name=collection, points_selector=FilterSelector(filter=Filter())
+            )
     qdrant.close()
 
     driver = GraphDatabase.driver(config.NEO4J_URL, auth=(config.NEO4J_USER, config.NEO4J_PASSWORD))
