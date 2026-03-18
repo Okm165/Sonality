@@ -211,16 +211,18 @@ async def _find_nearest_knowledge(
     Returns (uid, score) of the nearest match above DEDUP_THRESHOLD_EXISTING, or None.
     Replaces full-scan scroll with O(log N) vector search for scalable dedup.
     """
-    results = await qdrant.search(
+    response = await qdrant.query_points(
         collection_name="semantic_features",
-        query_vector=embedding,
+        query=embedding,
+        using="dense",
         query_filter=Filter(
             must=[FieldCondition(key="category", match=MatchValue(value="knowledge"))]
         ),
         limit=1,
-        with_payload=["uid"],
+        with_payload=True,
         score_threshold=DEDUP_THRESHOLD_EXISTING,
     )
+    results = response.points
     if results:
         uid = str(results[0].payload.get("uid", "") if results[0].payload else "") or str(results[0].id)
         return uid, results[0].score
