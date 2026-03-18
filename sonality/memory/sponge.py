@@ -320,6 +320,7 @@ class SpongeState(BaseModel):
         self.staged_opinion_updates = future
 
         if not due:
+            self._prune_weak_beliefs()
             return []
 
         grouped: dict[str, list[StagedOpinionUpdate]] = defaultdict(list)
