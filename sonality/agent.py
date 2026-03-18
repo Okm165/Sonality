@@ -157,9 +157,13 @@ class BatchBeliefDecayResponse(BaseModel):
     @classmethod
     def normalize_list(cls, data: object) -> object:
         if isinstance(data, list):
-            return {"decisions": data}
-        if isinstance(data, dict) and "decisions" not in data and "topic" in data:
-            return {"decisions": [data]}
+            # Filter non-dict items (e.g. LLM returns [False, True, ...] booleans)
+            return {"decisions": [x for x in data if isinstance(x, dict)]}
+        if isinstance(data, dict):
+            if "decisions" not in data and "topic" in data:
+                return {"decisions": [data]}
+            if "decisions" in data and isinstance(data["decisions"], list):
+                data = {"decisions": [x for x in data["decisions"] if isinstance(x, dict)]}
         return data
 
 
@@ -1879,9 +1883,18 @@ class SonalityAgent:
         # Guard against unbounded snapshot growth: ~4 chars/token.
         char_limit = config.SPONGE_MAX_TOKENS * 4
         if len(reflected_snapshot) > char_limit:
-            reflected_snapshot = reflected_snapshot[:char_limit]
+            # Truncate at the last sentence boundary to avoid mid-word cuts.
+            truncated = reflected_snapshot[:char_limit]
+            for sep in (".\n", ". ", "!\n", "! ", "?\n", "? ", "\n\n"):
+                idx = truncated.rfind(sep)
+                if idx > char_limit // 2:
+                    truncated = truncated[: idx + 1]
+                    break
+            reflected_snapshot = truncated
             log.debug(
-                "Reflection snapshot truncated to %d chars (limit %d)", char_limit, char_limit
+                "Reflection snapshot truncated to %d chars (limit %d)",
+                len(reflected_snapshot),
+                char_limit,
             )
         if len(reflected_snapshot) < 30:
             log.warning(
@@ -1962,8 +1975,7 @@ class SonalityAgent:
             ),
             response_model=BatchBeliefDecayResponse,
             fallback=BatchBeliefDecayResponse(decisions=[]),
-            max_tokens=1024,  # 20 decisions × ~50 tokens each
-            assistant_prefix='{"decisions": [',
+            max_tokens=1024,  # 20 decisions x ~50 tokens each
         )
         dropped: list[str] = []
         decisions_by_topic = {d.topic: d for d in result.value.decisions}

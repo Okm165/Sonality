@@ -49,11 +49,13 @@ class ChunkingResponse(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def normalize_chunks(cls, data: object) -> object:
-        """Handle LLM responses that omit the outer chunks wrapper."""
+        """Handle LLM responses that omit the outer chunks wrapper or return empty items."""
         if isinstance(data, list):
-            return {"chunks": data}
+            return {"chunks": [x for x in data if isinstance(x, dict) and "text" in x]}
         if isinstance(data, dict) and "text" in data and "chunks" not in data:
             return {"chunks": [data]}
+        if isinstance(data, dict) and "chunks" in data and isinstance(data["chunks"], list):
+            data = {"chunks": [x for x in data["chunks"] if isinstance(x, dict) and "text" in x]}
         return data
 
 

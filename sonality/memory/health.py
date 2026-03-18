@@ -56,7 +56,7 @@ def assess_health(sponge: SpongeState) -> HealthReport:
     high_conf_count = sum(1 for meta in sponge.belief_meta.values() if meta.confidence > 0.7)
     beliefs_summary = (
         ", ".join(
-            f"{topic}={sponge.opinion_vectors.get(topic, 0):.2f} (conf={meta.confidence:.2f})"
+            f"{topic}={sponge.opinion_vectors.get(topic, 0):.2f} (conf={meta.confidence:.2f} ev={meta.evidence_count})"
             for topic, meta in sorted(
                 sponge.belief_meta.items(),
                 key=lambda kv: kv[1].confidence,

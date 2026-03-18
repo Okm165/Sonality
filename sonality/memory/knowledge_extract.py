@@ -107,6 +107,17 @@ class KnowledgeConsolidation(BaseModel):
     merges: list[dict[str, object]] = Field(default_factory=list)
     weak_uids: list[str] = Field(default_factory=list)
 
+    @model_validator(mode="before")
+    @classmethod
+    def filter_nulls(cls, data: object) -> object:
+        """Remove None/null entries from list fields that the LLM occasionally emits."""
+        if not isinstance(data, dict):
+            return data
+        for key in ("contradictions", "merges", "weak_uids"):
+            if isinstance(data.get(key), list):
+                data[key] = [x for x in data[key] if x is not None]
+        return data
+
 
 # ---------------------------------------------------------------------------
 # Stage 0: Sliding window with LLM context summaries (SLIDE-inspired)

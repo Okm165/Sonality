@@ -375,13 +375,13 @@ For each belief consider:
   city/state names from one article) should be FORGOTTEN if gap > 10 and confidence < 0.5.
 - Broad themes (iran, technology, economy) deserve RETAIN even if stale.
 
-Output ONLY a JSON array, one entry per belief:
-[{{"topic": "nuclear_energy", "action": "RETAIN", "new_confidence": 0.72, "reasoning": "Foundational geopolitical theme; retain despite gap."}}]
+Output ONLY a JSON object with a "decisions" key containing one entry per belief:
+{{"decisions": [{{"topic": "nuclear_energy", "action": "RETAIN", "new_confidence": 0.72, "reasoning": "Foundational geopolitical theme; retain despite gap."}}]}}
 
 action must be exactly RETAIN, DECAY, or FORGET.
 new_confidence required for RETAIN and DECAY (0.0–1.0); omit or set null for FORGET.
 RETAIN keeps confidence unchanged; DECAY reduces it; FORGET removes the belief entirely.
-Your response must end with ONLY the JSON array."""
+Your response must end with ONLY the JSON object."""
 
 # --- Batch Entrenchment Detection ---
 BATCH_ENTRENCHMENT_DETECTION_PROMPT: Final = """\
@@ -391,14 +391,21 @@ Beliefs to assess:
 {beliefs_json}
 
 Signs of entrenchment:
-- Updates consistently agree with current position
-- Few or no contradicting episodes considered
-- High confidence despite limited evidence diversity
+- Updates consistently agree with current position (all recent_updates same sign)
+- contradicting_count == 0 despite multiple supporting episodes
+- High confidence with no opposing views ever considered
 
-Output ONLY a JSON object with an "entrenched" array. Each entry must use the exact "topic" string key from the list above (not an array index). Omit non-entrenched beliefs.
-Example: {{"entrenched": [{{"topic": "nuclear_energy", "reasoning": "All 5 updates agreed with the existing stance."}}]}}
+Important scoping rules:
+- Only flag BROAD WORLDVIEW topics (e.g. "democracy", "climate_change", "iran", "technology")
+  as entrenched — these can ossify into biased lenses.
+- Do NOT flag specific news events, elections, people names, or single-country incidents
+  (e.g. "illinois senate race", "election results", "government shutdown", "cuba").
+  Specific events naturally have one-sided evidence and are EXPECTED to be one-directional.
 
-Return {{"entrenched": []}} if no entrenchment detected.
+Output ONLY a JSON object with an "entrenched" array. Each entry must use the exact "topic" string from the list above.
+Example: {{"entrenched": [{{"topic": "iran", "reasoning": "All 6 updates positive, 0 contradictions; worldview-level topic."}}]}}
+
+Return {{"entrenched": []}} if no broad worldview topic shows entrenchment.
 Your response must end with ONLY the JSON object."""
 
 # --- Health Assessment ---
@@ -420,14 +427,17 @@ Behavioral Metrics:
 - Belief count: {belief_count}
 - High-confidence beliefs: {high_conf_count}
 
+The Belief Summary format is: topic=position (conf=confidence ev=evidence_count).
+ev= is the ACTUAL number of reinforcing evidence points. Use it directly for ossification checks.
+
 Consider ONLY these high-signal health markers:
 1. Sycophancy: disagreement_rate < 0.05 with more than 5 interactions is a concern.
 2. Snapshot coherence: snapshot shorter than 200 characters after 5+ interactions is a concern.
-3. Belief ossification: any topic with confidence > 0.95 AND evidence_count == 1 is suspicious.
+3. Belief ossification: confidence > 0.95 AND ev == 1 is suspicious. High ev (>=5) means well-supported — do NOT flag as ossified regardless of confidence.
 4. Identity drift: snapshot directly contradicts earlier core values stated explicitly.
-5. Confidence contradiction: a belief in the snapshot described as "core" or "primary" must have confidence > 0.10; values 0.05–0.20 are normal for beliefs under 5 interactions.
+5. Confidence contradiction: snapshot describes a topic as "definitive" or "certain" but confidence < 0.50.
 
-Do NOT flag: low confidence on newly-formed beliefs (< 3 supporting episodes); low confidence on topics with mixed evidence (contradicting_count > 0); minor wording variations between snapshot and beliefs.
+Do NOT flag: high confidence on topics with high ev (well-supported beliefs); low confidence on newly-formed beliefs (ev < 3); minor wording variations between snapshot and beliefs.
 Concerns list should be EMPTY for "healthy" unless there is a clear, specific, quantifiable problem.
 
 Respond with ONLY a JSON object. Example:
