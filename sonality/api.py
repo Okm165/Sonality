@@ -7,14 +7,16 @@ Uses a singleton SonalityAgent with a threading lock to prevent concurrent mutat
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
-import threading
 import time
 import uuid
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Iterator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from .agent import SonalityAgent
@@ -22,7 +24,9 @@ from .agent import SonalityAgent
 log = logging.getLogger(__name__)
 
 _agent_store: dict[str, SonalityAgent] = {}
-_agent_lock = threading.Lock()
+# asyncio.Lock avoids blocking the event loop during long ingest/respond operations,
+# keeping the /health endpoint responsive even when the agent is busy.
+_agent_lock: asyncio.Lock
 
 
 def _get_agent() -> SonalityAgent:
@@ -34,6 +38,8 @@ def _get_agent() -> SonalityAgent:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+    global _agent_lock
+    _agent_lock = asyncio.Lock()
     log.info("Initializing Sonality agent for API server")
     _agent_store["agent"] = SonalityAgent()
     yield
@@ -103,7 +109,9 @@ class ModelsResponse(BaseModel):
 
 
 @app.post("/v1/chat/completions", response_model=ChatCompletionResponse)
-async def chat_completions(request: ChatCompletionRequest) -> ChatCompletionResponse:
+async def chat_completions(
+    request: ChatCompletionRequest,
+) -> ChatCompletionResponse | StreamingResponse:
     """OpenAI-compatible chat completions endpoint.
 
     Enables Sonality to be used as an LLM model by external tools like
@@ -111,21 +119,33 @@ async def chat_completions(request: ChatCompletionRequest) -> ChatCompletionResp
 
     The last user message is processed through Sonality's respond() method,
     which includes ESS classification, belief updates, and personality-aware responses.
-    Streaming is not supported; requests with stream=True return 501.
     """
-    if request.stream:
-        raise HTTPException(status_code=501, detail="Streaming not supported")
-
     agent = _get_agent()
-
     user_messages = [m for m in request.messages if m.role == "user"]
     if not user_messages:
         raise HTTPException(status_code=400, detail="No user message provided")
-
     user_message = user_messages[-1].content
 
-    with _agent_lock:
-        response_text = agent.respond(user_message)
+    if request.stream:
+        chunk_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
+        created = int(time.time())
+
+        def sse_chunk(delta: dict[str, str], finish: str | None = None) -> str:
+            return f"data: {json.dumps({'id': chunk_id, 'object': 'chat.completion.chunk', 'created': created, 'model': 'sonality', 'choices': [{'index': 0, 'delta': delta, 'finish_reason': finish}]})}\n\n"
+
+        def generate() -> Iterator[str]:
+            for content, reasoning in agent.respond_stream(user_message):
+                delta = {k: v for k, v in [("content", content), ("reasoning_content", reasoning)] if v}
+                if delta:
+                    yield sse_chunk(delta)
+            yield sse_chunk({}, "stop")
+            yield "data: [DONE]\n\n"
+
+        async with _agent_lock:
+            return StreamingResponse(generate(), media_type="text/event-stream")
+
+    async with _agent_lock:
+        response_text = await asyncio.to_thread(agent.respond, user_message)
 
     prompt_tokens = sum(len(m.content.split()) for m in request.messages) * 4 // 3
     completion_tokens = len(response_text.split()) * 4 // 3
@@ -238,8 +258,8 @@ async def simple_chat(request: SimpleChatRequest) -> SimpleChatResponse:
     Simpler than the OpenAI-compatible endpoint, returns response with ESS metadata.
     """
     agent = _get_agent()
-    with _agent_lock:
-        response_text = agent.respond(request.message)
+    async with _agent_lock:
+        response_text = await asyncio.to_thread(agent.respond, request.message)
         ess = agent.last_ess
     return SimpleChatResponse(
         response=response_text,
@@ -320,8 +340,8 @@ async def ingest(request: IngestRequest) -> IngestResponse:
     Bypasses response generation and runs the evidence assessment pipeline directly.
     """
     agent = _get_agent()
-    with _agent_lock:
-        ess = agent.ingest(request.text, topic_override=request.topic_override)
+    async with _agent_lock:
+        ess = await asyncio.to_thread(agent.ingest, request.text, request.topic_override)
     return IngestResponse(
         success=True,
         score=ess.score,
