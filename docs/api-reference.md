@@ -1,6 +1,48 @@
 # API Reference
 
-Concise reference for active runtime modules.
+Concise reference for active runtime modules and HTTP endpoints.
+
+## HTTP API
+
+Start the server: `make run` (exposes on `http://localhost:8000`).
+
+### OpenAI-Compatible
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/v1/chat/completions` | Chat completions (last user message processed; `stream=true` returns 501) |
+| `GET` | `/v1/models` | List available models |
+| `GET` | `/v1/models/{model_id}` | Get model info |
+| `POST` | `/v1/embeddings` | Create text embeddings |
+
+### Chat and Ingestion
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/chat` | Simple chat — returns response + ESS score, reasoning type, topics |
+| `POST` | `/ingest` | Ingest content without generating a response (news, reports) |
+
+### Belief State
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/beliefs` | All current belief states, sorted by position strength |
+| `GET` | `/beliefs/{topic}` | Single belief (returns defaults if topic unknown) |
+| `POST` | `/beliefs/{topic}/probability` | Calibrated probability estimate (Platt scaling) |
+| `GET` | `/beliefs/{topic}/correlations` | Belief correlations for a topic |
+
+### Compatibility aliases
+
+| Method | Path | Alias for |
+|---|---|---|
+| `GET` | `/probability/{topic}` | `/beliefs/{topic}/probability` |
+| `GET` | `/correlations/{topic}` | `/beliefs/{topic}/correlations` |
+
+### Health
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/health` | Agent health: sponge version, interaction count, belief count |
 
 ## `sonality.agent`
 
