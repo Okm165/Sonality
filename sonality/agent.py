@@ -7,7 +7,7 @@ import json
 import logging
 import threading
 import time
-from collections.abc import Coroutine
+from collections.abc import Coroutine, Iterator
 from concurrent.futures import Future
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
@@ -69,7 +69,7 @@ from .memory import (
 )
 from .memory.context_format import format_episode_line
 from .prompts import REFLECTION_PROMPT, build_system_prompt
-from .provider import ChatResult, chat_completion, interaction_active
+from .provider import ChatResult, chat_completion, chat_completion_stream, interaction_active
 
 log = logging.getLogger(__name__)
 
@@ -377,6 +377,70 @@ class SonalityAgent:
         finally:
             interaction_active.clear()
 
+    def respond_stream(self, user_message: str) -> Iterator[tuple[str, str]]:
+        """Stream one interaction turn, yielding (content, reasoning) chunks.
+
+        Runs post-processing after streaming completes.
+        """
+        interaction_active.set()
+        try:
+            yield from self._respond_stream_inner(user_message)
+        finally:
+            interaction_active.clear()
+
+    def _respond_stream_inner(self, user_message: str) -> Iterator[tuple[str, str]]:
+        """Internal streaming implementation; called with interaction_active set."""
+        self._stm.add_message("user", user_message)
+
+        try:
+            relevant = self._run_async(self._retrieve_new_arch(user_message))
+        except Exception:
+            relevant = []
+        try:
+            knowledge = self._run_async(
+                retrieve_relevant_knowledge(user_message, self._db.qdrant, self._embedder)
+            )
+        except Exception:
+            knowledge = []
+
+        system_prompt = build_system_prompt(
+            sponge_snapshot=self.sponge.snapshot,
+            relevant_episodes=relevant,
+            structured_traits=self._build_structured_traits(),
+            knowledge_context=knowledge,
+        )
+        if self._stm.running_summary:
+            section = f"\n\n## Recent Context Summary\n{self._stm.running_summary}"
+            markers = (
+                "\n## Personality Traits",
+                "\n## Relevant Past Conversations",
+                "\n## Instructions",
+            )
+            idx = next((i for m in markers if (i := system_prompt.find(m)) > 0), -1)
+            system_prompt = (
+                system_prompt[:idx] + section + system_prompt[idx:]
+                if idx > 0
+                else system_prompt + section
+            )
+
+        self.conversation.append({"role": "user", "content": user_message})
+        self._truncate_conversation()
+
+        chunks: list[str] = []
+        for content, reasoning in chat_completion_stream(
+            model=self.model,
+            max_tokens=config.FAST_LLM_MAX_TOKENS,
+            messages=({"role": "system", "content": system_prompt}, *self.conversation),
+        ):
+            if content:
+                chunks.append(content)
+            yield content, reasoning
+
+        assistant_msg = "".join(chunks)
+        self.conversation.append({"role": "assistant", "content": assistant_msg})
+        self._stm.add_message("assistant", assistant_msg)
+        self._post_process(user_message, assistant_msg)
+
     def _respond_inner(self, user_message: str) -> str:
         """Internal implementation of respond(); called with interaction_active set."""
         _t0 = time.perf_counter()
@@ -471,7 +535,6 @@ class SonalityAgent:
                         {"role": "system", "content": system_prompt},
                         *self.conversation,
                     ),
-                    enable_thinking=False,
                 )
                 break
             except RuntimeError as exc:
@@ -675,9 +738,7 @@ class SonalityAgent:
                 # accumulates correctly (only MAJOR individual beliefs called record_shift
                 # before, leaving cumulative ingest shifts invisible to event-driven reflection).
                 total_committed_mag = sum(
-                    abs(float(s.split(":")[1].split("(")[0]))
-                    for s in committed
-                    if ":" in s
+                    abs(float(s.split(":")[1].split("(")[0])) for s in committed if ":" in s
                 )
                 if total_committed_mag > 0.01:
                     self.sponge.record_shift(
@@ -1190,8 +1251,11 @@ class SonalityAgent:
             dehyphenated = lower.replace("-", " ")
             # Subtopic suffix collapse: "iran conflict" → "iran" when "iran" is known.
             base_stripped = next(
-                (dehyphenated.removesuffix(sfx) for sfx in self._TOPIC_SUBTOPIC_SUFFIXES
-                 if dehyphenated.endswith(sfx) and dehyphenated.removesuffix(sfx) in existing),
+                (
+                    dehyphenated.removesuffix(sfx)
+                    for sfx in self._TOPIC_SUBTOPIC_SUFFIXES
+                    if dehyphenated.endswith(sfx) and dehyphenated.removesuffix(sfx) in existing
+                ),
                 None,
             )
             if lower in existing:
@@ -1338,9 +1402,7 @@ class SonalityAgent:
             episode_uid[:8],
         )
         text = (
-            f"User: {user_message}\nAssistant: {agent_response}"
-            if agent_response
-            else user_message
+            f"User: {user_message}\nAssistant: {agent_response}" if agent_response else user_message
         )
         try:
             stored = self._run_async(
@@ -1988,7 +2050,11 @@ class SonalityAgent:
                 del self.sponge.belief_meta[topic]
                 self.sponge.opinion_vectors.pop(topic, None)
             elif decision.action is BeliefDecayAction.DECAY:
-                new_conf = decision.new_confidence if decision.new_confidence is not None else meta.confidence * 0.8
+                new_conf = (
+                    decision.new_confidence
+                    if decision.new_confidence is not None
+                    else meta.confidence * 0.8
+                )
                 meta.confidence = max(0.0, min(1.0, new_conf))
                 meta.uncertainty = 1.0 - meta.confidence
                 log.debug(
@@ -2326,16 +2392,14 @@ class SonalityAgent:
         warnings: list[str] = []
 
         # Belief saturation: beliefs pinned at extremes can't absorb new evidence correctly.
-        saturated = [
-            t for t, _ in metas if abs(self.sponge.opinion_vectors.get(t, 0.0)) >= 0.95
-        ]
+        saturated = [t for t, _ in metas if abs(self.sponge.opinion_vectors.get(t, 0.0)) >= 0.95]
         if saturated:
             warnings.append(f"saturated_beliefs:{','.join(saturated[:5])}")
             log.warning(
                 "BELIEF_SATURATION %d beliefs pinned at ±0.95+: %s | "
                 "these topics resist new evidence — consider decay or manual review",
                 len(saturated),
-                saturated[:5],
+                saturated,
             )
 
         # Sycophancy indicator: all beliefs positive, no negative opinions formed.

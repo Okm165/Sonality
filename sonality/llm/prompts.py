@@ -368,12 +368,19 @@ Total interactions so far: {total_interactions}
 Beliefs to assess:
 {beliefs_json}
 
-For each belief consider:
-- How central is it to the agent's identity vs. a transient news factoid?
-- Has enough time passed (gap) without reinforcement that it is outdated?
-- Is evidence_count low (≤ 2-3)? Single-mention entity beliefs (person names, specific bills,
-  city/state names from one article) should be FORGOTTEN if gap > 10 and confidence < 0.5.
-- Broad themes (iran, technology, economy) deserve RETAIN even if stale.
+Decision rules (apply in order):
+1. FORGET: evidence_count <= 3 AND gap > 10 AND confidence < 0.6
+   (single-mention entities, one-article factoids, low-volume specifics)
+2. DECAY: Any of the following:
+   a. gap > 20 — regardless of confidence, reduce by 0.15–0.25 (beliefs fade without reinforcement)
+   b. gap > 10 AND confidence > 0.7 AND evidence_count < 15
+      (high confidence about a specific topic with few sources and long absence = overconfident)
+   c. position >= 0.95 AND gap > 8 (saturated extreme belief that hasn't been reinforced recently)
+3. RETAIN: Broad worldview themes (iran, israel, democracy, economy, climate) with evidence_count >= 15
+   OR recently reinforced (gap <= 5).
+
+Decay amounts: gap > 20 → -0.20 to -0.30; gap 11-20 → -0.10 to -0.20; gap 6-10 → -0.05 to -0.10.
+Do NOT retain a high-confidence stale specific-event belief unchanged; it will never naturally decay.
 
 Output ONLY a JSON object with a "decisions" key containing one entry per belief:
 {{"decisions": [{{"topic": "nuclear_energy", "action": "RETAIN", "new_confidence": 0.72, "reasoning": "Foundational geopolitical theme; retain despite gap."}}]}}
