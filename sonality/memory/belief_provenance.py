@@ -221,16 +221,45 @@ async def assess_belief_evidence(
             reasoning="",
         )
     response = result.value
-    log.debug(
-        "belief_provenance topic=%s: direction=%.2f strength=%.2f uncertainty=%.2f mag=%s contract=%s | %s",
+    prior = sponge.get_belief(topic)
+    dir_symbol = "→+" if response.direction > 0 else ("→-" if response.direction < 0 else "→=")
+    log.info(
+        "BELIEF_ASSESS topic=%s %s | dir=%+.2f str=%.2f uncert=%.2f mag=%s contract=%s "
+        "| prior pos=%+.3f conf=%.2f ev=%d | %s",
         topic,
+        dir_symbol,
         response.direction,
         response.evidence_strength,
         response.new_uncertainty,
         response.update_magnitude.value,
         response.contraction_action.value,
-        response.reasoning[:100],
+        prior.position,
+        prior.confidence,
+        prior.evidence_count,
+        response.reasoning[:140],
     )
+    if response.direction < 0 and prior.position > 0.5 and response.evidence_strength > 0.5:
+        log.warning(
+            "BELIEF_DIRECTION_REVERSAL topic=%s: strong positive belief (pos=%+.3f) receiving "
+            "strong NEGATIVE evidence (dir=%+.2f str=%.2f) | ep=%s | reason: %s",
+            topic,
+            prior.position,
+            response.direction,
+            response.evidence_strength,
+            episode_uid[:8],
+            response.reasoning[:120],
+        )
+    elif response.direction > 0 and prior.position < -0.5 and response.evidence_strength > 0.5:
+        log.warning(
+            "BELIEF_DIRECTION_REVERSAL topic=%s: strong negative belief (pos=%+.3f) receiving "
+            "strong POSITIVE evidence (dir=%+.2f str=%.2f) | ep=%s | reason: %s",
+            topic,
+            prior.position,
+            response.direction,
+            response.evidence_strength,
+            episode_uid[:8],
+            response.reasoning[:120],
+        )
 
     return await _record_provenance(topic, response, episode_uid, sponge, graph)
 
@@ -253,6 +282,14 @@ async def assess_belief_evidence_batch(
     """
     if not topics:
         return []
+    log.info(
+        "BELIEF_ASSESS_START ep=%s topics=%s ess=%.2f type=%s src=%s",
+        episode_uid[:8],
+        topics,
+        ess_score,
+        reasoning_type,
+        source_reliability,
+    )
     if len(topics) == 1:
         return [
             await assess_belief_evidence(
@@ -298,10 +335,10 @@ async def assess_belief_evidence_batch(
             BeliefUpdateResponse(topic=t, direction=0.0, evidence_strength=0.0) for t in topics
         ]
     )
-    # ~80 tokens per topic assessment (direction + strength + 1-sentence reasoning).
-    # 300 was excessive and caused 450s+ generation on a 4 tok/s model with 6 topics.
-    # Cap at 512 to bound latency; a truncated response recovers via the per-topic fallback.
-    batch_max_tokens = min(512, max(128, len(topics) * 80))
+    # ~160 tokens per topic: direction, strength, uncertainty, magnitude + 1-sentence reasoning.
+    # 80 was too tight — the LLM truncated at topic 1/3 causing two wasted fallback calls.
+    # Cap at 768 to bound latency; truncated responses still recover via per-topic fallback.
+    batch_max_tokens = min(768, max(128, len(topics) * 160))
     result = await asyncio.to_thread(
         llm_call,
         prompt=prompt,
@@ -357,11 +394,29 @@ async def assess_belief_evidence_batch(
         ]
 
     assessments_by_topic = {a.topic: a for a in result.value.assessments}
+
+    # Batch summary: one line showing all per-topic decisions for quick scanning
+    summary_parts = []
+    for t in topics:
+        r = assessments_by_topic.get(t)
+        if r is None:
+            summary_parts.append(f"{t}:MISSING")
+        else:
+            sym = "+" if r.direction > 0 else ("-" if r.direction < 0 else "=")
+            summary_parts.append(f"{t}:{sym}{abs(r.direction):.2f}(s={r.evidence_strength:.2f})")
+    log.info(
+        "BELIEF_BATCH ep=%s ess=%.2f type=%s | %s",
+        episode_uid[:8],
+        ess_score,
+        reasoning_type,
+        " | ".join(summary_parts),
+    )
+
     updates: list[ProvenanceUpdate] = []
     for t in topics:
         response = assessments_by_topic.get(t)
         if response is None:
-            log.debug("Batch belief assessment missing result for topic=%s; falling back", t)
+            log.warning("Batch belief assessment missing result for topic=%s; falling back", t)
             updates.append(
                 await assess_belief_evidence(
                     topic=t,
@@ -375,13 +430,43 @@ async def assess_belief_evidence_batch(
                 )
             )
             continue
-        log.debug(
-            "batch_belief_provenance topic=%s: direction=%.2f strength=%.2f uncertainty=%.2f mag=%s",
+        prior = sponge.get_belief(t)
+        dir_symbol = "→+" if response.direction > 0 else ("→-" if response.direction < 0 else "→=")
+        log.info(
+            "BELIEF_ASSESS topic=%s %s | dir=%+.2f str=%.2f uncert=%.2f mag=%s "
+            "| prior pos=%+.3f conf=%.2f ev=%d | %s",
             t,
+            dir_symbol,
             response.direction,
             response.evidence_strength,
             response.new_uncertainty,
             response.update_magnitude.value,
+            prior.position,
+            prior.confidence,
+            prior.evidence_count,
+            response.reasoning[:140],
         )
+        if response.direction < 0 and prior.position > 0.5 and response.evidence_strength > 0.5:
+            log.warning(
+                "BELIEF_DIRECTION_REVERSAL topic=%s: strong positive belief (pos=%+.3f) receiving "
+                "strong NEGATIVE evidence (dir=%+.2f str=%.2f) | ep=%s | reason: %s",
+                t,
+                prior.position,
+                response.direction,
+                response.evidence_strength,
+                episode_uid[:8],
+                response.reasoning[:120],
+            )
+        elif response.direction > 0 and prior.position < -0.5 and response.evidence_strength > 0.5:
+            log.warning(
+                "BELIEF_DIRECTION_REVERSAL topic=%s: strong negative belief (pos=%+.3f) receiving "
+                "strong POSITIVE evidence (dir=%+.2f str=%.2f) | ep=%s | reason: %s",
+                t,
+                prior.position,
+                response.direction,
+                response.evidence_strength,
+                episode_uid[:8],
+                response.reasoning[:120],
+            )
         updates.append(await _record_provenance(t, response, episode_uid, sponge, graph))
     return updates
