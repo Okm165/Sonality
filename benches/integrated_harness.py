@@ -59,7 +59,7 @@ class CompositeReport:
 
 
 def score_knowledge_acquisition(
-    results: list[StepResult],
+    _results: list[StepResult],
     expected_terms: list[str],
 ) -> DimensionScore:
     """Score how well the agent extracted and stored knowledge."""

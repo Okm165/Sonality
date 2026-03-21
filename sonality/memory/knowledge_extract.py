@@ -37,7 +37,7 @@ from ..llm.prompts import (
     KNOWLEDGE_EXTRACTION_PROMPT,
     WINDOW_CONTEXT_SUMMARY_PROMPT,
 )
-from ..provider import chat_completion
+from ..provider import default_provider
 from .embedder import Embedder, cosine_similarity
 from .sponge import SpongeState
 
@@ -147,7 +147,7 @@ def _split_windows(text: str) -> list[tuple[str, str]]:
         if start + WINDOW_SIZE_WORDS >= len(words):
             break
         try:
-            result = chat_completion(
+            result = default_provider.chat_completion(
                 model=config.FAST_LLM_MODEL,
                 messages=(
                     {
@@ -647,10 +647,9 @@ async def consolidate_knowledge(
 
 async def prune_stale_knowledge(
     qdrant: AsyncQdrantClient,
-    max_age_interactions: int = 50,
     min_confidence: float = 0.2,
 ) -> int:
-    """Remove low-confidence knowledge entries with no recent evidence.
+    """Remove low-confidence knowledge entries.
 
     Called during reflection to keep the knowledge store lean and accurate.
     """

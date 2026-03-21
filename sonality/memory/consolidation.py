@@ -19,7 +19,7 @@ from pydantic import BaseModel, field_validator
 from .. import config
 from ..llm.caller import llm_call
 from ..llm.prompts import CONSOLIDATION_READINESS_PROMPT
-from ..provider import chat_completion
+from ..provider import default_provider
 from .context_format import format_episode_block, format_episode_line
 from .graph import EpisodeNode, MemoryGraph
 from .health_trace import trace_consolidation
@@ -165,7 +165,7 @@ class ConsolidationEngine:
             f"Write the summary:"
         )
         try:
-            completion = chat_completion(
+            completion = default_provider.chat_completion(
                 model=config.FAST_LLM_MODEL,
                 max_tokens=config.FAST_LLM_MAX_TOKENS,
                 messages=({"role": "user", "content": prompt},),

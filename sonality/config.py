@@ -75,6 +75,7 @@ QDRANT_RESCORE_QUANTIZED: Final = _env_str("SONALITY_QDRANT_RESCORE", "true").lo
 # --- LLM for scoring/assessment tasks (fast, cheap model) ---
 FAST_LLM_MODEL: Final = _env_str("SONALITY_FAST_LLM_MODEL", ESS_MODEL)
 FAST_LLM_MAX_TOKENS: Final = _env_int("SONALITY_FAST_LLM_MAX_TOKENS", 8192)
+AGENT_TEMPERATURE: Final = _env_float("SONALITY_AGENT_TEMPERATURE", 0.6)
 
 # --- LLM max_tokens by task type (all env-configurable) ---
 # Routing/classification: category selection, sufficiency checks, split queries, segmentation

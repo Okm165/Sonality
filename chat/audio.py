@@ -56,7 +56,20 @@ async def mp3_to_ogg_opus(mp3_data: bytes) -> bytes:
     Uses ffmpeg subprocess for conversion.
     """
     proc = await asyncio.create_subprocess_exec(
-        "ffmpeg", "-i", "pipe:0", "-ac", "1", "-c:a", "libopus", "-b:a", "48k", "-vbr", "on", "-f", "ogg", "pipe:1",
+        "ffmpeg",
+        "-i",
+        "pipe:0",
+        "-ac",
+        "1",
+        "-c:a",
+        "libopus",
+        "-b:a",
+        "48k",
+        "-vbr",
+        "on",
+        "-f",
+        "ogg",
+        "pipe:1",
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
@@ -107,7 +120,13 @@ class AudioProcessor:
     async def stt(self, audio: bytes, mime_type: str = "audio/ogg") -> str:
         """Transcribe audio to text."""
         ext = mime_type.split("/")[-1]
-        log.debug("STT request: model=%s lang=%s bytes=%d mime=%s", config.STT_MODEL, config.STT_LANGUAGE, len(audio), mime_type)
+        log.debug(
+            "STT request: model=%s lang=%s bytes=%d mime=%s",
+            config.STT_MODEL,
+            config.STT_LANGUAGE,
+            len(audio),
+            mime_type,
+        )
         r = await self._client.post(
             "/v1/audio/transcriptions",
             files={"file": (f"audio.{ext}", audio, mime_type)},
@@ -132,7 +151,10 @@ class AudioProcessor:
         }
         log.debug(
             "TTS request: model=%s voice=%s format=%s len=%d",
-            config.TTS_MODEL, config.TTS_VOICE, config.TTS_FORMAT, len(text),
+            config.TTS_MODEL,
+            config.TTS_VOICE,
+            config.TTS_FORMAT,
+            len(text),
         )
         r = await self._client.post("/v1/audio/speech", json=payload, timeout=config.TTS_TIMEOUT)
         if r.status_code != 200:

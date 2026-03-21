@@ -140,7 +140,7 @@ def both_containers() -> Generator[ContainerConfig, None, None]:
         )
 
 
-def patch_config_for_containers(config_module: object, container_config: ContainerConfig) -> None:
+def patch_config_for_containers(container_config: ContainerConfig) -> None:
     """Monkey-patch sonality.config with container connection details."""
     import sonality.config as cfg
 

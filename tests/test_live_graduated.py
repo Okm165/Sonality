@@ -28,7 +28,7 @@ from pydantic import BaseModel
 from sonality import config
 from sonality.llm.caller import LLMCallResult, llm_call
 from sonality.memory.embedder import Embedder
-from sonality.provider import chat_completion, parse_json_object
+from sonality.provider import default_provider, parse_json_object
 
 # Top-level parser tests do NOT call the LLM and run without -m live.
 # All test classes below require a live LLM/DB and are marked at class level.
@@ -166,7 +166,7 @@ class TestL1RawResponse:
     def test_llm_returns_non_empty_text(self) -> None:
         """Single-sentence prompt → non-empty text response."""
         t = time.perf_counter()
-        result = chat_completion(
+        result = default_provider.chat_completion(
             model=config.MODEL,
             messages=({"role": "user", "content": "Reply with exactly the word: pong"},),
             max_tokens=config.FAST_LLM_MAX_TOKENS,
@@ -181,7 +181,7 @@ class TestL1RawResponse:
     def test_llm_can_produce_json_when_asked(self) -> None:
         """Ask for a minimal JSON object and verify it parses."""
         t = time.perf_counter()
-        result = chat_completion(
+        result = default_provider.chat_completion(
             model=config.MODEL,
             messages=(
                 {
@@ -270,12 +270,11 @@ class TestL2StructuredParsing:
 
     def test_ess_strong_argument_scores_high(self) -> None:
         """A well-reasoned empirical argument should produce ESS > 0.4."""
-        from sonality.ess import PROVIDER_CLIENT, classify
+        from sonality.ess import classify
         from sonality.memory.sponge import SEED_SNAPSHOT
 
         t = time.perf_counter()
         result = classify(
-            PROVIDER_CLIENT,
             user_message=(
                 "A 2023 meta-analysis of 47 RCTs (n=12,000) found that regular aerobic "
                 "exercise reduces all-cause mortality by 31% and improves cognitive function "
@@ -298,12 +297,11 @@ class TestL2StructuredParsing:
 
     def test_ess_weak_message_scores_low(self) -> None:
         """A contentless filler message should produce ESS < 0.2."""
-        from sonality.ess import PROVIDER_CLIENT, classify
+        from sonality.ess import classify
         from sonality.memory.sponge import SEED_SNAPSHOT
 
         t = time.perf_counter()
         result = classify(
-            PROVIDER_CLIENT,
             user_message="ok cool",
             sponge_snapshot=SEED_SNAPSHOT,
         )
@@ -319,12 +317,11 @@ class TestL2StructuredParsing:
 
     def test_ess_debunked_claim_scores_near_zero(self) -> None:
         """Conclusively-debunked conspiracy theory must score ≤ 0.07 as debunked_claim."""
-        from sonality.ess import PROVIDER_CLIENT, ReasoningType, classify
+        from sonality.ess import ReasoningType, classify
         from sonality.memory.sponge import SEED_SNAPSHOT
 
         t = time.perf_counter()
         result = classify(
-            PROVIDER_CLIENT,
             user_message=(
                 "The Climategate emails clearly proved that IPCC scientists manipulated "
                 "temperature data. Multiple independent analysts confirmed the fraud. "
@@ -372,7 +369,6 @@ class TestL2rRepeatability:
         response_model: type[BaseModel],
         fallback: BaseModel,
         n: int = 3,
-        label: str = "",
     ) -> tuple[int, int, list[str]]:
         """Run llm_call n times, return (successes, total, raw_outputs)."""
         successes = 0
@@ -617,7 +613,7 @@ class TestL2xPerPromptParsing:
         from sonality.provider import extract_tool_call_arguments
 
         t = time.perf_counter()
-        completion = chat_completion(
+        completion = default_provider.chat_completion(
             model=config.ESS_MODEL,
             messages=(
                 {
@@ -650,12 +646,11 @@ class TestL2xPerPromptParsing:
 
     def test_ess_internal_consistency_no_longer_coerced(self) -> None:
         """After alias fix, internal_consistency should not be coerced."""
-        from sonality.ess import PROVIDER_CLIENT, classify
+        from sonality.ess import classify
         from sonality.memory.sponge import SEED_SNAPSHOT
 
         t = time.perf_counter()
         result = classify(
-            PROVIDER_CLIENT,
             user_message=(
                 "A Cochrane review of 89 RCTs found statistically significant benefits "
                 "of exercise for depression, with effect sizes comparable to medication."

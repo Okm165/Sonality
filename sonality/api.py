@@ -44,7 +44,7 @@ def _get_agent() -> SonalityAgent:
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     log.info("Initializing Sonality agent for API server")
     _agent_store["agent"] = SonalityAgent()
     yield

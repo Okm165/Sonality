@@ -3,33 +3,49 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from types import SimpleNamespace
-from typing import cast
+from unittest.mock import MagicMock, patch
 
 from sonality.ess import (
     InternalConsistencyStatus,
     OpinionDirection,
     ReasoningType,
     SourceReliability,
-    _ClientProtocol,
     classify,
 )
+from sonality.provider import ChatResult
 
 
-def _make_client(payload: Mapping[str, object] | list[Mapping[str, object]]) -> _ClientProtocol:
-    payloads = [payload] if isinstance(payload, Mapping) else payload
+def _mock_completion(payloads: list[Mapping[str, object]]) -> MagicMock:
+    """Create a mock that returns tool_call responses from payloads."""
     state = {"calls": 0}
 
-    def create(**_: object) -> object:
+    def side_effect(**_: object) -> ChatResult:
         index = min(state["calls"], len(payloads) - 1)
         state["calls"] += 1
-        return SimpleNamespace(
-            content=[SimpleNamespace(type="tool_use", input=payloads[index])],
-            usage=SimpleNamespace(input_tokens=11, output_tokens=7),
+        return ChatResult(
+            text="",
+            input_tokens=11,
+            output_tokens=7,
+            raw={
+                "choices": [
+                    {
+                        "message": {
+                            "tool_calls": [
+                                {
+                                    "function": {
+                                        "name": "classify_evidence",
+                                        "arguments": payloads[index],
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                ]
+            },
         )
 
-    messages = SimpleNamespace(create=create)
-    return cast(_ClientProtocol, SimpleNamespace(messages=messages))
+    mock = MagicMock(side_effect=side_effect)
+    return mock
 
 
 def test_classify_normalizes_labels_and_boolean_strings() -> None:
@@ -44,7 +60,10 @@ def test_classify_normalizes_labels_and_boolean_strings() -> None:
         "summary": "Structured governance evidence.",
         "opinion_direction": "Support",
     }
-    result = classify(_make_client(payload), "message", "snapshot")
+    with patch("sonality.ess.default_provider") as mock_provider:
+        mock_provider.chat_completion = _mock_completion([payload])
+        result = classify("message", "snapshot")
+
     assert result.score == 0.72
     assert result.novelty == 0.35
     assert result.reasoning_type == ReasoningType.LOGICAL_ARGUMENT
@@ -72,7 +91,10 @@ def test_classify_marks_defaults_on_invalid_fields() -> None:
         "summary": "Unreliable claim",
         "opinion_direction": "mixedish",
     }
-    result = classify(_make_client(payload), "message", "snapshot")
+    with patch("sonality.ess.default_provider") as mock_provider:
+        mock_provider.chat_completion = _mock_completion([payload])
+        result = classify("message", "snapshot")
+
     assert result.score == 0.0
     assert result.novelty == 0.0
     assert result.reasoning_type == ReasoningType.NO_ARGUMENT
@@ -112,7 +134,10 @@ def test_classify_retries_on_malformed_required_fields() -> None:
             "opinion_direction": "supports",
         },
     ]
-    result = classify(_make_client(payloads), "message", "snapshot")
+    with patch("sonality.ess.default_provider") as mock_provider:
+        mock_provider.chat_completion = _mock_completion(payloads)
+        result = classify("message", "snapshot")
+
     assert result.attempt_count == 2
     assert result.reasoning_type == ReasoningType.LOGICAL_ARGUMENT
     assert not result.used_defaults
@@ -133,7 +158,10 @@ def test_classify_debunked_claim_aliases_resolve() -> None:
             "summary": "Debunked conspiracy theory.",
             "opinion_direction": "opposes",
         }
-        result = classify(_make_client(payload), "message", "snapshot")
+        with patch("sonality.ess.default_provider") as mock_provider:
+            mock_provider.chat_completion = _mock_completion([payload])
+            result = classify("message", "snapshot")
+
         assert result.reasoning_type == ReasoningType.DEBUNKED_CLAIM, (
             f"alias={alias!r} did not resolve to debunked_claim, got {result.reasoning_type!r}"
         )
@@ -150,7 +178,10 @@ def test_classify_marks_missing_when_required_field_absent_after_retries() -> No
         "summary": "Missing required field",
         "opinion_direction": "neutral",
     }
-    result = classify(_make_client(payload), "message", "snapshot")
+    with patch("sonality.ess.default_provider") as mock_provider:
+        mock_provider.chat_completion = _mock_completion([payload])
+        result = classify("message", "snapshot")
+
     assert result.attempt_count == 2
     assert result.used_defaults
     assert "missing:reasoning_type" in result.defaulted_fields

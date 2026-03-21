@@ -90,7 +90,7 @@ class TestChunkingResponseFallbackPath:
             fallback: T,
             **_: object,
         ) -> LLMCallResult[T]:
-            del prompt
+            del prompt, response_model
             return LLMCallResult(
                 value=fallback,
                 success=False,

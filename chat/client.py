@@ -60,7 +60,12 @@ class SonalityClient:
             topic_count=d.get("topic_count", 0),
             staged_updates=d.get("staged_updates", 0),
         )
-        log.debug("Health: v%d interactions=%d beliefs=%d", status.version, status.interaction_count, status.belief_count)
+        log.debug(
+            "Health: v%d interactions=%d beliefs=%d",
+            status.version,
+            status.interaction_count,
+            status.belief_count,
+        )
         return status
 
     async def beliefs(self) -> list[Belief]:

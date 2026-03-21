@@ -18,7 +18,6 @@ from pydantic import BaseModel, Field, model_validator
 
 from . import config
 from .ess import (
-    PROVIDER_CLIENT,
     ESSResult,
     KnowledgeDensity,
     ReasoningType,
@@ -69,7 +68,7 @@ from .memory import (
 )
 from .memory.context_format import format_episode_line
 from .prompts import REFLECTION_PROMPT, build_system_prompt
-from .provider import ChatResult, chat_completion, chat_completion_stream, interaction_active
+from .provider import ChatResult, default_provider, interaction_active, strip_thinking_trace
 
 log = logging.getLogger(__name__)
 
@@ -390,8 +389,15 @@ class SonalityAgent:
 
     def _respond_stream_inner(self, user_message: str) -> Iterator[tuple[str, str]]:
         """Internal streaming implementation; called with interaction_active set."""
-        self._stm.add_message("user", user_message)
+        _t0 = time.perf_counter()
+        interaction_num = self.sponge.interaction_count + 1
+        log.info("=== Interaction #%d (stream) ===", interaction_num)
+        log.info("User: %.120s", user_message)
 
+        self._stm.add_message("user", user_message)
+        log.debug("STM: buffer=%d msgs", len(self._stm._buffer))
+
+        _t_retrieval = time.perf_counter()
         try:
             relevant = self._run_async(self._retrieve_new_arch(user_message))
         except Exception:
@@ -402,6 +408,8 @@ class SonalityAgent:
             )
         except Exception:
             knowledge = []
+        _retrieval_ms = (time.perf_counter() - _t_retrieval) * 1000
+        log.debug("RETRIEVAL: episodes=%d knowledge=%d in %.0fms", len(relevant), len(knowledge), _retrieval_ms)
 
         system_prompt = build_system_prompt(
             sponge_snapshot=self.sponge.snapshot,
@@ -422,36 +430,50 @@ class SonalityAgent:
                 if idx > 0
                 else system_prompt + section
             )
+        log.debug("CONTEXT: prompt=%d chars history=%d msgs", len(system_prompt), len(self.conversation))
 
         self.conversation.append({"role": "user", "content": user_message})
         self._truncate_conversation()
 
+        _t_llm = time.perf_counter()
         chunks: list[str] = []
-        for content, reasoning in chat_completion_stream(
+        for content, reasoning in default_provider.chat_completion_stream(
             model=self.model,
             max_tokens=config.FAST_LLM_MAX_TOKENS,
-            temperature=0.6,
+            temperature=config.AGENT_TEMPERATURE,
             messages=({"role": "system", "content": system_prompt}, *self.conversation),
+            enable_thinking=False,
         ):
             if content:
                 chunks.append(content)
             yield content, reasoning
+        _llm_elapsed = time.perf_counter() - _t_llm
 
-        assistant_msg = "".join(chunks)
+        assistant_msg = strip_thinking_trace("".join(chunks))
+        log.debug("LLM: %.1fs streamed | response=%d chars", _llm_elapsed, len(assistant_msg))
+        log.info("Agent: %.200s", assistant_msg)
+
         self.conversation.append({"role": "assistant", "content": assistant_msg})
         self._stm.add_message("assistant", assistant_msg)
         self._post_process(user_message, assistant_msg)
 
+        _total_elapsed = time.perf_counter() - _t0
+        log.info("Interaction #%d total: %.1fs", self.sponge.interaction_count, _total_elapsed)
+
     def _respond_inner(self, user_message: str) -> str:
         """Internal implementation of respond(); called with interaction_active set."""
         _t0 = time.perf_counter()
-        log.info("=== Interaction #%d ===", self.sponge.interaction_count + 1)
+        interaction_num = self.sponge.interaction_count + 1
+        log.info("=== Interaction #%d ===", interaction_num)
         log.info("User: %.120s", user_message)
 
         # Step 2: Add to STM buffer
         self._stm.add_message("user", user_message)
+        log.debug("STM: buffer=%d msgs, summary=%d chars",
+                  len(self._stm._buffer), len(self._stm.running_summary or ""))
 
         # Step 3-4: Retrieve relevant memories + stored knowledge
+        _t_retrieval = time.perf_counter()
         try:
             relevant = self._run_async(self._retrieve_new_arch(user_message))
         except Exception:
@@ -465,15 +487,16 @@ class SonalityAgent:
                     embedder=self._embedder,
                 )
             )
-            log.debug(
-                "Knowledge retrieval: %d items | query='%.60s'%s",
-                len(knowledge_lines),
-                user_message,
-                f" | top={knowledge_lines[0][:80]!r}" if knowledge_lines else "",
-            )
         except Exception:
             log.debug("Knowledge retrieval failed", exc_info=True)
             knowledge_lines = []
+        _retrieval_ms = (time.perf_counter() - _t_retrieval) * 1000
+        log.debug(
+            "RETRIEVAL: episodes=%d knowledge=%d in %.0fms | top_episode=%.80s",
+            len(relevant), len(knowledge_lines), _retrieval_ms,
+            relevant[0][:80] if relevant else "none",
+        )
+
         structured_traits = self._build_structured_traits()
 
         # Step 5: Build system prompt (with STM running summary if available)
@@ -503,6 +526,12 @@ class SonalityAgent:
                 else system_prompt + stm_section
             )
 
+        log.debug(
+            "CONTEXT: prompt=%d chars (~%d tokens) snapshot=%d traits=%d history=%d msgs",
+            len(system_prompt), len(system_prompt) // 4,
+            len(self.sponge.snapshot), len(structured_traits), len(self.conversation),
+        )
+
         self._log_event(
             {
                 "event": "context",
@@ -518,9 +547,6 @@ class SonalityAgent:
                 "episodic_budget": config.EPISODIC_RETRIEVAL_COUNT,
             }
         )
-        log.debug(
-            "System prompt: %d chars (~%d tokens)", len(system_prompt), len(system_prompt) // 4
-        )
 
         self.conversation.append({"role": "user", "content": user_message})
         self._truncate_conversation()
@@ -529,14 +555,15 @@ class SonalityAgent:
         _t_llm = time.perf_counter()
         for _attempt in range(1, 4):
             try:
-                completion = chat_completion(
+                completion = default_provider.chat_completion(
                     model=self.model,
                     max_tokens=config.FAST_LLM_MAX_TOKENS,
-                    temperature=0.6,
+                    temperature=config.AGENT_TEMPERATURE,
                     messages=(
                         {"role": "system", "content": system_prompt},
                         *self.conversation,
                     ),
+                    enable_thinking=False,
                 )
                 break
             except RuntimeError as exc:
@@ -552,6 +579,13 @@ class SonalityAgent:
         response_input_tokens = completion.input_tokens
         response_output_tokens = completion.output_tokens
         assistant_msg = completion.text
+
+        log.debug(
+            "LLM: %.1fs in=%d out=%d tokens | response=%d chars | %.200s",
+            _llm_elapsed, response_input_tokens, response_output_tokens,
+            len(assistant_msg), assistant_msg[:200] if assistant_msg else "(empty)",
+        )
+
         if not assistant_msg:
             log.warning("Model response contained no text block; using empty reply")
         self.conversation.append({"role": "assistant", "content": assistant_msg})
@@ -560,10 +594,9 @@ class SonalityAgent:
         self._stm.add_message("assistant", assistant_msg)
 
         log.info("Agent: %.200s", assistant_msg)
-        log.debug("Agent (full): %s", assistant_msg)
         log.info(
             "Interaction #%d LLM: %.1fs (retrieval=%.1fs)",
-            self.sponge.interaction_count + 1,
+            interaction_num,
             _llm_elapsed,
             _t_retrieval_elapsed,
         )
@@ -710,9 +743,7 @@ class SonalityAgent:
                 )
                 _t_provenance = time.perf_counter()
                 try:
-                    self._run_async(
-                        self._update_opinions_with_provenance(text, "", ess, episode_uid)
-                    )
+                    self._run_async(self._update_opinions_with_provenance(text, ess, episode_uid))
                 except Exception:
                     log.exception("Provenance opinion update failed")
                 log.debug("INGEST_STEP provenance=%.1fs", time.perf_counter() - _t_provenance)
@@ -954,22 +985,28 @@ class SonalityAgent:
         """
         log.info("--- Post-processing ---")
 
+        _t_ess = time.perf_counter()
         try:
             ess = self._classify_ess(user_message)
         except Exception:
             log.exception("ESS classification failed completely, using safe fallback")
             ess = classifier_exception_fallback(user_message)
+        _ess_elapsed = (time.perf_counter() - _t_ess) * 1000
+
         self.last_ess = ess
         self._log_ess(ess, user_message)
-        log.info(
-            "ESS: score=%.3f type=%s dir=%s novelty=%.2f topics=%s severity=%s attempts=%d",
-            ess.score,
-            ess.reasoning_type,
-            ess.opinion_direction,
-            ess.novelty,
-            list(ess.topics),
-            ess.default_severity,
-            ess.attempt_count,
+
+        # Anomaly detection for ESS
+        topic_count = len(ess.topics)
+        if topic_count > 5:
+            log.warning("ESS_ANOMALY: excessive topics=%d (>5) | topics=%s", topic_count, list(ess.topics))
+        if ess.reasoning_type in ("social_pressure", "emotional_appeal") and ess.score > 0.3:
+            log.warning("ESS_ANOMALY: high score=%.2f for manipulative type=%s", ess.score, ess.reasoning_type)
+
+        log.debug(
+            "ESS: %.0fms score=%.2f type=%s dir=%s novelty=%.2f topics=%s density=%s update=%s",
+            _ess_elapsed, ess.score, ess.reasoning_type, ess.opinion_direction,
+            ess.novelty, list(ess.topics), ess.knowledge_density, ess.belief_update_recommended,
         )
 
         # Event boundary detection + dual-store storage (required architecture)
@@ -981,6 +1018,8 @@ class SonalityAgent:
         try:
             boundary = self._boundary_detector.check_boundary(user_message)
             segment_id = boundary.segment_id
+            log.debug("BOUNDARY: decision=%s segment=%s",
+                      boundary.boundary_decision, segment_id or "none")
             if boundary.boundary_decision is BoundaryDecision.BOUNDARY:
                 closed_segment_id = previous_segment_id
                 segment_label = boundary.label
@@ -989,6 +1028,7 @@ class SonalityAgent:
         except Exception:
             log.exception("Boundary detection failed")
 
+        _t_store = time.perf_counter()
         episode_uid = self._store_episode_new_arch(
             user_message,
             agent_response,
@@ -997,51 +1037,31 @@ class SonalityAgent:
             segment_label,
             segment_reasoning,
         )
+        _store_ms = (time.perf_counter() - _t_store) * 1000
+        log.debug("STORAGE: episode=%s in %.0fms", episode_uid or "FAILED", _store_ms)
+
         if closed_segment_id:
             self._try_consolidate_segment(closed_segment_id, trigger="boundary")
         if not episode_uid:
             log.warning("Dual-store write failed; skipping post-processing belief update")
 
         # Manipulative/invalid interactions should not mutate personality state.
-        # debunked_claim: conclusively refuted claims must never update beliefs.
-        # social_pressure / emotional_appeal: coercive but no evidential content.
-        # anecdotal: unsourced "experts say" / "studies show" without actual evidence.
         manipulative = ess.reasoning_type in {
             "social_pressure",
             "emotional_appeal",
             "debunked_claim",
             "anecdotal",
         }
-        # no_argument: bare assertions with no evidential backing (injection attacks,
-        # unsupported commands, repeated claims). Block knowledge extraction and Qdrant
-        # writes; staged opinion commits are still allowed so prior evidence can mature.
         no_evidence = ess.reasoning_type == "no_argument"
-        log.debug(
-            "MUTATION_GATE manipulative=%s type=%s score=%.3f topics=%s",
-            manipulative,
-            ess.reasoning_type,
-            ess.score,
-            list(ess.topics),
-        )
+
+        log.debug("GATE: manipulative=%s no_evidence=%s type=%s", manipulative, no_evidence, ess.reasoning_type)
         if manipulative:
-            log.info(
-                "Manipulative interaction (%s, score=%.3f): freezing sponge mutation",
-                ess.reasoning_type,
-                ess.score,
-            )
-        else:
-            log.debug(
-                "Non-manipulative interaction (%s, score=%.3f): sponge mutation allowed",
-                ess.reasoning_type,
-                ess.score,
-            )
+            log.info("BLOCKED: type=%s score=%.2f freezing belief mutations", ess.reasoning_type, ess.score)
 
         # Knowledge proposition extraction (inline, gated by ESS knowledge_density).
-        # Skipped for manipulative turns (coercive, no evidential content) AND for
-        # no_argument turns (bare assertions, injection attacks) — neither carries
-        # valid knowledge worth storing in the proposition store.
         self.last_knowledge_writes = 0
         if episode_uid and not manipulative and not no_evidence:
+            _t_know = time.perf_counter()
             try:
                 self._extract_knowledge(
                     user_message,
@@ -1050,16 +1070,21 @@ class SonalityAgent:
                     episode_uid,
                     stage_opinions=ess.belief_update_recommended,
                 )
-                # Normalize topics in freshly-staged knowledge updates
                 self._normalize_staged_topics()
+                _know_ms = (time.perf_counter() - _t_know) * 1000
+                log.debug("KNOWLEDGE: extracted in %.0fms writes=%d", _know_ms, self.last_knowledge_writes)
             except Exception:
                 log.exception("Knowledge extraction failed (outer guard)")
+        else:
+            log.debug("KNOWLEDGE: skipped (episode=%s manipulative=%s no_evidence=%s)",
+                      bool(episode_uid), manipulative, no_evidence)
 
         # Persist STM to Neo4j
         try:
             self._run_async(self._stm.persist(self._db.neo4j_driver))
+            log.debug("STM_PERSIST: buffer=%d persisted", len(self._stm._buffer))
         except Exception:
-            log.debug("STM persistence failed", exc_info=True)
+            log.debug("STM_PERSIST: failed", exc_info=True)
 
         self.sponge.interaction_count += 1
 
@@ -1068,34 +1093,18 @@ class SonalityAgent:
             committed = self.sponge.apply_due_staged_updates()
             staged_after = len(self.sponge.staged_opinion_updates)
             if committed:
-                log.info("Committed staged beliefs: %s", committed)
-                log.debug(
-                    "STAGED_COMMIT staged=%d→%d committed=%d",
-                    staged_before,
-                    staged_after,
-                    len(committed),
-                )
+                log.debug("BELIEF_COMMIT: committed=%s staged_remaining=%d", committed, staged_after)
                 for topic in committed:
                     b = self.sponge.get_belief(topic)
-                    log.debug(
-                        "  COMMIT topic=%s pos=%+.4f conf=%.2f ev=%d",
-                        topic,
-                        b.position,
-                        b.confidence,
-                        b.evidence_count,
-                    )
+                    log.debug("  %s: pos=%+.3f conf=%.2f ev=%d", topic, b.position, b.confidence, b.evidence_count)
             else:
-                log.debug(
-                    "STAGED_COMMIT none due (pending=%d interaction=%d)",
-                    staged_before,
-                    self.sponge.interaction_count,
-                )
+                log.debug("BELIEF_COMMIT: none_due staged=%d", staged_before)
             self._log_event(
                 {
                     "event": "opinion_commit",
                     "interaction": self.sponge.interaction_count,
                     "committed": committed,
-                    "remaining_staged": len(self.sponge.staged_opinion_updates),
+                    "remaining_staged": staged_after,
                 }
             )
 
@@ -1103,49 +1112,63 @@ class SonalityAgent:
             self.sponge.track_topic(topic)
         if episode_uid and not manipulative:
             if ess.topics:
-                log.info(
-                    "PROVENANCE_BEFORE topics=%s | %s",
-                    list(ess.topics),
-                    " | ".join(
-                        f"{t}={self.sponge.opinion_vectors.get(t, 0.0):+.3f}"
-                        f"(conf={self.sponge.belief_meta[t].confidence:.2f},ev={self.sponge.belief_meta[t].evidence_count})"
-                        if t in self.sponge.belief_meta
-                        else f"{t}=new"
-                        for t in ess.topics
-                    ),
-                )
+                beliefs_before = {
+                    t: (self.sponge.opinion_vectors.get(t, 0.0), self.sponge.belief_meta[t].confidence if t in self.sponge.belief_meta else 0.0)
+                    for t in ess.topics
+                }
+            _t_prov = time.perf_counter()
             try:
                 self._run_async(
-                    self._update_opinions_with_provenance(
-                        user_message, agent_response, ess, episode_uid
-                    )
+                    self._update_opinions_with_provenance(user_message, ess, episode_uid)
                 )
+                _prov_ms = (time.perf_counter() - _t_prov) * 1000
+                if ess.topics:
+                    changes = []
+                    for t in ess.topics:
+                        old_pos, old_conf = beliefs_before.get(t, (0.0, 0.0))
+                        new_pos = self.sponge.opinion_vectors.get(t, 0.0)
+                        new_conf = self.sponge.belief_meta[t].confidence if t in self.sponge.belief_meta else 0.0
+                        delta = new_pos - old_pos
+                        if abs(delta) > 0.001 or old_conf == 0.0:
+                            changes.append(f"{t}:{old_pos:+.2f}->{new_pos:+.2f}")
+                    log.debug("BELIEF: %.0fms %s", _prov_ms, " ".join(changes) if changes else "no_change")
+                else:
+                    log.debug("BELIEF: %.0fms no_topics", _prov_ms)
             except Exception:
-                log.exception("Provenance opinion update failed")
+                log.exception("BELIEF: update failed")
         disagrees = self._detect_disagreement(user_message, ess)
-        log.debug("DISAGREEMENT_GATE result=%s topics=%s", disagrees, list(ess.topics))
         if disagrees:
             self.sponge.note_disagreement()
+            log.debug("DISAGREE: user_opposes topics=%s streak=%d", list(ess.topics), self.sponge.recent_disagreements)
         else:
             self.sponge.note_agreement()
 
         self.previous_snapshot = self.sponge.snapshot
         if not manipulative:
+            _t_insight = time.perf_counter()
+            insights_before = len(self.sponge.pending_insights)
             self._extract_insight(user_message, agent_response, ess)
+            _insight_ms = (time.perf_counter() - _t_insight) * 1000
+            insights_added = len(self.sponge.pending_insights) - insights_before
+            if insights_added > 0:
+                log.debug("INSIGHT: %.0fms added=%d total_pending=%d", _insight_ms, insights_added, len(self.sponge.pending_insights))
+            else:
+                log.debug("INSIGHT: %.0fms none_added", _insight_ms)
+
+            last_reflection_before = self.sponge.last_reflection_at
+            _t_reflect = time.perf_counter()
             self._maybe_reflect()
+            _reflect_ms = (time.perf_counter() - _t_reflect) * 1000
+            triggered = self.sponge.last_reflection_at != last_reflection_before
+            if _reflect_ms > 5000:
+                log.warning("REFLECT_ANOMALY: %.1fs (>5s threshold)", _reflect_ms / 1000)
+            log.debug("REFLECT: %.0fms triggered=%s", _reflect_ms, triggered)
         else:
-            log.info(
-                "Deferring insight + reflection (manipulative turn #%d, type=%s)",
-                self.sponge.interaction_count,
-                ess.reasoning_type,
-            )
+            log.debug("INSIGHT: skipped_manipulative")
+            log.debug("REFLECT: skipped_manipulative")
         self._log_health_event()
 
-        # Enqueue semantic feature extraction only after ALL inline LLM calls
-        # (ESS, boundary, chunking, knowledge extraction, opinion provenance,
-        # disagreement detection, insight, reflection) are complete. This prevents
-        # the background SemanticIngestionWorker from grabbing the LLM semaphore
-        # and blocking any foreground post-processing call for the current interaction.
+        # Enqueue semantic feature extraction only after ALL inline LLM calls complete.
         if episode_uid:
             ess_line = (
                 f"ESS: {ess.score:.2f} ({ess.reasoning_type}) | "
@@ -1154,8 +1177,14 @@ class SonalityAgent:
             )
             content = f"User: {user_message}\nAssistant: {agent_response}\n{ess_line}"
             self._semantic_worker.enqueue(episode_uid, content)
+            log.debug("SEMANTIC: enqueued uid=%s", episode_uid)
 
         self.sponge.save(config.SPONGE_FILE, config.SPONGE_HISTORY_DIR)
+        log.debug(
+            "SPONGE_SAVED: v%d #%d beliefs=%d staged=%d",
+            self.sponge.version, self.sponge.interaction_count,
+            len(self.sponge.opinion_vectors), len(self.sponge.staged_opinion_updates),
+        )
         self._log_interaction_summary(ess)
 
     def _classify_ess(self, user_message: str) -> ESSResult:
@@ -1170,9 +1199,9 @@ class SonalityAgent:
                 reverse=True,
             )[:10]
         )
+        log.debug("ESS_INPUT: tracked=%s msg_preview=%.60s", list(top_topics), user_message[:60])
         try:
             ess = classify(
-                PROVIDER_CLIENT,
                 user_message,
                 self.sponge.snapshot,
                 model=self.ess_model,
@@ -1181,8 +1210,44 @@ class SonalityAgent:
         except Exception:
             log.exception("ESS classification failed, using safe defaults")
             return classifier_exception_fallback(user_message)
+
+        # Validate topics against message content (semantic sanity check)
+        validated_topics = self._validate_topics(ess.topics, user_message, top_topics)
+        if validated_topics != ess.topics:
+            ess = dataclasses.replace(ess, topics=validated_topics)
+
         canonical = self._normalize_topics_llm(ess.topics)
         return ess if canonical == ess.topics else dataclasses.replace(ess, topics=canonical)
+
+    def _validate_topics(
+        self, topics: tuple[str, ...], message: str, tracked: tuple[str, ...]
+    ) -> tuple[str, ...]:
+        """Validate ESS topics against message content; filter spurious tracked-topic reuse."""
+        if not topics:
+            return topics
+        msg_lower = message.lower()
+        msg_words = set(msg_lower.split())
+
+        validated = []
+        for topic in topics:
+            topic_words = set(topic.lower().split())
+            # Topic is valid if: any word appears in message, or it's a new topic (not tracked)
+            word_match = bool(topic_words & msg_words)
+            is_new = topic not in tracked
+            # Also check if topic substring appears in message
+            substring_match = topic.lower() in msg_lower
+
+            if word_match or substring_match or is_new:
+                validated.append(topic)
+            else:
+                log.warning(
+                    "ESS_TOPIC_FILTERED: '%s' doesn't appear in message (likely tracked-topic bias)",
+                    topic,
+                )
+        if not validated and topics:
+            log.warning("ESS_TOPIC_RESET: all topics filtered, keeping original %s", list(topics))
+            return topics
+        return tuple(validated)
 
     # Conversational meta-labels that should never become tracked belief topics.
     # The ESS prompt bans these, but the model occasionally emits them. This is a
@@ -1635,7 +1700,6 @@ class SonalityAgent:
     async def _update_opinions_with_provenance(
         self,
         user_message: str,
-        agent_response: str,
         ess: ESSResult,
         episode_uid: str,
     ) -> None:
@@ -1856,6 +1920,7 @@ class SonalityAgent:
             )
 
         # Below cadence: consult LLM for event-driven early reflection.
+        _t_gate = time.perf_counter()
         result = llm_call(
             prompt=prompt,
             response_model=ReflectionGateResponse,
@@ -1863,6 +1928,10 @@ class SonalityAgent:
             max_tokens=config.LLM_TOKENS_ROUTING,
             assistant_prefix='{"trigger": "',
         )
+        _gate_ms = (time.perf_counter() - _t_gate) * 1000
+        log.debug("REFLECT_GATE_LLM: %.0fms success=%s", _gate_ms, result.success)
+        if _gate_ms > 10000:
+            log.warning("REFLECT_GATE_ANOMALY: LLM took %.1fs (>10s)", _gate_ms / 1000)
         if not result.success:
             return ReflectionGate(
                 trigger=ReflectionTrigger.SKIP,
@@ -2059,12 +2128,21 @@ class SonalityAgent:
                 )
                 meta.confidence = max(0.0, min(1.0, new_conf))
                 meta.uncertainty = 1.0 - meta.confidence
-                log.debug(
-                    "Belief decay: %s confidence → %.2f (%s)",
-                    topic,
-                    meta.confidence,
-                    decision.reasoning[:60],
-                )
+                # Regress extreme positions toward neutral when stale
+                old_pos = self.sponge.opinion_vectors.get(topic, 0.0)
+                if abs(old_pos) >= 0.9:
+                    regression = 0.05 * (1 if old_pos < 0 else -1)
+                    new_pos = old_pos + regression
+                    self.sponge.opinion_vectors[topic] = new_pos
+                    log.debug(
+                        "Belief decay: %s pos=%.2f→%.2f conf=%.2f (%s)",
+                        topic, old_pos, new_pos, meta.confidence, decision.reasoning[:40],
+                    )
+                else:
+                    log.debug(
+                        "Belief decay: %s conf=%.2f (%s)",
+                        topic, meta.confidence, decision.reasoning[:60],
+                    )
         return dropped
 
     def _detect_entrenched_beliefs_llm(self, min_updates: int = 4) -> list[str]:
@@ -2116,18 +2194,10 @@ class SonalityAgent:
             if shift.interaction > self.sponge.last_reflection_at
         )
         gate = self._reflection_gate()
-        log.info(
-            "REFLECT_GATE trigger=%s label=%s window=%d cadence=%d min=%d "
-            "pending_insights=%d staged=%d beliefs=%d recent_mag=%.3f",
-            gate.trigger,
-            gate.trigger_label,
-            gate.window_interactions,
-            config.REFLECTION_EVERY,
-            self._MIN_WINDOW_FOR_EVENT_DRIVEN,
-            len(self.sponge.pending_insights),
-            len(self.sponge.staged_opinion_updates),
-            len(self.sponge.opinion_vectors),
-            recent_mag,
+        log.debug(
+            "REFLECT_GATE: trigger=%s window=%d cadence=%d insights=%d staged=%d mag=%.3f",
+            gate.trigger.name, gate.window_interactions, config.REFLECTION_EVERY,
+            len(self.sponge.pending_insights), len(self.sponge.staged_opinion_updates), recent_mag,
         )
         if gate.trigger is ReflectionTrigger.SKIP:
             return
@@ -2241,7 +2311,7 @@ class SonalityAgent:
 
         try:
             pre_snapshot = self.sponge.snapshot
-            completion = chat_completion(
+            completion = default_provider.chat_completion(
                 model=self.ess_model,
                 max_tokens=config.FAST_LLM_MAX_TOKENS,
                 messages=({"role": "user", "content": prompt},),
@@ -2384,6 +2454,12 @@ class SonalityAgent:
 
     def _log_health_event(self) -> None:
         """Write lightweight health diagnostics for drift/sycophancy/saturation detection."""
+        # Apply natural decay every 5 interactions to prevent belief ossification
+        if self.sponge.interaction_count % 5 == 0:
+            decayed = self.sponge.apply_natural_decay()
+            if decayed:
+                log.debug("DECAY_CYCLE: %d beliefs regressed toward neutral", len(decayed))
+
         words = self.sponge.snapshot.split()
         unique_ratio = len(set(w.lower() for w in words)) / len(words) if words else 0.0
         metas = list(self.sponge.belief_meta.items())
@@ -2394,14 +2470,15 @@ class SonalityAgent:
         warnings: list[str] = []
 
         # Belief saturation: beliefs pinned at extremes can't absorb new evidence correctly.
-        saturated = [t for t, _ in metas if abs(self.sponge.opinion_vectors.get(t, 0.0)) >= 0.95]
+        # Note: With asymptotic bounds, beliefs can't reach ±1.0, but may still cluster near ±0.95
+        saturated = [t for t, _ in metas if abs(self.sponge.opinion_vectors.get(t, 0.0)) >= 0.90]
         if saturated:
             warnings.append(f"saturated_beliefs:{','.join(saturated[:5])}")
             log.warning(
-                "BELIEF_SATURATION %d beliefs pinned at ±0.95+: %s | "
-                "these topics resist new evidence — consider decay or manual review",
+                "BELIEF_SATURATION %d beliefs near extremes (±0.90+): %s | "
+                "natural decay will gradually regress these",
                 len(saturated),
-                saturated,
+                saturated[:5],
             )
 
         # Sycophancy indicator: all beliefs positive, no negative opinions formed.
@@ -2439,6 +2516,16 @@ class SonalityAgent:
                 stale_extreme[:5],
             )
             warnings.append(f"stale_extreme:{','.join(stale_extreme[:3])}")
+            # Forced regression for very stale extreme beliefs (safety net)
+            for topic in stale_extreme:
+                meta = self.sponge.belief_meta.get(topic)
+                gap = self.sponge.interaction_count - meta.last_reinforced if meta else 0
+                if gap > 15:
+                    old_pos = self.sponge.opinion_vectors.get(topic, 0.0)
+                    regression = 0.03 * (1 if old_pos < 0 else -1)
+                    new_pos = max(-1.0, min(1.0, old_pos + regression))
+                    self.sponge.opinion_vectors[topic] = new_pos
+                    log.debug("FORCED_DECAY: %s pos=%.2f→%.2f (gap=%d)", topic, old_pos, new_pos, gap)
 
         # Use cached result from this turn's reflection call to avoid extra LLM call.
         entrenched = list(self._last_entrenched)

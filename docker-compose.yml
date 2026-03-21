@@ -13,6 +13,7 @@ services:
     environment:
       SONALITY_NEO4J_URL: bolt://neo4j:7687
       SONALITY_QDRANT_URL: http://qdrant:6333
+      SONALITY_LOG_LEVEL: DEBUG
     volumes:
       - ./data:/app/data
     depends_on:
@@ -65,7 +66,6 @@ services:
       retries: 5
       start_period: 15s
 
-  # === Speech Services (STT + TTS) ===
   speaches:
     image: ghcr.io/speaches-ai/speaches:latest-cpu
     ports:
@@ -73,6 +73,8 @@ services:
     volumes:
       - speaches_cache:/home/ubuntu/.cache/huggingface/hub
     environment:
+      # Prevent ONNX from attempting CUDA (eliminates noisy fallback errors)
+      CUDA_VISIBLE_DEVICES: ""
       # Logging
       LOG_LEVEL: info
       # Model persistence (never unload)

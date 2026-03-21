@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 
 import uvicorn
 
@@ -18,11 +19,13 @@ def main() -> None:
     parser.add_argument("--host", default="0.0.0.0", help="Host to bind to")
     parser.add_argument("--port", type=int, default=8000, help="Port to bind to")
     parser.add_argument("--reload", action="store_true", help="Enable auto-reload")
-    parser.add_argument("--log-level", default="info", help="Log level")
+    parser.add_argument("--log-level", default=None, help="Log level (default: from SONALITY_LOG_LEVEL or info)")
     args = parser.parse_args()
 
+    log_level = args.log_level or os.environ.get("SONALITY_LOG_LEVEL", "info")
+
     logging.basicConfig(
-        level=getattr(logging, args.log_level.upper()),
+        level=getattr(logging, log_level.upper()),
         format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
     )
 
@@ -31,7 +34,7 @@ def main() -> None:
         host=args.host,
         port=args.port,
         reload=args.reload,
-        log_level=args.log_level,
+        log_level=log_level.lower(),
     )
 
 

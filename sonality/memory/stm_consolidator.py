@@ -12,7 +12,7 @@ import threading
 
 from .. import config
 from ..llm.prompts import SUMMARIZATION_PROMPT
-from ..provider import chat_completion, llm_semaphore_idle
+from ..provider import default_provider, llm_semaphore_idle
 from .stm import ShortTermMemory, STMMessage
 
 log = logging.getLogger(__name__)
@@ -77,7 +77,7 @@ class BackgroundSummarizer(threading.Thread):
         )
 
         try:
-            completion = chat_completion(
+            completion = default_provider.chat_completion(
                 model=config.FAST_LLM_MODEL,
                 max_tokens=config.FAST_LLM_MAX_TOKENS,
                 messages=({"role": "user", "content": prompt},),
@@ -103,7 +103,7 @@ class BackgroundSummarizer(threading.Thread):
             previous_summary="",
         )
         try:
-            completion = chat_completion(
+            completion = default_provider.chat_completion(
                 model=config.FAST_LLM_MODEL,
                 max_tokens=config.FAST_LLM_MAX_TOKENS,
                 messages=({"role": "user", "content": prompt},),

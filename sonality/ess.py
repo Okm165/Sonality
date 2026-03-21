@@ -2,24 +2,21 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Final, Literal, Protocol, cast
+from typing import Final, Literal
 
 from . import config
 from .prompts import ESS_CLASSIFICATION_PROMPT
-from .provider import (
-    _to_nonnegative_int,
-    chat_completion,
-    extract_tool_call_arguments,
-    parse_json_object,
-)
+from .provider import default_provider, extract_tool_call_arguments, parse_json_object
 
 log = logging.getLogger(__name__)
 
 REQUIRED_FIELDS: Final = frozenset({"score", "reasoning_type", "opinion_direction"})
 MAX_ESS_RETRIES: Final = 2
+ESS_TIMEOUT_SECONDS: Final = 120  # 2 minute timeout for ESS classification
 ENUM_NORMALIZE_RE: Final = re.compile(r"[^a-z0-9_]+")
 RETRY_REQUIRED_FIELD_NOTE: Final = (
     "Repair required fields only: score must be numeric, and reasoning_type and "
@@ -176,163 +173,85 @@ PROVIDER_JSON_ONLY_NOTE: Final = (
 )
 
 
-ESS_TOOL: Final = {
-    "name": "classify_evidence",
-    "description": "Classify the evidence strength and extract metadata from this interaction.",
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "score": {
-                "type": "number",
-                "description": "Overall argument strength 0.0-1.0.",
-            },
-            "reasoning_type": {
-                "type": "string",
-                "enum": list(REASONING_TYPE_VALUES),
-                "description": "Primary reasoning type used.",
-            },
-            "source_reliability": {
-                "type": "string",
-                "enum": list(SOURCE_RELIABILITY_VALUES),
-            },
-            "internal_consistency": {
-                "type": "string",
-                "enum": list(INTERNAL_CONSISTENCY_VALUES),
-                "description": "Whether the argument is internally consistent.",
-            },
-            "novelty": {
-                "type": "number",
-                "description": "Novelty relative to agent's existing views. 0=known, 1=entirely new.",
-            },
-            "topics": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": (
-                    "Subject-matter domain or concept labels the message is substantively about "
-                    "(1-3 short lowercase labels). Derive labels ONLY from concepts explicitly "
-                    "named or directly asserted in the message. "
-                    "Use the precise, standard name for the subject (e.g. 'universal basic income', "
-                    "not 'ubiquitous basic income'). "
-                    "NEVER use conversational meta-labels as topics: "
-                    "banned topics include 'social pressure', 'pressure', 'peer pressure', "
-                    "'consensus', 'industry consensus', 'scientific consensus', 'expert consensus', 'group consensus', "
-                    "'disagreement', 'argument', 'evidence', 'manipulation', 'survey method', "
-                    "'consistency', 'reliability', 'memory', 'credibility', "
-                    "'emotion', 'emotional appeal', 'opinion', 'reasoning'. "
-                    "If the message is purely social/meta (pressure, questioning, probing) "
-                    "with no substantive subject, use an empty list []."
-                ),
-            },
-            "summary": {
-                "type": "string",
-                "description": (
-                    "One-sentence third-person summary of what the USER asserts or asks, in concrete "
-                    "specific terms. State the actual subject matter directly: name the claim, study, "
-                    "or data point. Do NOT use vague meta-descriptions like 'User discusses X' or "
-                    "'User asks about X' — instead write what they assert: "
-                    "'User presents Stanford (2022) data showing hybrid work lowers productivity.'"
-                ),
-            },
-            "opinion_direction": {
-                "type": "string",
-                "enum": list(OPINION_DIRECTION_VALUES),
-                "description": "Directional stance of the user's message: supports = positive argument or evidence FOR a claim; opposes = counter-evidence, rebuttal, or argument AGAINST a prior claim; neutral = no directional stance (questions, recaps, social).",
-            },
-            "knowledge_density": {
-                "type": "string",
-                "enum": list(KNOWLEDGE_DENSITY_VALUES),
-                "description": (
-                    "Density of learnable factual/conceptual content in the USER's message: "
-                    "high = multiple specific numbers, percentages, named sources, or detailed factual exposition; "
-                    "moderate = at least one verifiable fact, statistic, or citation; "
-                    "low = mostly user opinion, social commentary, or questions without data; "
-                    "none = greetings, chitchat, bare questions without data, or requests with no factual content. "
-                    "ANY message presenting specific data points, statistics, named sources, or technical facts MUST be at least 'moderate'."
-                ),
-            },
-            "belief_update_recommended": {
-                "type": "boolean",
-                "description": (
-                    "Whether this evidence warrants updating the agent's beliefs. Set true when "
-                    "the input contains substantive claims backed by identifiable evidence, named "
-                    "sources, or verifiable data. Set false for greetings, bare opinions without "
-                    "reasoning, social pressure, emotional appeals, or debunked content."
-                ),
-            },
-            "urgency": {
-                "type": "string",
-                "enum": list(URGENCY_LEVEL_VALUES),
-                "description": (
-                    "Time-sensitivity of this information. 'immediate' for breaking events with "
-                    "time-sensitive consequences (surprise policy decisions, natural disasters, "
-                    "military actions). 'standard' for routine reports and analysis. 'low' for "
-                    "historical analysis or background context."
-                ),
-            },
+ESS_TOOL_SCHEMA: Final[dict[str, object]] = {
+    "type": "object",
+    "properties": {
+        "score": {"type": "number", "description": "Overall argument strength 0.0-1.0."},
+        "reasoning_type": {
+            "type": "string",
+            "enum": list(REASONING_TYPE_VALUES),
+            "description": "Primary reasoning type used.",
         },
-        "required": [
-            "score",
-            "reasoning_type",
-            "source_reliability",
-            "internal_consistency",
-            "novelty",
-            "topics",
-            "summary",
-            "opinion_direction",
-            "knowledge_density",
-            "belief_update_recommended",
-            "urgency",
-        ],
+        "source_reliability": {"type": "string", "enum": list(SOURCE_RELIABILITY_VALUES)},
+        "internal_consistency": {
+            "type": "string",
+            "enum": list(INTERNAL_CONSISTENCY_VALUES),
+            "description": "Whether the argument is internally consistent.",
+        },
+        "novelty": {
+            "type": "number",
+            "description": "Novelty relative to agent's existing views. 0=known, 1=entirely new.",
+        },
+        "topics": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": (
+                "Subject-matter domain or concept labels (1-3 short lowercase). "
+                "Derive ONLY from explicitly named concepts. Use precise standard names. "
+                "NEVER use meta-labels: social pressure, consensus, disagreement, argument, evidence, manipulation, etc. "
+                "Empty list [] if purely social/meta with no substantive subject."
+            ),
+        },
+        "summary": {
+            "type": "string",
+            "description": "One-sentence third-person summary of USER's assertion in concrete terms. State the claim directly, not 'User discusses X'.",
+        },
+        "opinion_direction": {
+            "type": "string",
+            "enum": list(OPINION_DIRECTION_VALUES),
+            "description": "Directional stance: supports/opposes/neutral.",
+        },
+        "knowledge_density": {
+            "type": "string",
+            "enum": list(KNOWLEDGE_DENSITY_VALUES),
+            "description": "Density of learnable content: high=multiple facts/stats, moderate=some data, low=opinion, none=chitchat.",
+        },
+        "belief_update_recommended": {
+            "type": "boolean",
+            "description": "True if evidence warrants belief update (substantive claims with sources).",
+        },
+        "urgency": {
+            "type": "string",
+            "enum": list(URGENCY_LEVEL_VALUES),
+            "description": "Time-sensitivity: immediate/standard/low.",
+        },
     },
+    "required": [
+        "score",
+        "reasoning_type",
+        "source_reliability",
+        "internal_consistency",
+        "novelty",
+        "topics",
+        "summary",
+        "opinion_direction",
+        "knowledge_density",
+        "belief_update_recommended",
+        "urgency",
+    ],
 }
 PROVIDER_ESS_TOOL: Final[dict[str, object]] = {
     "type": "function",
     "function": {
         "name": "classify_evidence",
-        "description": ESS_TOOL["description"],
-        "parameters": ESS_TOOL["input_schema"],
+        "description": "Classify evidence strength and extract metadata.",
+        "parameters": ESS_TOOL_SCHEMA,
     },
 }
 PROVIDER_ESS_TOOL_CHOICE: Final[dict[str, object]] = {
     "type": "function",
     "function": {"name": "classify_evidence"},
 }
-
-
-class _MessagesClientProtocol(Protocol):
-    """Minimal protocol for mocked `client.messages` implementations in tests."""
-
-    def create(self, **kwargs: object) -> _ToolUseResponseProtocol: ...
-
-
-class _ClientProtocol(Protocol):
-    """Minimal protocol for optional test-client injection."""
-
-    messages: _MessagesClientProtocol
-
-
-PROVIDER_CLIENT: Final[_ClientProtocol] = cast(_ClientProtocol, object())
-
-
-class _ToolUseBlockProtocol(Protocol):
-    """Single tool-use block in mocked classifier responses."""
-
-    type: str
-    input: Mapping[str, object] | object
-
-
-class _UsageProtocol(Protocol):
-    """Token usage fields exposed by mocked classifier responses."""
-
-    input_tokens: int | float | bool
-    output_tokens: int | float | bool
-
-
-class _ToolUseResponseProtocol(Protocol):
-    """Minimal response contract used by ESS extraction helpers."""
-
-    content: Sequence[_ToolUseBlockProtocol]
-    usage: _UsageProtocol
 
 
 @dataclass(frozen=True, slots=True)
@@ -522,11 +441,7 @@ def _required_field_coercions(data: Mapping[str, object]) -> tuple[str, ...]:
     return tuple(coercions)
 
 
-def _run_classification_attempts(
-    client: _ClientProtocol,
-    prompt: str,
-    model: str,
-) -> ClassificationAttempts:
+def _run_classification_attempts(prompt: str, model: str) -> ClassificationAttempts:
     """Run classifier retries and return final payload with token totals."""
     data: dict[str, object] = {}
     attempts_executed = 0
@@ -543,43 +458,25 @@ def _run_classification_attempts(
                 f"{prompt}\n\nPrevious response was missing or invalid for: {bad_list}. "
                 f"{RETRY_ALLOWED_VALUES_NOTE}"
             )
-        if client is not PROVIDER_CLIENT:
-            response = client.messages.create(
-                model=model,
-                max_tokens=config.FAST_LLM_MAX_TOKENS,
-                messages=[{"role": "user", "content": prompt_with_retry_guidance}],
-                tools=[ESS_TOOL],
-                tool_choice={"type": "tool", "name": "classify_evidence"},
-            )
-            usage = response.usage
-            total_input_tokens += _to_nonnegative_int(usage.input_tokens)
-            total_output_tokens += _to_nonnegative_int(usage.output_tokens)
-            data = {}
-            for block in response.content:
-                if block.type == "tool_use" and isinstance(block.input, Mapping):
-                    data = dict(block.input)
-                    break
-        else:
-            completion = chat_completion(
-                model=model,
-                max_tokens=config.LLM_TOKENS_ESS,
-                temperature=0.0,
-                messages=(
-                    {
-                        "role": "user",
-                        "content": f"{prompt_with_retry_guidance}\n\n{PROVIDER_JSON_ONLY_NOTE}",
-                    },
-                ),
-                tools=(PROVIDER_ESS_TOOL,),
-                tool_choice=PROVIDER_ESS_TOOL_CHOICE,
-                enable_thinking=False,
-            )
-            total_input_tokens += completion.input_tokens
-            total_output_tokens += completion.output_tokens
-            data = extract_tool_call_arguments(completion.raw, "classify_evidence")
-            if not data:
-                data = parse_json_object(completion.text)
-
+        completion = default_provider.chat_completion(
+            model=model,
+            max_tokens=config.LLM_TOKENS_ESS,
+            temperature=0.0,
+            messages=(
+                {
+                    "role": "user",
+                    "content": f"{prompt_with_retry_guidance}\n\n{PROVIDER_JSON_ONLY_NOTE}",
+                },
+            ),
+            tools=(PROVIDER_ESS_TOOL,),
+            tool_choice=PROVIDER_ESS_TOOL_CHOICE,
+            enable_thinking=False,
+        )
+        total_input_tokens += completion.input_tokens
+        total_output_tokens += completion.output_tokens
+        data = extract_tool_call_arguments(completion.raw, "classify_evidence")
+        if not data:
+            data = parse_json_object(completion.text)
         if not data:
             data = {}
         missing = REQUIRED_FIELDS - set(data.keys())
@@ -744,44 +641,19 @@ def _coerce_payload(data: Mapping[str, object]) -> CoercedEssPayload:
     )
 
 
-def classify(
-    client: _ClientProtocol,
-    user_message: str,
-    sponge_snapshot: str,
-    model: str = config.ESS_MODEL,
-    recent_topics: tuple[str, ...] = (),
+def _classify_inner(
+    prompt: str,
+    model: str,
 ) -> ESSResult:
-    """Classify evidence strength of the user's message.
-
-    Uses a separate LLM call with tool_use to extract structured ESS metadata.
-    The agent_response is deliberately excluded to avoid self-judge bias
-    (up to 50pp shift from attribution labels — ESS should evaluate user input only).
-    Assumes classifier outputs may be malformed; coercion/default tracking is
-    preserved in the result for downstream safety gating and auditing.
-
-    recent_topics: top tracked topic labels from sponge — passed so the model
-    can reuse existing labels and avoid generating synonyms that fragment beliefs.
-    """
-    tracked = ", ".join(recent_topics) if recent_topics else "none yet"
-    prompt = ESS_CLASSIFICATION_PROMPT.format(
-        user_message=user_message,
-        sponge_snapshot=sponge_snapshot,
-        tracked_topics=tracked,
-    )
-    log.info("ESS classifying message (%d chars)", len(user_message))
-    attempts = _run_classification_attempts(client, prompt, model)
+    """Core classification logic (called with timeout wrapper)."""
+    attempts = _run_classification_attempts(prompt, model)
     payload = _coerce_payload(attempts.data)
 
     if payload.defaulted_fields:
-        log.warning(
-            "ESS fell back/coerced fields %s",
-            payload.defaulted_fields,
-        )
+        log.warning("ESS fell back/coerced fields %s", payload.defaulted_fields)
 
     # Consistency guard: substantive reasoning types inherently carry learnable
     # content, so knowledge_density=NONE is contradictory for them.
-    # logical_argument with score >= 0.30 also qualifies — a real argument with
-    # named concepts and structured reasoning is worth extracting propositions from.
     kd = payload.knowledge_density
     if kd == KnowledgeDensity.NONE and (
         payload.reasoning_type
@@ -799,7 +671,7 @@ def classify(
             payload.score,
         )
 
-    result = ESSResult(
+    return ESSResult(
         score=_clamp(payload.score),
         reasoning_type=payload.reasoning_type,
         source_reliability=payload.source_reliability,
@@ -817,6 +689,51 @@ def classify(
         input_tokens=attempts.input_tokens,
         output_tokens=attempts.output_tokens,
     )
+
+
+def classify(
+    user_message: str,
+    sponge_snapshot: str,
+    model: str = config.ESS_MODEL,
+    recent_topics: tuple[str, ...] = (),
+) -> ESSResult:
+    """Classify evidence strength of the user's message.
+
+    Uses a separate LLM call with tool_use to extract structured ESS metadata.
+    The agent_response is deliberately excluded to avoid self-judge bias
+    (up to 50pp shift from attribution labels — ESS should evaluate user input only).
+    Assumes classifier outputs may be malformed; coercion/default tracking is
+    preserved in the result for downstream safety gating and auditing.
+
+    recent_topics: top tracked topic labels from sponge — passed so the model
+    can reuse existing labels and avoid generating synonyms that fragment beliefs.
+
+    Timeout: If classification takes longer than ESS_TIMEOUT_SECONDS, returns
+    a safe fallback result to prevent blocking the pipeline.
+    """
+    tracked = ", ".join(recent_topics) if recent_topics else "none yet"
+    prompt = ESS_CLASSIFICATION_PROMPT.format(
+        user_message=user_message,
+        sponge_snapshot=sponge_snapshot,
+        tracked_topics=tracked,
+    )
+    log.info("ESS classifying message (%d chars)", len(user_message))
+
+    # Run classification with timeout protection
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(_classify_inner, prompt, model)
+        try:
+            result = future.result(timeout=ESS_TIMEOUT_SECONDS)
+        except FuturesTimeoutError:
+            log.warning(
+                "ESS_TIMEOUT: classification exceeded %ds, using fallback",
+                ESS_TIMEOUT_SECONDS,
+            )
+            return classifier_exception_fallback(user_message)
+        except Exception:
+            log.exception("ESS classification error, using fallback")
+            return classifier_exception_fallback(user_message)
+
     log.info(
         "ESS: score=%.2f type=%s dir=%s novelty=%.2f update=%s urgency=%s topics=%s",
         result.score,

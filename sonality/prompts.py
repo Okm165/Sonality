@@ -111,13 +111,16 @@ Input:
 Agent's current personality snapshot (for novelty assessment only):
 {sponge_snapshot}
 
-Already-tracked topics (reuse these exact labels when the message is about the same concept — \
-prefer an existing label over a new synonym):
+Already-tracked topics (reuse these labels ONLY when the message is genuinely about the same concept):
 {tracked_topics}
+IMPORTANT: If the message introduces a genuinely new subject not in the tracked list, create new topic labels. \
+Do NOT force-fit unrelated content to existing tracked topics. Only reuse a tracked label when semantically appropriate.
 
 Calibration scale (structural patterns — judge structure, not topic):
 - Casual greeting or pleasantry → score: 0.02, type: no_argument
 - Bare assertion with no support ("I think [X] is great") → score: 0.08, type: no_argument
+- Request for recall or synthesis ("what did we discuss", "summarize", "how has your view evolved") → score: 0.05, type: no_argument
+- Follow-up question requesting clarification or expansion → score: 0.08, type: no_argument
 - Emotional validation or moral endorsement without reasoning → score: 0.03-0.05, type: emotional_appeal
 - Appeal to collective agreement ("everyone knows", "most people agree") → score: 0.10, type: social_pressure
 - Appeal to past consistency or identity ("you were right the first time", "you're abandoning your position", "that's inconsistent with who you are") with no new evidence → score: 0.10-0.15, type: social_pressure

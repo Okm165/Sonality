@@ -26,6 +26,7 @@ def _uid(msg: Message) -> int:
 
 async def _generate_voices(audio: AudioProcessor, chunks: list[str]) -> list[bytes | None]:
     """Generate OGG voice data for all chunks in parallel."""
+
     async def gen(chunk: str, idx: int) -> tuple[int, bytes | None]:
         try:
             mp3 = await audio.tts(chunk)
@@ -46,7 +47,7 @@ async def _send_text_reply(msg: Message, text: str, audio: AudioProcessor) -> No
         return
 
     voices = await _generate_voices(audio, chunks)
-    for i, (chunk, ogg) in enumerate(zip(chunks, voices)):
+    for i, (chunk, ogg) in enumerate(zip(chunks, voices, strict=True)):
         await msg.answer(chunk)
         if ogg:
             try:
@@ -81,7 +82,9 @@ async def _send_voice_reply(msg: Message, text: str, audio: AudioProcessor) -> N
 
 @router.message(CommandStart())
 async def cmd_start(msg: Message) -> None:
-    await msg.answer("<b>Sonality</b> — Send text or voice to chat. /help for commands.", parse_mode="HTML")
+    await msg.answer(
+        "<b>Sonality</b> — Send text or voice to chat. /help for commands.", parse_mode="HTML"
+    )
 
 
 @router.message(Command("help"))
@@ -99,7 +102,9 @@ async def cmd_beliefs(msg: Message, client: SonalityClient) -> None:
         if not beliefs:
             await msg.answer("No beliefs yet.")
             return
-        lines = [f"• <b>{b.topic}</b>: {b.position:+.2f} ({b.confidence:.0%})" for b in beliefs[:15]]
+        lines = [
+            f"• <b>{b.topic}</b>: {b.position:+.2f} ({b.confidence:.0%})" for b in beliefs[:15]
+        ]
         await msg.answer("<b>Beliefs:</b>\n" + "\n".join(lines), parse_mode="HTML")
     except Exception as e:
         log.error("beliefs error uid=%d: %s", _uid(msg), e)
@@ -142,7 +147,9 @@ async def handle_voice(
     if not voice:
         return
     uid = _uid(msg)
-    log.debug("Voice message uid=%d: duration=%ds mime=%s", uid, voice.duration or 0, voice.mime_type)
+    log.debug(
+        "Voice message uid=%d: duration=%ds mime=%s", uid, voice.duration or 0, voice.mime_type
+    )
 
     try:
         dl = await bot.download(voice.file_id)
@@ -190,10 +197,24 @@ async def _main() -> None:
     log.info("=== Sonality Telegram Bot ===")
     log.info("Sonality API: %s", config.SONALITY_URL)
     log.info("Speaches API: %s", config.SPEACHES_URL)
-    log.debug("STT: model=%s lang=%s timeout=%.0fs", config.STT_MODEL, config.STT_LANGUAGE, config.STT_TIMEOUT)
-    log.debug("TTS: model=%s voice=%s format=%s speed=%.1f timeout=%.0fs max_len=%d",
-              config.TTS_MODEL, config.TTS_VOICE, config.TTS_FORMAT, config.TTS_SPEED, config.TTS_TIMEOUT, config.TTS_MAX_LENGTH)
-    log.debug("TTS optimize: enabled=%s model=%s", config.TTS_OPTIMIZE_ENABLED, config.TTS_OPTIMIZE_MODEL)
+    log.debug(
+        "STT: model=%s lang=%s timeout=%.0fs",
+        config.STT_MODEL,
+        config.STT_LANGUAGE,
+        config.STT_TIMEOUT,
+    )
+    log.debug(
+        "TTS: model=%s voice=%s format=%s speed=%.1f timeout=%.0fs max_len=%d",
+        config.TTS_MODEL,
+        config.TTS_VOICE,
+        config.TTS_FORMAT,
+        config.TTS_SPEED,
+        config.TTS_TIMEOUT,
+        config.TTS_MAX_LENGTH,
+    )
+    log.debug(
+        "TTS optimize: enabled=%s model=%s", config.TTS_OPTIMIZE_ENABLED, config.TTS_OPTIMIZE_MODEL
+    )
 
     bot = Bot(token=config.TELEGRAM_TOKEN)
     dp = Dispatcher()

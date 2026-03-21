@@ -743,6 +743,7 @@ class TestS7ExtendedEvolution:
 
     def test_feature_persistence_across_topic_shift(self, agent20: Any) -> None:
         """Climate features must survive the French cooking topic shift (S7 interaction #14)."""
+        _ = agent20  # Fixture ensures agent interactions ran first
         time.sleep(3)
 
         qdrant = QdrantClient(url=config.QDRANT_URL)
@@ -784,6 +785,7 @@ class TestS7ExtendedEvolution:
 
     def test_no_unjustified_feature_deletes(self, agent20: Any) -> None:
         """Feature count must not collapse dramatically after topic shifts."""
+        _ = agent20  # Fixture ensures agent interactions ran first
         time.sleep(2)
 
         qdrant = QdrantClient(url=config.QDRANT_URL)

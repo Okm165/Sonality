@@ -11,7 +11,7 @@ from typing import Final
 from pydantic import BaseModel, ValidationError
 
 from .. import config
-from ..provider import chat_completion, extract_last_json_object
+from ..provider import default_provider, extract_last_json_object
 
 log = logging.getLogger(__name__)
 
@@ -65,7 +65,7 @@ def _raw_call(
     messages.append({"role": "user", "content": prompt})
     if assistant_prefix:
         messages.append({"role": "assistant", "content": assistant_prefix})
-    completion = chat_completion(
+    completion = default_provider.chat_completion(
         model=model,
         messages=tuple(messages),
         max_tokens=max_tokens,

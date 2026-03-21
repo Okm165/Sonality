@@ -48,9 +48,7 @@ def db_containers(pytestconfig: pytest.Config) -> Generator[dict[str, str], None
 
     log.info("Starting testcontainers for isolated database testing...")
     with both_containers() as config:
-        import sonality.config as cfg
-
-        patch_config_for_containers(cfg, config)
+        patch_config_for_containers(config)
         yield {
             "qdrant_url": config.qdrant_url,
             "neo4j_url": config.neo4j_url,

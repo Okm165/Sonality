@@ -87,6 +87,22 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
             item.add_marker(skip)
 
 
+@pytest.fixture
+def suppress_expected_logs():
+    """Temporarily suppress ERROR-level logs during tests that expect failures.
+
+    Use this fixture in tests that intentionally trigger exceptions to prevent
+    alarming tracebacks from appearing in test output.
+    """
+    loggers = [logging.getLogger(name) for name in ("sonality", "benches", "tests")]
+    original_levels = [logger.level for logger in loggers]
+    for logger in loggers:
+        logger.setLevel(logging.CRITICAL)
+    yield
+    for logger, level in zip(loggers, original_levels, strict=True):
+        logger.setLevel(level)
+
+
 def pytest_unconfigure(config: pytest.Config) -> None:
     """Flush and close log handlers at session end."""
     file_handler = getattr(config, "_sonality_log_handler", None)

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import threading
 import time
 from urllib.error import URLError
 
@@ -16,7 +15,6 @@ class TestTimeoutFailsFast:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """URLError wrapping TimeoutError propagates as RuntimeError with no retry sleep."""
-
         from sonality import provider
 
         call_count = 0
@@ -29,18 +27,15 @@ class TestTimeoutFailsFast:
         monkeypatch.setattr(provider, "urlopen", raising_urlopen)
 
         start = time.perf_counter()
-        with pytest.raises(RuntimeError, match="Provider transport error"):
-            provider._post_json("/chat/completions", {"model": "test"})
+        with pytest.raises(RuntimeError, match="Provider timeout"):
+            provider.default_provider._post_json("/chat/completions", {"model": "test"})
         elapsed = time.perf_counter() - start
 
-        # Only 1 attempt because TimeoutError is fail-fast (no retry).
         assert call_count == 1, f"Expected 1 attempt but got {call_count}"
-        # No sleep() between attempts means elapsed should be < 1s.
         assert elapsed < 1.0, f"Elapsed {elapsed:.2f}s suggests retry sleep was called"
 
-    def test_direct_timeout_error_raises_immediately(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Bare TimeoutError (not wrapped in URLError) propagates as RuntimeError."""
-
+    def test_direct_timeout_error_retries(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Bare TimeoutError (not wrapped in URLError) retries before failing."""
         from sonality import provider
 
         call_count = 0
@@ -51,17 +46,17 @@ class TestTimeoutFailsFast:
             raise TimeoutError("socket timed out")
 
         monkeypatch.setattr(provider, "urlopen", raising_urlopen)
+        sleep_calls: list[float] = []
+        monkeypatch.setattr(provider.time, "sleep", lambda s: sleep_calls.append(s))
 
-        start = time.perf_counter()
         with pytest.raises(RuntimeError, match="Provider transport error"):
-            provider._post_json("/chat/completions", {"model": "test"})
-        elapsed = time.perf_counter() - start
+            provider.default_provider._post_json("/chat/completions", {"model": "test"})
 
-        assert call_count == 1
-        assert elapsed < 1.0
+        assert call_count == 3
+        assert len(sleep_calls) == 2
 
     def test_connection_error_retries_with_backoff(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """ConnectionError is retried (unlike TimeoutError) — verifies asymmetric policy."""
+        """ConnectionError is retried — verifies retry policy."""
         from sonality import provider
 
         call_count = 0
@@ -72,21 +67,17 @@ class TestTimeoutFailsFast:
             raise ConnectionError("connection refused")
 
         monkeypatch.setattr(provider, "urlopen", raising_urlopen)
-        # Patch sleep to avoid actual delays while still counting retries
         sleep_calls: list[float] = []
         monkeypatch.setattr(provider.time, "sleep", lambda s: sleep_calls.append(s))
 
         with pytest.raises(RuntimeError, match="Provider transport error"):
-            provider._post_json("/chat/completions", {"model": "test"})
+            provider.default_provider._post_json("/chat/completions", {"model": "test"})
 
-        # 3 attempts total (first + 2 retries)
         assert call_count == 3
-        # Two backoff sleeps applied between retries
         assert len(sleep_calls) == 2
 
     def test_dns_failure_raises_immediately(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """DNS resolution failure raises immediately without retrying (name resolution)."""
-
+        """DNS resolution failure raises immediately without retrying."""
         from sonality import provider
 
         call_count = 0
@@ -94,13 +85,16 @@ class TestTimeoutFailsFast:
         def raising_urlopen(*_args: object, **_kwargs: object) -> object:
             nonlocal call_count
             call_count += 1
-            raise URLError("Name or service not known: errno -3")
+            # Create URLError with reason containing "name resolution"
+            exc = URLError("name resolution failed")
+            exc.reason = "Temporary failure in name resolution"
+            raise exc
 
         monkeypatch.setattr(provider, "urlopen", raising_urlopen)
 
         start = time.perf_counter()
         with pytest.raises(RuntimeError, match="Provider network error"):
-            provider._post_json("/chat/completions", {"model": "test"})
+            provider.default_provider._post_json("/chat/completions", {"model": "test"})
         elapsed = time.perf_counter() - start
 
         assert call_count == 1
@@ -116,13 +110,15 @@ class TestLLMSemaphoreContention:
         assert llm_semaphore_idle() is True
 
     def test_semaphore_busy_when_held(self) -> None:
+        import threading
+
         from sonality import provider
 
         barrier = threading.Barrier(2)
         released = threading.Event()
 
         def hold_semaphore() -> None:
-            with provider._LLM_SEMAPHORE:
+            with provider.default_provider._semaphore:
                 barrier.wait()
                 released.wait(timeout=2.0)
 
@@ -130,9 +126,7 @@ class TestLLMSemaphoreContention:
         t.start()
         barrier.wait()
         try:
-            assert provider.llm_semaphore_idle() is False, (
-                "Semaphore should appear busy while held by another thread"
-            )
+            assert provider.llm_semaphore_idle() is False
         finally:
             released.set()
             t.join(timeout=2.0)
@@ -157,18 +151,13 @@ class TestLLMSemaphoreContention:
 
             return LLMCallResult(value=FeatureExtractionResponse(), success=False, error="skipped")
 
-        # Acquire the semaphore to simulate main thread being busy
         with (
-            provider._LLM_SEMAPHORE,
+            provider.default_provider._semaphore,
             patch("sonality.memory.semantic_features.llm_call", side_effect=fake_llm_call),
         ):
             worker._extract_features("ep-uid-test", "some content", "personality")
 
-        # The semaphore was held → _extract_features should have skipped without calling llm_call
-        assert llm_call_count == 0, (
-            f"Expected 0 LLM calls when semaphore is busy but got {llm_call_count}. "
-            "SemanticIngestionWorker must check llm_semaphore_idle() before calling LLM."
-        )
+        assert llm_call_count == 0
 
     def test_semantic_worker_proceeds_when_semaphore_free(self) -> None:
         """SemanticIngestionWorker._extract_features runs the LLM call when semaphore is idle."""
@@ -190,16 +179,13 @@ class TestLLMSemaphoreContention:
             llm_call_count += 1
             return LLMCallResult(value=FeatureExtractionResponse(), success=False, error="test")
 
-        # Semaphore is free — worker should attempt the LLM call
         with (
             patch("sonality.memory.semantic_features.llm_call", side_effect=fake_llm_call),
             patch.object(worker, "_load_existing_features", return_value=""),
         ):
             worker._extract_features("ep-uid-test", "some content", "personality")
 
-        assert llm_call_count == 1, (
-            f"Expected 1 LLM call when semaphore is free but got {llm_call_count}"
-        )
+        assert llm_call_count == 1
 
 
 class TestNormalizeSchemaNotation:
@@ -218,7 +204,6 @@ class TestNormalizeSchemaNotation:
 
         text = '{"field": "...", "other": 1}'
         result = _normalize_schema_notation(text)
-        # The "..." value should be normalized to ""
         assert '""' in result
 
     def test_angle_bracket_float_replaced(self) -> None:

@@ -22,88 +22,50 @@ _EMPTY_MAPPING: dict[str, object] = {}
 _THINKING_ANSWER_MARKERS = ("Final Output:", "Output:", "Answer:", "Final Answer:", "Response:")
 _THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.IGNORECASE | re.DOTALL)
 _THINK_CODE_BLOCK_RE = re.compile(r"```(?:thinking|thought|reasoning)[\s\S]*?```", re.IGNORECASE)
+# Qwen 3 sometimes outputs asterisk-prefixed reasoning without <think> tags
+# Matches: "*Wait, I need to...", "*thinking*", "*checks instruction*"
+_ASTERISK_THOUGHT_RE = re.compile(r"^\s*\*[^*\n]+\*?\s*$", re.MULTILINE)
+# Leaked context markers from retrieval system
+_SEMANTIC_MARKER_RE = re.compile(r"\[semantic/[^\]]*\][^\n]*\n?", re.IGNORECASE)
 
 
 def _normalize_schema_notation(text: str) -> str:
-    """Coerce common model schema-template patterns into valid JSON.
-
-    Some models (especially quantized variants) output schema notation like
-      "field": "OPTION_A" | "OPTION_B" | "OPTION_C"
-      "field": float
-      "field": string
-      "field": 0.0-1.0
-      {"field": "value", ...}         ← ellipsis placeholder
-      {"field": [...]}                ← array placeholder
-      "value/alternative"             ← slash-separated alternatives
-    instead of filling in actual values.  We normalize these to the first
-    concrete option or a sensible default so downstream parsing succeeds.
-    """
-    # Standalone "..." value and {"..."} key placeholder  →  neutralize first so that
-    # later comma-insertion rules don't accidentally corrupt them.
+    """Coerce common model schema-template patterns into valid JSON."""
     text = re.sub(r':\s*"\.\.\."', ': ""', text)
     text = re.sub(r'\{\s*"\.\.\."(?:\s*,)?\s*', "{", text)
-    # Bare ellipsis between delimiters  →  remove (handles {}, {key:val,...}, [...])
-    text = re.sub(r",\s*\.\.\.\s*(?=[}\]])", "", text)  # trailing ", ..."
-    text = re.sub(r"(?<=[{,\[])\s*\.\.\.\s*(?=[,}\]])", "", text)  # inner "..."
-    # ", ... "field":" between object fields  →  ", "field":"  (keeps structure valid)
+    text = re.sub(r",\s*\.\.\.\s*(?=[}\]])", "", text)
+    text = re.sub(r"(?<=[{,\[])\s*\.\.\.\s*(?=[,}\]])", "", text)
     text = re.sub(r',\s*\.\.\.\s*(?=")', ", ", text)
-    # "value"... "key": pattern — model omits comma before ellipsis  →  "value", "key":
-    # Only matches after a string-closing " that is NOT an opening quote of a placeholder.
     text = re.sub(r'"\s*\.\.\.\s*(?=")', '", ', text)
-    # " ..."  before closing brace (no comma, after string value)
     text = re.sub(r"\s+\.\.\.\s*(?=[}\]])", "", text)
-    # Array placeholder  [...]  →  []
     text = re.sub(r"\[\s*\.\.\.\s*\]", "[]", text)
-    # Angle-bracket placeholders  <float>  <string>  <int>  →  sensible defaults
     text = re.sub(r":\s*<float>", ": 0.5", text)
     text = re.sub(r":\s*<string>", ': ""', text)
     text = re.sub(r":\s*<int>", ": 0", text)
-    # "X" | "Y" | "Z"  →  "X"  (keep first enum option)
     text = re.sub(r'"([^"]+)"\s*(?:\|\s*"[^"]*"\s*)+', r'"\1"', text)
-    # Unquoted pipe-separated options: RETAIN | DECAY | FORGET → "RETAIN"
-    # (matches after colon, before comma/brace)
     text = re.sub(r":\s*([A-Z_]+)\s*(?:\|\s*[A-Z_]+\s*)+(?=[,}\s])", r': "\1"', text)
-    # "X" or "Y" or "Z"  →  "X"  (same pattern with English "or")
     text = re.sub(r'"([^"]+)"\s*(?:or\s+"[^"]*"\s*)+', r'"\1"', text)
-    # "option1/option2/..."  →  "option1"  (slash-separated alternatives in strings)
     text = re.sub(r'"([^"/]+)(?:/[^"/]+)+"', r'"\1"', text)
-    # bare type names as values  →  sensible defaults
     text = re.sub(r":\s*\bfloat\b", ": 0.5", text)
     text = re.sub(r":\s*\bint\b", ": 0", text)
     text = re.sub(r":\s*\bbool\b", ": false", text)
     text = re.sub(r":\s*\bstring\b", ': ""', text)
     text = re.sub(r":\s*\bnull\b\s*(?=[,}])", ": null", text)
-    # range notation  "0.0-1.0"  or  "-1.0 to +1.0"  →  "0.5"
     text = re.sub(r'"[-+]?\d+\.?\d*\s*(?:to|-)\s*[-+]?\d+\.?\d*"', '"0.5"', text)
-    # bare range as value  :  0.0-1.0  →  : 0.5
     text = re.sub(r":\s*[-+]?\d+\.?\d*\s*(?:to|-)\s*[-+]?\d+\.?\d*(?=[,}\s])", ": 0.5", text)
-    # trailing ellipsis after a digit  0.3...  →  0.3  (template placeholder in numbers)
     text = re.sub(r"(\d)\.\.\.", r"\1", text)
-    # bare ellipsis as a numeric value  :  ...  →  : 0.0
     text = re.sub(r":\s*\.\.\.\s*(?=[,}])", ": 0.0", text)
     return text
 
 
 def extract_last_json_object(text: str) -> dict[str, object] | None:
-    """Find the last valid JSON object in text, scanning left-to-right with raw_decode.
-
-    Uses json.JSONDecoder.raw_decode to parse JSON starting at each '{' position and
-    return where it ends. Scanning all '{' positions and keeping the last successful
-    parse means a model self-correction ("actually: {...}") produces the corrected value.
-    Handles markdown fences, trailing prose, nested braces, and multiple JSON blocks.
-    Also normalizes common schema-template patterns output by quantized thinking models.
-    Returns None if no valid JSON object is found.
-    """
+    """Find the last valid JSON object in text."""
     stripped = text.strip()
-    # Strip markdown code fences
     cleaned = stripped.replace("```json", "").replace("```", "").strip()
-    # +0.42 and +1 are not valid JSON; strip leading + from numeric literals
     cleaned = re.sub(r":\s*\+(\d)", r": \1", cleaned)
-
     decoder = json.JSONDecoder()
 
     def _try_parse(source: str) -> dict[str, object] | None:
-        # Track (start, end, obj) for all complete JSON objects found.
         candidates: list[tuple[int, int, dict[str, object]]] = []
         i = 0
         while i < len(source):
@@ -117,23 +79,14 @@ def extract_last_json_object(text: str) -> dict[str, object] | None:
                 i = end
             except json.JSONDecodeError:
                 i += 1
-        if not candidates:
-            return None
-        # Prefer the object spanning the most characters — it's most complete.
-        # When multiple full objects of equal span exist (self-correction), the
-        # last one wins (model corrected itself). When a truncated outer object
-        # can't be parsed but inner items can, the largest inner item is returned.
-        return max(candidates, key=lambda c: c[1] - c[0])[2]
+        return max(candidates, key=lambda c: c[1] - c[0])[2] if candidates else None
 
     result = _try_parse(cleaned)
     if result is not None:
         return result
     normalized = _normalize_schema_notation(cleaned)
-    if normalized != cleaned:
-        result = _try_parse(normalized)
-        if result is not None:
-            return result
-    # Third pass: bare integer array → {"ranking": [...]} for listwise reranker
+    if normalized != cleaned and (result := _try_parse(normalized)) is not None:
+        return result
     try:
         arr = json.loads(cleaned)
         if isinstance(arr, list) and arr and all(isinstance(x, int) for x in arr):
@@ -144,62 +97,54 @@ def extract_last_json_object(text: str) -> dict[str, object] | None:
 
 
 def _extract_answer_from_reasoning(reasoning: str) -> str:
-    """Extract answer from thinking model reasoning_content field.
-
-    Thinking models like Qwen 3.5 A3B output their chain-of-thought in reasoning_content
-    and may leave content empty when max_tokens is insufficient. This function attempts
-    to extract the final answer portion from the reasoning.
-
-    Priority order:
-    1. Text after a known answer marker (captures both single-line and multi-line answers)
-    2. Last JSON object or array block in the reasoning
-    3. Last non-empty line (plain-text fallback)
-    """
-    cleaned_reasoning = _strip_thinking_trace(reasoning)
-
-    # 1. Marker-based extraction — take everything after the last marker
+    """Extract answer from thinking model reasoning_content field."""
+    cleaned = strip_thinking_trace(reasoning)
     for marker in _THINKING_ANSWER_MARKERS:
-        idx = cleaned_reasoning.lower().rfind(marker.lower())
-        if idx != -1:
-            answer = cleaned_reasoning[idx + len(marker) :].strip()
-            if answer:
-                return answer
-    # 2. Last balanced JSON object/array in the reasoning
+        idx = cleaned.lower().rfind(marker.lower())
+        if idx != -1 and (answer := cleaned[idx + len(marker) :].strip()):
+            return answer
     for opener, closer in (("{", "}"), ("[", "]")):
-        end = cleaned_reasoning.rfind(closer)
+        end = cleaned.rfind(closer)
         if end != -1:
             depth = 0
             for i in range(end, -1, -1):
-                if cleaned_reasoning[i] == closer:
+                if cleaned[i] == closer:
                     depth += 1
-                elif cleaned_reasoning[i] == opener:
+                elif cleaned[i] == opener:
                     depth -= 1
-                    if depth == 0:
-                        candidate = cleaned_reasoning[i : end + 1].strip()
-                        if len(candidate) > 2:
-                            return candidate
-    # 3. Last non-empty line
-    for line in reversed(cleaned_reasoning.strip().splitlines()):
+                    if depth == 0 and len(candidate := cleaned[i : end + 1].strip()) > 2:
+                        return candidate
+    for line in reversed(cleaned.strip().splitlines()):
         if line.strip():
             return line.strip()
     return ""
 
 
-def _strip_thinking_trace(text: str) -> str:
+def strip_thinking_trace(text: str) -> str:
     """Remove chain-of-thought traces from model-visible output."""
-    stripped = _THINK_BLOCK_RE.sub("", text)
-    stripped = _THINK_CODE_BLOCK_RE.sub("", stripped)
-    return stripped.strip()
+    result = _THINK_BLOCK_RE.sub("", text)
+    result = _THINK_CODE_BLOCK_RE.sub("", result)
+    result = _ASTERISK_THOUGHT_RE.sub("", result)
+    result = _SEMANTIC_MARKER_RE.sub("", result)
+    return result.strip()
 
 
-@dataclass(frozen=True, slots=True)
-class ChatResult:
-    """Normalized chat completion payload used by all model call sites."""
-
-    text: str
-    input_tokens: int
-    output_tokens: int
-    raw: dict[str, object]
+def _message_content_text(message: object) -> str:
+    if isinstance(message, str):
+        return message
+    if not isinstance(message, list):
+        return ""
+    parts: list[str] = []
+    for item in message:
+        if isinstance(item, str):
+            parts.append(item)
+        elif (
+            isinstance(item, dict)
+            and item.get("type") == "text"
+            and isinstance(item.get("text"), str)
+        ):
+            parts.append(item["text"])
+    return "".join(parts)
 
 
 def _to_nonnegative_int(value: object) -> int:
@@ -212,276 +157,261 @@ def _to_nonnegative_int(value: object) -> int:
     return 0
 
 
-def _post_json(
-    path: str, payload: Mapping[str, object], base_url: str = "", api_key: str = ""
-) -> dict[str, object]:
-    body = json.dumps(payload).encode("utf-8")
-    base = (base_url or config.BASE_URL).rstrip("/")
-    normalized = path if path.startswith("/") else f"/{path}"
-    url = f"{base}{normalized}"
-    headers: dict[str, str] = {"Content-Type": "application/json"}
-    key = api_key or config.API_KEY
-    if key:
-        headers["Authorization"] = f"Bearer {key}"
+@dataclass(frozen=True, slots=True)
+class ChatResult:
+    """Normalized chat completion payload."""
 
-    max_attempts = 3
-    for attempt in range(1, max_attempts + 1):
-        request = Request(
-            url,
-            data=body,
-            headers=headers,
-            method="POST",
-        )
-        try:
-            with urlopen(request, timeout=_LLM_REQUEST_TIMEOUT) as response:
-                decoded = response.read().decode("utf-8")
-            parsed = json.loads(decoded)
-            if isinstance(parsed, dict):
-                return parsed
-            raise RuntimeError("Provider returned a non-object JSON payload")
-        except HTTPError as exc:
-            status = int(exc.code)
-            if attempt < max_attempts and status in _RETRYABLE_HTTP_STATUSES:
-                wait = 1.5**attempt
-                log.warning(
-                    "Provider HTTP %d on attempt %d/%d; retrying in %.1fs",
-                    status,
-                    attempt,
-                    max_attempts,
-                    wait,
-                )
-                time.sleep(wait)
-                continue
-            detail = ""
+    text: str
+    input_tokens: int
+    output_tokens: int
+    raw: dict[str, object]
+
+
+class LLMProvider:
+    """LLM provider with per-instance config and semaphore.
+
+    Each instance has its own:
+    - base_url, api_key, timeout configuration
+    - threading.Semaphore for serializing calls (single-GPU servers)
+
+    Usage:
+        provider = LLMProvider("https://api.openai.com/v1", "sk-...")
+        result = provider.chat_completion(model="gpt-4", messages=[...], max_tokens=1000)
+    """
+
+    def __init__(self, base_url: str, api_key: str = "", timeout: int = 300) -> None:
+        self.base_url = base_url.rstrip("/")
+        self.api_key = api_key
+        self.timeout = timeout
+        self._semaphore = threading.Semaphore(1)
+
+    def _post_json(self, path: str, payload: Mapping[str, object]) -> dict[str, object]:
+        """POST JSON to the provider with retries."""
+        body = json.dumps(payload).encode("utf-8")
+        normalized = path if path.startswith("/") else f"/{path}"
+        url = f"{self.base_url}{normalized}"
+        headers: dict[str, str] = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+
+        for attempt in range(1, 4):
+            request = Request(url, data=body, headers=headers, method="POST")
             try:
-                detail = exc.read().decode("utf-8")
-            except Exception:
-                detail = "<failed to read error payload>"
-            raise RuntimeError(f"Provider HTTP {status}: {detail}") from exc
-        except URLError as exc:
-            reason = exc.reason if hasattr(exc, "reason") else None
-            # Timeouts mean the server is busy generating — retrying immediately
-            # won't help and wastes N x timeout seconds. Fail fast so the caller
-            # can decide whether to retry.
-            if isinstance(reason, TimeoutError):
-                raise RuntimeError(f"Provider transport error: {reason}") from exc
-            reason_str = str(reason) if reason else str(exc)
-            # DNS failures won't resolve in seconds — fail immediately.
-            if "name resolution" in reason_str.lower() or "errno -3" in reason_str.lower():
+                with urlopen(request, timeout=self.timeout) as response:
+                    parsed = json.loads(response.read().decode("utf-8"))
+                if isinstance(parsed, dict):
+                    return parsed
+                raise RuntimeError("Provider returned a non-object JSON payload")
+            except HTTPError as exc:
+                if attempt < 3 and int(exc.code) in _RETRYABLE_HTTP_STATUSES:
+                    time.sleep(1.5**attempt)
+                    continue
+                detail = exc.read().decode("utf-8") if exc.fp else ""
+                raise RuntimeError(f"Provider HTTP {exc.code}: {detail}") from exc
+            except URLError as exc:
+                reason = getattr(exc, "reason", None)
+                if isinstance(reason, TimeoutError):
+                    raise RuntimeError(f"Provider timeout: {reason}") from exc
+                reason_str = str(reason) if reason else str(exc)
+                if "name resolution" in reason_str.lower():
+                    raise RuntimeError(f"Provider network error: {exc}") from exc
+                if attempt < 3:
+                    time.sleep(1.5**attempt)
+                    continue
                 raise RuntimeError(f"Provider network error: {exc}") from exc
-            if attempt < max_attempts:
-                wait = 1.5**attempt
-                log.warning(
-                    "Provider network error on attempt %d/%d; retrying in %.1fs",
-                    attempt,
-                    max_attempts,
-                    wait,
+            except (TimeoutError, ConnectionError, OSError) as exc:
+                if attempt < 3:
+                    time.sleep(1.5**attempt)
+                    continue
+                raise RuntimeError(f"Provider transport error: {exc}") from exc
+        raise RuntimeError("Provider request failed after retries")
+
+    def chat_completion(
+        self,
+        *,
+        model: str,
+        messages: Sequence[Mapping[str, str]],
+        max_tokens: int,
+        temperature: float = -1.0,
+        tools: Sequence[Mapping[str, object]] = (),
+        tool_choice: Mapping[str, object] = _EMPTY_MAPPING,
+        enable_thinking: bool = False,
+    ) -> ChatResult:
+        """Synchronous chat completion with semaphore protection."""
+        payload: dict[str, object] = {
+            "model": model,
+            "messages": [dict(m) for m in messages],
+            "max_tokens": max_tokens,
+            "chat_template_kwargs": {"enable_thinking": enable_thinking},
+        }
+        if temperature >= 0.0:
+            payload["temperature"] = temperature
+        if tools:
+            payload["tools"] = [dict(t) for t in tools]
+        if tool_choice:
+            payload["tool_choice"] = dict(tool_choice)
+
+        with self._semaphore:
+            raw = self._post_json("/chat/completions", payload)
+
+        text = ""
+        choices = raw.get("choices")
+        if isinstance(choices, list) and choices:
+            first = choices[0]
+            if isinstance(first, dict) and isinstance(message := first.get("message"), dict):
+                raw_content = _message_content_text(message.get("content", ""))
+                raw_reasoning = message.get("reasoning_content", "")
+                log.debug(
+                    "LLM_RAW content=%d chars, reasoning=%d chars, finish=%s",
+                    len(raw_content),
+                    len(raw_reasoning) if raw_reasoning else 0,
+                    first.get("finish_reason", "unknown"),
                 )
-                time.sleep(wait)
-                continue
-            raise RuntimeError(f"Provider network error: {exc}") from exc
-        except TimeoutError as exc:
-            # Direct TimeoutError (e.g. from socket layer escaping URLError wrapping).
-            # Same reasoning: fail fast, no retry.
-            raise RuntimeError(f"Provider transport error: {exc}") from exc
-        except (ConnectionError, OSError) as exc:
-            if attempt < max_attempts:
-                wait = 1.5**attempt
-                log.warning(
-                    "Provider transport error on attempt %d/%d; retrying in %.1fs",
-                    attempt,
-                    max_attempts,
-                    wait,
+                text = strip_thinking_trace(raw_content)
+                if (
+                    not text
+                    and isinstance(raw_reasoning, str)
+                    and raw_reasoning
+                ):
+                    log.debug("LLM_RAW extracting from reasoning_content (content was empty)")
+                    text = _extract_answer_from_reasoning(raw_reasoning)
+
+        usage = raw.get("usage")
+        input_tokens = output_tokens = 0
+        if isinstance(usage, dict):
+            input_tokens = _to_nonnegative_int(
+                usage.get("prompt_tokens", usage.get("input_tokens", 0))
+            )
+            output_tokens = _to_nonnegative_int(
+                usage.get("completion_tokens", usage.get("output_tokens", 0))
+            )
+
+        return ChatResult(
+            text=text, input_tokens=input_tokens, output_tokens=output_tokens, raw=raw
+        )
+
+    def chat_completion_stream(
+        self,
+        *,
+        model: str,
+        messages: Sequence[Mapping[str, str]],
+        max_tokens: int,
+        temperature: float = -1.0,
+        enable_thinking: bool = False,
+    ) -> Iterator[tuple[str, str]]:
+        """Stream chat completion, yielding (content_delta, reasoning_delta) tuples."""
+        payload: dict[str, object] = {
+            "model": model,
+            "messages": [dict(m) for m in messages],
+            "max_tokens": max_tokens,
+            "stream": True,
+            "chat_template_kwargs": {"enable_thinking": enable_thinking},
+        }
+        if temperature >= 0.0:
+            payload["temperature"] = temperature
+
+        parsed = urlparse(self.base_url)
+        host = parsed.hostname or "localhost"
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+
+        with self._semaphore:
+            conn = (
+                http.client.HTTPSConnection(
+                    host, port, timeout=self.timeout, context=ssl.create_default_context()
                 )
-                time.sleep(wait)
-                continue
-            raise RuntimeError(f"Provider transport error: {exc}") from exc
-    raise RuntimeError("Provider request failed after retries")
-
-
-def _message_content_text(message: object) -> str:
-    if isinstance(message, str):
-        return message
-    if not isinstance(message, list):
-        return ""
-    parts: list[str] = []
-    for item in message:
-        if isinstance(item, str):
-            parts.append(item)
-            continue
-        if not isinstance(item, dict):
-            continue
-        if item.get("type") == "text":
-            text = item.get("text")
-            if isinstance(text, str):
-                parts.append(text)
-    return "".join(parts)
-
-
-def chat_completion(
-    *,
-    model: str,
-    messages: Sequence[Mapping[str, str]],
-    max_tokens: int,
-    temperature: float = -1.0,
-    tools: Sequence[Mapping[str, object]] = (),
-    tool_choice: Mapping[str, object] = _EMPTY_MAPPING,
-    enable_thinking: bool = True,
-    base_url: str = "",
-    api_key: str = "",
-) -> ChatResult:
-    payload: dict[str, object] = {
-        "model": model,
-        "messages": [dict(message) for message in messages],
-        "max_tokens": max_tokens,
-    }
-    payload["chat_template_kwargs"] = {"enable_thinking": enable_thinking}
-    if temperature >= 0.0:
-        payload["temperature"] = temperature
-    if tools:
-        payload["tools"] = [dict(tool) for tool in tools]
-    if tool_choice:
-        payload["tool_choice"] = dict(tool_choice)
-
-    with _LLM_SEMAPHORE:
-        raw = _post_json("/chat/completions", payload, base_url, api_key)
-    text = ""
-    choices = raw.get("choices")
-    if isinstance(choices, list) and choices:
-        first = choices[0]
-        if isinstance(first, dict):
-            message = first.get("message")
-            if isinstance(message, dict):
-                text = _strip_thinking_trace(_message_content_text(message.get("content", "")))
-                if not text:
-                    reasoning = message.get("reasoning_content")
-                    if isinstance(reasoning, str) and reasoning:
-                        text = _extract_answer_from_reasoning(reasoning)
-    usage = raw.get("usage")
-    input_tokens = 0
-    output_tokens = 0
-    if isinstance(usage, dict):
-        input_tokens = _to_nonnegative_int(usage.get("prompt_tokens", usage.get("input_tokens", 0)))
-        output_tokens = _to_nonnegative_int(
-            usage.get("completion_tokens", usage.get("output_tokens", 0))
-        )
-    return ChatResult(
-        text=text,
-        input_tokens=input_tokens,
-        output_tokens=output_tokens,
-        raw=raw,
-    )
-
-
-def chat_completion_stream(
-    *,
-    model: str,
-    messages: Sequence[Mapping[str, str]],
-    max_tokens: int,
-    temperature: float = -1.0,
-    enable_thinking: bool = True,
-) -> Iterator[tuple[str, str]]:
-    """Stream chat completion, yielding (content_delta, reasoning_delta) tuples."""
-    payload: dict[str, object] = {
-        "model": model,
-        "messages": [dict(m) for m in messages],
-        "max_tokens": max_tokens,
-        "stream": True,
-        "chat_template_kwargs": {"enable_thinking": enable_thinking},
-    }
-    if temperature >= 0.0:
-        payload["temperature"] = temperature
-
-    parsed = urlparse(config.BASE_URL.rstrip("/"))
-    host, port = (
-        parsed.hostname or "localhost",
-        parsed.port or (443 if parsed.scheme == "https" else 80),
-    )
-    headers = {"Content-Type": "application/json"} | (
-        {"Authorization": f"Bearer {config.API_KEY}"} if config.API_KEY else {}
-    )
-
-    with _LLM_SEMAPHORE:
-        conn = (
-            http.client.HTTPSConnection(
-                host, port, timeout=_LLM_REQUEST_TIMEOUT, context=ssl.create_default_context()
+                if parsed.scheme == "https"
+                else http.client.HTTPConnection(host, port, timeout=self.timeout)
             )
-            if parsed.scheme == "https"
-            else http.client.HTTPConnection(host, port, timeout=_LLM_REQUEST_TIMEOUT)
-        )
-        try:
-            conn.request(
-                "POST",
-                (parsed.path or "") + "/chat/completions",
-                json.dumps(payload).encode(),
-                headers,
-            )
-            resp = conn.getresponse()
-            if resp.status != 200:
-                raise RuntimeError(f"Provider HTTP {resp.status}: {resp.read().decode()}")
+            try:
+                conn.request(
+                    "POST",
+                    (parsed.path or "") + "/chat/completions",
+                    json.dumps(payload).encode(),
+                    headers,
+                )
+                resp = conn.getresponse()
+                if resp.status != 200:
+                    raise RuntimeError(f"Provider HTTP {resp.status}: {resp.read().decode()}")
 
-            buf = ""
-            while data := resp.read(4096).decode("utf-8", errors="replace"):
-                buf += data
-                while "\n" in buf:
-                    line, buf = buf.split("\n", 1)
-                    if not (line := line.strip()) or not line.startswith("data:"):
-                        continue
-                    if (payload_str := line[5:].strip()) == "[DONE]":
-                        return
-                    try:
-                        parsed_data = json.loads(payload_str)
-                    except json.JSONDecodeError:
-                        continue
-                    if (
-                        (choices := parsed_data.get("choices"))
-                        and isinstance(choices, list)
-                        and choices
-                    ):
-                        delta = choices[0].get("delta", {})
-                        content, reasoning = (
-                            delta.get("content") or "",
-                            delta.get("reasoning_content") or "",
-                        )
-                        if content or reasoning:
-                            yield content, reasoning
-        finally:
-            conn.close()
+                buf = ""
+                while data := resp.read(4096).decode("utf-8", errors="replace"):
+                    buf += data
+                    while "\n" in buf:
+                        line, buf = buf.split("\n", 1)
+                        if not (line := line.strip()) or not line.startswith("data:"):
+                            continue
+                        if (payload_str := line[5:].strip()) == "[DONE]":
+                            return
+                        try:
+                            parsed_data = json.loads(payload_str)
+                        except json.JSONDecodeError:
+                            continue
+                        choices = parsed_data.get("choices")
+                        if isinstance(choices, list) and choices:
+                            delta = choices[0].get("delta", {})
+                            content, reasoning = (
+                                delta.get("content") or "",
+                                delta.get("reasoning_content") or "",
+                            )
+                            if content or reasoning:
+                                yield content, reasoning
+            finally:
+                conn.close()
+
+    def semaphore_idle(self) -> bool:
+        """Return True if the semaphore is free (advisory, subject to TOCTOU)."""
+        acquired = self._semaphore.acquire(blocking=False)
+        if acquired:
+            self._semaphore.release()
+            return True
+        return False
 
 
-def embed(
-    *,
-    model: str,
-    texts: list[str],
-    dimensions: int = 0,
-) -> list[list[float]]:
+# --- Default provider instance for sonality modules ---
+default_provider: LLMProvider = LLMProvider(
+    config.BASE_URL, config.API_KEY, config.LLM_REQUEST_TIMEOUT
+)
+
+# Embedding provider (different endpoint, no semaphore needed — fast)
+embedding_provider: LLMProvider = LLMProvider(
+    config.EMBEDDING_BASE_URL or config.BASE_URL,
+    config.EMBEDDING_API_KEY or config.API_KEY,
+    config.LLM_REQUEST_TIMEOUT,
+)
+
+# Sonality-specific: interaction_active event for background worker coordination
+interaction_active: threading.Event = threading.Event()
+
+
+def llm_semaphore_idle() -> bool:
+    """Return True if the default LLM semaphore is free AND no interaction is active."""
+    return not interaction_active.is_set() and default_provider.semaphore_idle()
+
+
+def embed(*, model: str, texts: list[str], dimensions: int = 0) -> list[list[float]]:
+    """Embed texts using embedding endpoint."""
     payload: dict[str, object] = {"model": model, "input": texts}
     if dimensions > 0 and config.EMBEDDING_SEND_DIMENSIONS:
         payload["dimensions"] = dimensions
-    api_key = config.EMBEDDING_API_KEY or config.API_KEY
-    raw = _post_json("/embeddings", payload, config.EMBEDDING_BASE_URL, api_key)
+    raw = embedding_provider._post_json("/embeddings", payload)
     data = raw.get("data")
     if not isinstance(data, list):
         raise RuntimeError("Embedding response is missing `data` array")
     sorted_rows = sorted(
-        (row for row in data if isinstance(row, dict)),
-        key=lambda row: int(row.get("index", 0)),
+        (row for row in data if isinstance(row, dict)), key=lambda row: int(row.get("index", 0))
     )
-    vectors: list[list[float]] = []
-    for row in sorted_rows:
-        embedding = row.get("embedding")
-        if not isinstance(embedding, list):
-            continue
-        vectors.append([float(v) for v in embedding])
-    return vectors
+    return [
+        [float(v) for v in row["embedding"]]
+        for row in sorted_rows
+        if isinstance(row.get("embedding"), list)
+    ]
 
 
 def parse_json_object(text: str) -> dict[str, object]:
-    """Extract a JSON object from LLM response text.
-
-    Tries direct parse first (fast path), then falls through to extract_last_json_object
-    which handles markdown fences, multiple JSON blocks, trailing prose, and nested braces.
-    """
+    """Extract a JSON object from LLM response text."""
     stripped = text.strip()
     if not stripped:
         return {}
@@ -500,13 +430,14 @@ def parse_json_object(text: str) -> dict[str, object]:
 def extract_tool_call_arguments(
     raw_payload: Mapping[str, object], function_name: str
 ) -> dict[str, object]:
+    """Extract tool call arguments from raw completion payload."""
     choices = raw_payload.get("choices")
     if not isinstance(choices, list) or not choices:
         return {}
-    first_choice = choices[0]
-    if not isinstance(first_choice, dict):
+    first = choices[0]
+    if not isinstance(first, dict):
         return {}
-    message = first_choice.get("message")
+    message = first.get("message")
     if not isinstance(message, dict):
         return {}
     tool_calls = message.get("tool_calls")
@@ -516,9 +447,7 @@ def extract_tool_call_arguments(
         if not isinstance(call, dict):
             continue
         function = call.get("function")
-        if not isinstance(function, dict):
-            continue
-        if function.get("name") != function_name:
+        if not isinstance(function, dict) or function.get("name") != function_name:
             continue
         arguments = function.get("arguments")
         if isinstance(arguments, dict):
@@ -526,8 +455,8 @@ def extract_tool_call_arguments(
         if isinstance(arguments, str):
             try:
                 parsed = json.loads(arguments)
+                if isinstance(parsed, dict):
+                    return dict(parsed)
             except json.JSONDecodeError:
                 continue
-            if isinstance(parsed, dict):
-                return dict(parsed)
     return {}

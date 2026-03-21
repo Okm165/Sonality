@@ -189,10 +189,21 @@ class SpongeState(BaseModel):
 
         Assumes `direction` is sign-like (negative/opposing, positive/supporting)
         and `magnitude` is non-negative.
+
+        Uses asymptotic bounds: updates have diminishing effect near extremes,
+        preventing beliefs from getting stuck at ±1.0. The soft cap at ±0.95
+        ensures beliefs can always be moved by counter-evidence.
         """
         topic = topic.strip().lower()
         old = self.opinion_vectors.get(topic, 0.0)
-        new = max(-1.0, min(1.0, old + direction * magnitude))
+        # Asymptotic scaling: harder to push beliefs toward extremes
+        # At position=0, scale=1.0 (full effect); at ±0.8, scale≈0.6; at ±0.95, scale≈0.3
+        distance_from_center = abs(old)
+        scale = max(0.2, 1.0 - distance_from_center * 0.8)
+        effective_delta = direction * magnitude * scale
+        new = old + effective_delta
+        # Soft cap at ±0.95 to ensure beliefs remain responsive to counter-evidence
+        new = max(-0.95, min(0.95, new))
         self.opinion_vectors[topic] = new
 
         meta = self.belief_meta.get(topic)
@@ -429,6 +440,40 @@ class SpongeState(BaseModel):
             self.opinion_vectors.pop(topic, None)
             self.belief_meta.pop(topic, None)
             log.info("BELIEF_PRUNED capacity=%d evicted=%r (low value)", config.MAX_BELIEFS, topic)
+
+    def apply_natural_decay(self) -> list[str]:
+        """Apply gentle mean-reversion for stale beliefs not recently reinforced.
+
+        Returns list of topics that were decayed. This provides a principled
+        mechanism for beliefs to naturally soften when not actively maintained,
+        preventing "belief ossification" without requiring explicit LLM decay calls.
+        """
+        decayed: list[str] = []
+        for topic, meta in list(self.belief_meta.items()):
+            gap = self.interaction_count - meta.last_reinforced
+            if gap < 8:
+                continue
+            old_pos = self.opinion_vectors.get(topic, 0.0)
+            if abs(old_pos) < 0.1:
+                continue  # Already near neutral
+            # Gentle regression: 1% per interaction gap beyond threshold
+            decay_rate = 0.01 * (gap - 7)
+            decay_rate = min(decay_rate, 0.05)  # Cap at 5% per cycle
+            regression = decay_rate * (-1 if old_pos > 0 else 1)
+            new_pos = old_pos + regression
+            # Don't cross zero
+            if (old_pos > 0 and new_pos < 0) or (old_pos < 0 and new_pos > 0):
+                new_pos = 0.0
+            self.opinion_vectors[topic] = new_pos
+            # Also reduce confidence slightly
+            meta.confidence = max(0.1, meta.confidence * 0.98)
+            meta.uncertainty = 1.0 - meta.confidence
+            decayed.append(topic)
+            log.debug(
+                "NATURAL_DECAY: %s pos=%.3f→%.3f conf=%.2f gap=%d",
+                topic, old_pos, new_pos, meta.confidence, gap,
+            )
+        return decayed
 
     def record_shift(self, description: str, magnitude: float) -> None:
         """Append a bounded history entry describing a personality change."""
