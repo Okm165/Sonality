@@ -98,7 +98,7 @@ class ChainOfQueryAgent:
                 prompt=SUFFICIENCY_PROMPT.format(query=query, context=context),
                 response_model=SufficiencyResponse,
                 fallback=SufficiencyResponse(),
-                max_tokens=256,  # SUFFICIENT/INSUFFICIENT + confidence + short reasoning
+                max_tokens=config.LLM_TOKENS_ROUTING,
                 assistant_prefix='{"sufficiency_decision": "',
             )
             sufficiency = _suf.value

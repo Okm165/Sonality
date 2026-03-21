@@ -65,8 +65,8 @@ def rerank_episodes(
         prompt=prompt,
         response_model=RerankResponse,
         fallback=RerankResponse(ranking=list(range(1, len(to_rank) + 1))),
-        max_tokens=256,  # list of ints + short reasoning
-        assistant_prefix='{"ranking": [',  # prefill to force JSON output
+        max_tokens=config.LLM_TOKENS_RERANK,
+        assistant_prefix='{"ranking": [',
     )
 
     if result.success:

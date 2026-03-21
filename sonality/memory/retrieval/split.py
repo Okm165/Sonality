@@ -13,6 +13,7 @@ from enum import StrEnum
 
 from pydantic import BaseModel, model_validator
 
+from ... import config
 from ...llm.caller import llm_call
 from ...llm.prompts import DECOMPOSITION_PROMPT
 from ..dual_store import DualEpisodeStore
@@ -102,7 +103,7 @@ class SplitQueryAgent:
             prompt=prompt,
             response_model=DecompositionResponse,
             fallback=DecompositionResponse(sub_queries=[query]),
-            max_tokens=256,  # 2-4 sub-queries + aggregation strategy
+            max_tokens=config.LLM_TOKENS_ROUTING,
             assistant_prefix='{"sub_queries": [',
         )
         if not result.success:

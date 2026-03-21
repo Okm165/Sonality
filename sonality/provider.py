@@ -1,48 +1,21 @@
 from __future__ import annotations
 
+import http.client
 import json
 import logging
 import re
+import ssl
 import threading
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 from . import config
 
 log = logging.getLogger(__name__)
-
-# Serialize all LLM HTTP calls. llama.cpp / single-GPU servers process one request
-# at a time; concurrent calls pile up in the queue and trigger cascading timeouts.
-# Embedding calls are excluded (different endpoint, much faster).
-_LLM_SEMAPHORE: threading.Semaphore = threading.Semaphore(1)
-
-_LLM_REQUEST_TIMEOUT: int = config.LLM_REQUEST_TIMEOUT  # seconds per attempt
-
-# Set while the main interaction thread is inside respond() — routing, chat, and
-# post-processing all hold this.  Background workers check it before starting any
-# LLM call so they never preempt critical-path operations even when the semaphore
-# is momentarily free (e.g. between routing and reranking).
-interaction_active: threading.Event = threading.Event()
-
-
-def llm_semaphore_idle() -> bool:
-    """Return True if the LLM semaphore is free AND no interaction is active.
-
-    Background workers (e.g. STM consolidator, semantic ingestion) use this to
-    avoid preempting the main interaction thread. Subject to TOCTOU races;
-    treat as advisory.
-    """
-    if interaction_active.is_set():
-        return False
-    acquired = _LLM_SEMAPHORE.acquire(blocking=False)
-    if acquired:
-        _LLM_SEMAPHORE.release()
-        return True
-    return False
-
 
 _RETRYABLE_HTTP_STATUSES = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
 _EMPTY_MAPPING: dict[str, object] = {}
@@ -354,6 +327,8 @@ def chat_completion(
     tools: Sequence[Mapping[str, object]] = (),
     tool_choice: Mapping[str, object] = _EMPTY_MAPPING,
     enable_thinking: bool = True,
+    base_url: str = "",
+    api_key: str = "",
 ) -> ChatResult:
     payload: dict[str, object] = {
         "model": model,
@@ -369,7 +344,7 @@ def chat_completion(
         payload["tool_choice"] = dict(tool_choice)
 
     with _LLM_SEMAPHORE:
-        raw = _post_json("/chat/completions", payload)
+        raw = _post_json("/chat/completions", payload, base_url, api_key)
     text = ""
     choices = raw.get("choices")
     if isinstance(choices, list) and choices:
@@ -396,6 +371,82 @@ def chat_completion(
         output_tokens=output_tokens,
         raw=raw,
     )
+
+
+def chat_completion_stream(
+    *,
+    model: str,
+    messages: Sequence[Mapping[str, str]],
+    max_tokens: int,
+    temperature: float = -1.0,
+    enable_thinking: bool = True,
+) -> Iterator[tuple[str, str]]:
+    """Stream chat completion, yielding (content_delta, reasoning_delta) tuples."""
+    payload: dict[str, object] = {
+        "model": model,
+        "messages": [dict(m) for m in messages],
+        "max_tokens": max_tokens,
+        "stream": True,
+        "chat_template_kwargs": {"enable_thinking": enable_thinking},
+    }
+    if temperature >= 0.0:
+        payload["temperature"] = temperature
+
+    parsed = urlparse(config.BASE_URL.rstrip("/"))
+    host, port = (
+        parsed.hostname or "localhost",
+        parsed.port or (443 if parsed.scheme == "https" else 80),
+    )
+    headers = {"Content-Type": "application/json"} | (
+        {"Authorization": f"Bearer {config.API_KEY}"} if config.API_KEY else {}
+    )
+
+    with _LLM_SEMAPHORE:
+        conn = (
+            http.client.HTTPSConnection(
+                host, port, timeout=_LLM_REQUEST_TIMEOUT, context=ssl.create_default_context()
+            )
+            if parsed.scheme == "https"
+            else http.client.HTTPConnection(host, port, timeout=_LLM_REQUEST_TIMEOUT)
+        )
+        try:
+            conn.request(
+                "POST",
+                (parsed.path or "") + "/chat/completions",
+                json.dumps(payload).encode(),
+                headers,
+            )
+            resp = conn.getresponse()
+            if resp.status != 200:
+                raise RuntimeError(f"Provider HTTP {resp.status}: {resp.read().decode()}")
+
+            buf = ""
+            while data := resp.read(4096).decode("utf-8", errors="replace"):
+                buf += data
+                while "\n" in buf:
+                    line, buf = buf.split("\n", 1)
+                    if not (line := line.strip()) or not line.startswith("data:"):
+                        continue
+                    if (payload_str := line[5:].strip()) == "[DONE]":
+                        return
+                    try:
+                        parsed_data = json.loads(payload_str)
+                    except json.JSONDecodeError:
+                        continue
+                    if (
+                        (choices := parsed_data.get("choices"))
+                        and isinstance(choices, list)
+                        and choices
+                    ):
+                        delta = choices[0].get("delta", {})
+                        content, reasoning = (
+                            delta.get("content") or "",
+                            delta.get("reasoning_content") or "",
+                        )
+                        if content or reasoning:
+                            yield content, reasoning
+        finally:
+            conn.close()
 
 
 def embed(

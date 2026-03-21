@@ -155,7 +155,7 @@ def _split_windows(text: str) -> list[tuple[str, str]]:
                         "content": WINDOW_CONTEXT_SUMMARY_PROMPT.format(text=window_text[:3000]),
                     },
                 ),
-                max_tokens=128,  # 2-4 sentence summary; no need for full FAST_LLM_MAX_TOKENS
+                max_tokens=config.LLM_TOKENS_SUMMARY,
                 enable_thinking=False,
             )
             prev_summary = result.text.strip()
@@ -189,7 +189,7 @@ def _extract_propositions(text: str, preceding_context: str = "") -> list[Extrac
         prompt=KNOWLEDGE_EXTRACTION_PROMPT.format(text=prompt_text),
         response_model=ExtractionResponse,
         fallback=ExtractionResponse(),
-        max_tokens=1024,  # up to 15 propositions x ~60 tokens each + overhead
+        max_tokens=config.LLM_TOKENS_EXTRACTION,
         max_retries=1,  # fail fast; retrying rarely helps prose-drift failures
         assistant_prefix='{"propositions": [',  # prefill forces JSON output, bypasses prose drift
     )
@@ -235,7 +235,9 @@ async def _find_nearest_knowledge(
     )
     results = response.points
     if results:
-        uid = str(results[0].payload.get("uid", "") if results[0].payload else "") or str(results[0].id)
+        uid = str(results[0].payload.get("uid", "") if results[0].payload else "") or str(
+            results[0].id
+        )
         return uid, results[0].score
     return None
 
@@ -600,26 +602,34 @@ async def consolidate_knowledge(
         except Exception:
             log.debug("Failed to prune entries", exc_info=True)
 
+    deleted_uids = set(uids_to_delete)
     merge_updates: list[tuple[str, str]] = []
     for merge in consolidation.merges:
         source_uids = merge.get("source_uids", [])
         merged_text = merge.get("merged", "")
         if not source_uids or not merged_text or not isinstance(source_uids, list):
             continue
-        merge_uid = next((u for u in source_uids if isinstance(u, str) and u in valid_uids), None)
+        merge_uid = next(
+            (
+                u
+                for u in source_uids
+                if isinstance(u, str) and u in valid_uids and u not in deleted_uids
+            ),
+            None,
+        )
         if merge_uid:
             merge_updates.append((str(merged_text), merge_uid))
             log.info("Consolidation: merged uid=%s -> '%s'", merge_uid[:8], str(merged_text)[:50])
     if merge_updates:
-        try:
-            for merged_text, uid in merge_updates:
+        for merged_text, uid in merge_updates:
+            try:
                 await qdrant.set_payload(
                     collection_name="semantic_features",
                     payload={"value": merged_text, "updated_at": datetime.now(UTC).isoformat()},
                     points=[uid],
                 )
-        except Exception:
-            log.debug("Failed to apply merges", exc_info=True)
+            except Exception:
+                log.debug("Failed to apply merge for uid=%s (may have been deleted)", uid[:8])
 
     log.info(
         "Knowledge consolidation: %d contradictions resolved, %d merges, %d pruned",

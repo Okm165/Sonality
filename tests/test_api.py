@@ -190,7 +190,8 @@ class TestChatCompletions:
         assert r.status_code == 400
         assert "No user message" in r.json()["detail"]
 
-    def test_stream_true_returns_501(self, client: TestClient) -> None:
+    def test_stream_returns_sse(self, client: TestClient, mock_agent: MagicMock) -> None:
+        mock_agent.respond_stream.return_value = iter([("Hello", ""), (" world", "")])
         r = client.post(
             "/v1/chat/completions",
             json={
@@ -198,8 +199,11 @@ class TestChatCompletions:
                 "stream": True,
             },
         )
-        assert r.status_code == 501
-        assert "Streaming" in r.json()["detail"]
+        assert r.status_code == 200
+        assert r.headers["content-type"] == "text/event-stream; charset=utf-8"
+        lines = [ln for ln in r.text.split("\n\n") if ln.startswith("data:")]
+        assert len(lines) >= 2
+        assert "data: [DONE]" in r.text
 
     def test_uses_last_user_message(self, client: TestClient, mock_agent: MagicMock) -> None:
         client.post(

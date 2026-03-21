@@ -62,7 +62,7 @@ def extract_insight(
         response_model=InsightExtractionResponse,
         fallback=InsightExtractionResponse(),
         model=model,
-        max_tokens=128,  # SKIP or one short sentence — small output
+        max_tokens=config.LLM_TOKENS_SUMMARY,
         assistant_prefix='{"insight_decision": "',
     )
     if not result.success:

@@ -6,10 +6,13 @@
 services:
   sonality:
     build: .
-    stdin_open: true
-    tty: true
+    ports:
+      - "8000:8000"
     env_file:
       - .env
+    environment:
+      SONALITY_NEO4J_URL: bolt://neo4j:7687
+      SONALITY_QDRANT_URL: http://qdrant:6333
     volumes:
       - ./data:/app/data
     depends_on:
@@ -17,8 +20,13 @@ services:
         condition: service_healthy
       qdrant:
         condition: service_healthy
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=4)\""]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 90s
 
   neo4j:
     image: neo4j:5
@@ -57,7 +65,34 @@ services:
       retries: 5
       start_period: 15s
 
+  # === Speech Services (STT + TTS) ===
+  speaches:
+    image: ghcr.io/speaches-ai/speaches:latest-cpu
+    ports:
+      - "8001:8000"
+    volumes:
+      - speaches_cache:/home/ubuntu/.cache/huggingface/hub
+    environment:
+      # Logging
+      LOG_LEVEL: info
+      # Model persistence (never unload)
+      STT_MODEL_TTL: -1
+      TTS_MODEL_TTL: -1
+      # STT configuration (CPU optimized)
+      WHISPER__INFERENCE_DEVICE: cpu
+      WHISPER__COMPUTE_TYPE: int8
+      # Preload STT and TTS models on startup
+      PRELOAD_MODELS: '["Systran/faster-distil-whisper-large-v3", "speaches-ai/Kokoro-82M-v1.0-ONNX"]'
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 180s
+    restart: unless-stopped
+
 volumes:
   neo4j_data:
   neo4j_logs:
   qdrant_data:
+  speaches_cache:

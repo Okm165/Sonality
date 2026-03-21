@@ -108,11 +108,9 @@ class TestChunkingResponseFallbackPath:
         assert results[0].node.key_concept == "full_content"
         assert "Some long text" in results[0].node.text
 
-    def test_chunk_and_embed_filters_placeholder_chunks(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_chunk_and_embed_filters_placeholder_chunks(self) -> None:
         """Chunks with '...' text are filtered out; only non-empty chunks are kept."""
-        from pydantic import BaseModel
+        from unittest.mock import patch
 
         from sonality.llm.caller import LLMCallResult
         from sonality.memory.derivatives import ChunkingResponse, ChunkItem, DerivativeChunker
@@ -124,32 +122,23 @@ class TestChunkingResponseFallbackPath:
             def embed_documents(self, texts: list[str]) -> list[list[float]]:
                 return fake_embed(texts)
 
-        def stub_call[T: BaseModel](
-            *,
-            prompt: str,
-            response_model: type[T],
-            fallback: T,
-            **_: object,
-        ) -> LLMCallResult[T]:
-            del prompt, fallback
-            payload = ChunkingResponse(
-                chunks=[
-                    ChunkItem(text="Real content", key_concept="real"),
-                    ChunkItem(text="...", key_concept="placeholder"),
-                    ChunkItem(text="  ", key_concept="whitespace"),
-                ]
-            )
-            return LLMCallResult(
-                value=response_model.model_validate(payload.model_dump()),  # type: ignore[arg-type]
-                success=True,
-                attempts=1,
-                raw_text="",
-            )
+        payload = ChunkingResponse(
+            chunks=[
+                ChunkItem(text="Real content", key_concept="real"),
+                ChunkItem(text="...", key_concept="placeholder"),
+                ChunkItem(text="  ", key_concept="whitespace"),
+            ]
+        )
+        mock_result = LLMCallResult(
+            value=payload,  # type: ignore[arg-type]
+            success=True,
+            attempts=1,
+            raw_text="",
+        )
 
-        monkeypatch.setattr("sonality.memory.derivatives.llm_call", stub_call)
-
-        chunker = DerivativeChunker(FakeEmbedder())  # type: ignore[arg-type]
-        results = chunker.chunk_and_embed("Some text.", "ep-002")
+        with patch("sonality.memory.derivatives.llm_call", return_value=mock_result):
+            chunker = DerivativeChunker(FakeEmbedder())  # type: ignore[arg-type]
+            results = chunker.chunk_and_embed("Some text.", "ep-002")
 
         assert len(results) == 1
         assert results[0].node.text == "Real content"

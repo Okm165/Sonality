@@ -2,7 +2,8 @@
 
 Provides HTTP endpoints for data ingestion, belief querying, probability estimation,
 and OpenAI-compatible chat completions for integration with external LLM tools.
-Uses a singleton SonalityAgent with a threading lock to prevent concurrent mutation.
+Uses a singleton SonalityAgent with an async lock to prevent concurrent mutation
+while keeping the event loop responsive during long-running operations.
 """
 
 from __future__ import annotations
@@ -12,8 +13,9 @@ import json
 import logging
 import time
 import uuid
-from collections.abc import AsyncGenerator, Iterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import asynccontextmanager
+from functools import partial
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
@@ -24,9 +26,14 @@ from .agent import SonalityAgent
 log = logging.getLogger(__name__)
 
 _agent_store: dict[str, SonalityAgent] = {}
-# asyncio.Lock avoids blocking the event loop during long ingest/respond operations,
-# keeping the /health endpoint responsive even when the agent is busy.
-_agent_lock: asyncio.Lock
+_agent_lock: asyncio.Lock | None = None
+
+
+def _get_lock() -> asyncio.Lock:
+    global _agent_lock
+    if _agent_lock is None:
+        _agent_lock = asyncio.Lock()
+    return _agent_lock
 
 
 def _get_agent() -> SonalityAgent:
@@ -38,8 +45,6 @@ def _get_agent() -> SonalityAgent:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    global _agent_lock
-    _agent_lock = asyncio.Lock()
     log.info("Initializing Sonality agent for API server")
     _agent_store["agent"] = SonalityAgent()
     yield
@@ -133,18 +138,24 @@ async def chat_completions(
         def sse_chunk(delta: dict[str, str], finish: str | None = None) -> str:
             return f"data: {json.dumps({'id': chunk_id, 'object': 'chat.completion.chunk', 'created': created, 'model': 'sonality', 'choices': [{'index': 0, 'delta': delta, 'finish_reason': finish}]})}\n\n"
 
-        def generate() -> Iterator[str]:
-            for content, reasoning in agent.respond_stream(user_message):
-                delta = {k: v for k, v in [("content", content), ("reasoning_content", reasoning)] if v}
-                if delta:
-                    yield sse_chunk(delta)
+        async def generate() -> AsyncIterator[str]:
+            async with _get_lock():
+                loop = asyncio.get_event_loop()
+                stream_iter = await loop.run_in_executor(None, agent.respond_stream, user_message)
+                for content, reasoning in stream_iter:
+                    delta = {
+                        k: v
+                        for k, v in [("content", content), ("reasoning_content", reasoning)]
+                        if v
+                    }
+                    if delta:
+                        yield sse_chunk(delta)
             yield sse_chunk({}, "stop")
             yield "data: [DONE]\n\n"
 
-        async with _agent_lock:
-            return StreamingResponse(generate(), media_type="text/event-stream")
+        return StreamingResponse(generate(), media_type="text/event-stream")
 
-    async with _agent_lock:
+    async with _get_lock():
         response_text = await asyncio.to_thread(agent.respond, user_message)
 
     prompt_tokens = sum(len(m.content.split()) for m in request.messages) * 4 // 3
@@ -224,7 +235,7 @@ async def create_embeddings(request: EmbeddingRequest) -> EmbeddingResponse:
     """
     agent = _get_agent()
     texts = [request.input] if isinstance(request.input, str) else request.input
-    embeddings = agent._embedder.embed_documents(texts)
+    embeddings = await asyncio.to_thread(agent._embedder.embed_documents, texts)
     total_tokens = sum(len(t.split()) for t in texts) * 4 // 3
     return EmbeddingResponse(
         data=[EmbeddingData(embedding=emb, index=i) for i, emb in enumerate(embeddings)],
@@ -258,7 +269,7 @@ async def simple_chat(request: SimpleChatRequest) -> SimpleChatResponse:
     Simpler than the OpenAI-compatible endpoint, returns response with ESS metadata.
     """
     agent = _get_agent()
-    async with _agent_lock:
+    async with _get_lock():
         response_text = await asyncio.to_thread(agent.respond, request.message)
         ess = agent.last_ess
     return SimpleChatResponse(
@@ -340,8 +351,10 @@ async def ingest(request: IngestRequest) -> IngestResponse:
     Bypasses response generation and runs the evidence assessment pipeline directly.
     """
     agent = _get_agent()
-    async with _agent_lock:
-        ess = await asyncio.to_thread(agent.ingest, request.text, request.topic_override)
+    async with _get_lock():
+        ess = await asyncio.to_thread(
+            partial(agent.ingest, request.text, topic_override=request.topic_override)
+        )
     return IngestResponse(
         success=True,
         score=ess.score,
@@ -411,7 +424,9 @@ async def estimate_probability_compat(topic: str, base_rate: float = 0.5) -> Pro
 async def get_correlations(topic: str) -> list[CorrelationResponse]:
     """Return all belief correlations for a topic."""
     agent = _get_agent()
-    correlations = agent._run_async(agent._graph.get_belief_correlations(topic))
+    correlations = await asyncio.to_thread(
+        agent._run_async, agent._graph.get_belief_correlations(topic)
+    )
     return [
         CorrelationResponse(
             source_topic=c.source_topic,
@@ -431,6 +446,7 @@ async def get_correlations_compat(topic: str) -> list[CorrelationResponse]:
 
 
 @app.get("/health", response_model=HealthResponse)
+@app.get("/v1/health", response_model=HealthResponse, include_in_schema=False)
 async def health() -> HealthResponse:
     """Return agent health status."""
     agent = _get_agent()

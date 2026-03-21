@@ -74,12 +74,22 @@ db-clear: ## Clear all data from databases while preserving schema
 
 # --- Run ---
 
-.PHONY: run serve preflight-live preflight-live-probe
+.PHONY: run serve chat telegram feed preflight-live preflight-live-probe
 run: ## Start the Sonality REPL agent
 	uv run sonality $(ARGS)
 
 serve: ## Start the Sonality API server (OpenAI-compatible at /v1/chat/completions)
 	uv run sonality-server --host 0.0.0.0 --port 8000 $(ARGS)
+
+chat: ## Interactive terminal chat with Sonality
+	uv run --group scripts sonality-chat
+
+telegram: ## Start Telegram bot (requires CHAT_TELEGRAM_TOKEN)
+	uv run --group scripts sonality-telegram
+
+# GNEWS_LIMIT=10 RSS_ENTRIES=10 FEED_THROTTLE=5 make feed
+feed: ## Feed news articles to Sonality for belief formation
+	uv run --group scripts python scripts/feed.py
 
 preflight-live: ## Validate live API config and selected models
 	@uv run python -c "from sonality import config; import sys; missing=list(config.missing_live_api_config()); \
@@ -99,17 +109,17 @@ preflight-live-probe: preflight-live ## Run a tiny live call to verify endpoint/
 
 .PHONY: lint format format-check typecheck test bench-contracts check check-ci
 lint: ## Lint code (ruff check)
-	uv run ruff check sonality/ tests/ benches/
+	uv run ruff check sonality/ chat/ tests/ benches/
 
 format: ## Format code (ruff format)
-	uv run ruff format sonality/ tests/ benches/
-	uv run ruff check --fix sonality/ tests/ benches/
+	uv run ruff format sonality/ chat/ tests/ benches/
+	uv run ruff check --fix sonality/ chat/ tests/ benches/
 
 format-check: ## Check formatting without writing changes (CI parity)
-	uv run ruff format --check sonality/ tests/ benches/
+	uv run ruff format --check sonality/ chat/ tests/ benches/
 
 typecheck: ## Type-check code (mypy)
-	uv run mypy sonality/
+	uv run mypy sonality/ chat/
 
 test: ## Run tests (pytest, skip live API tests)
 	uv run pytest tests -m "not live" -v -s

@@ -135,7 +135,7 @@ class ConsolidationEngine:
             prompt=prompt,
             response_model=ConsolidationReadinessResponse,
             fallback=ConsolidationReadinessResponse(),
-            max_tokens=256,  # ready/not_ready + short reasoning
+            max_tokens=config.LLM_TOKENS_ROUTING,
             assistant_prefix='{"readiness_decision": "',
         )
         if not result.success:

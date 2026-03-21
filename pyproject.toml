@@ -5,7 +5,6 @@ description = "LLM agent with a self-evolving personality via the Sponge archite
 readme = "README.md"
 requires-python = ">=3.12,<3.14"
 dependencies = [
-    "datasets>=4.6.1",
     "fastembed>=0.3.0",
     "fastapi>=0.115.0",
     "neo4j>=5.0.0",
@@ -16,6 +15,14 @@ dependencies = [
 ]
 
 [dependency-groups]
+scripts = [
+    "openai>=2.29.0",
+    "httpx>=0.28.1",
+    "rich>=14.0.0",
+    "feedparser>=6.0.0",
+    "gnews>=0.4.0",
+    "aiogram>=3.20.0",
+]
 dev = [
     "ruff>=0.8.0",
     "pytest>=8.0.0",
@@ -35,11 +42,13 @@ build-backend = "hatchling.build"
 [project.scripts]
 sonality = "sonality.cli:main"
 sonality-server = "sonality.server:main"
+sonality-chat = "chat.terminal:main"
+sonality-telegram = "chat.telegram:main"
 
 [tool.ruff]
 target-version = "py312"
 line-length = 100
-src = ["sonality", "tests", "benches"]
+src = ["sonality", "chat", "tests", "benches"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "UP", "B", "SIM", "RUF"]
@@ -53,6 +62,14 @@ python_version = "3.12"
 strict = true
 warn_return_any = true
 warn_unused_configs = true
+
+[[tool.mypy.overrides]]
+module = ["aiogram", "aiogram.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["chat.telegram"]
+disallow_untyped_decorators = false
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

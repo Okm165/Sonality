@@ -219,12 +219,18 @@ class SpongeState(BaseModel):
             # Apply LLM-assessed uncertainty if provided (from belief provenance assessment).
             if 0.0 <= new_uncertainty <= 1.0:
                 meta.uncertainty = new_uncertainty
-            # Bayesian floor: uncertainty cannot stay at maximum as evidence accumulates.
-            # Uses evidence_count as proxy; prevents LLM returning new_uncertainty=1.0 forever.
-            if meta.evidence_count >= 3:
+            # Bayesian floor: uncertainty cannot drop too low with insufficient evidence.
+            # Prevents ossification (confidence=1.0) with minimal evidence.
+            if meta.evidence_count >= 5:
+                meta.uncertainty = max(meta.uncertainty, 0.10)  # max confidence 0.90
+            elif meta.evidence_count >= 3:
+                meta.uncertainty = max(meta.uncertainty, 0.20)  # max confidence 0.80
                 meta.uncertainty = min(meta.uncertainty, 0.30)
             elif meta.evidence_count >= 2:
+                meta.uncertainty = max(meta.uncertainty, 0.30)  # max confidence 0.70
                 meta.uncertainty = min(meta.uncertainty, 0.50)
+            else:  # evidence_count == 1
+                meta.uncertainty = max(meta.uncertainty, 0.50)  # max confidence 0.50
             meta.confidence = max(0.0, min(1.0, 1.0 - meta.uncertainty))
             meta.recent_updates.append(signed)
             if provenance:
@@ -288,8 +294,10 @@ class SpongeState(BaseModel):
         )
         current_pos = self.opinion_vectors.get(topic, 0.0)
         same_dir = (current_pos * signed) >= 0
-        dir_label = "reinforce" if same_dir and abs(current_pos) > 0.05 else (
-            "oppose" if not same_dir and abs(current_pos) > 0.05 else "init"
+        dir_label = (
+            "reinforce"
+            if same_dir and abs(current_pos) > 0.05
+            else ("oppose" if not same_dir and abs(current_pos) > 0.05 else "init")
         )
         log.debug(
             "STAGED_UPDATE topic=%s | mag=%+.3f | prior_pos=%+.3f | %s | due=#%d | prov=%.60s",
@@ -335,8 +343,7 @@ class SpongeState(BaseModel):
             # Log per-update breakdown before netting so cancellations are visible
             if len(updates) > 1:
                 update_parts = " + ".join(
-                    f"{u.signed_magnitude:+.4f}(#{u.staged_at})"
-                    for u in updates
+                    f"{u.signed_magnitude:+.4f}(#{u.staged_at})" for u in updates
                 )
                 log.info(
                     "STAGED_NET topic=%s prior=%+.3f | %s = net %+.4f",
@@ -349,7 +356,9 @@ class SpongeState(BaseModel):
                 positive_sum = sum(u.signed_magnitude for u in updates if u.signed_magnitude > 0)
                 negative_sum = sum(u.signed_magnitude for u in updates if u.signed_magnitude < 0)
                 if positive_sum > 0 and negative_sum < 0:
-                    cancel_ratio = min(positive_sum, abs(negative_sum)) / (positive_sum + abs(negative_sum))
+                    cancel_ratio = min(positive_sum, abs(negative_sum)) / (
+                        positive_sum + abs(negative_sum)
+                    )
                     if cancel_ratio > 0.3:
                         log.warning(
                             "STAGED_OSCILLATION topic=%s: conflicting staged updates cancel "

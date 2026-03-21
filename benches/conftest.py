@@ -26,8 +26,11 @@ from .teaching_harness import (
 # Redirect all TemporaryDirectory / mkstemp calls to the project data dir to
 # avoid /tmp quota exhaustion on long-running bench sessions.
 _bench_tmp = config.DATA_DIR / "bench_tmp"
-_bench_tmp.mkdir(parents=True, exist_ok=True)
-tempfile.tempdir = str(_bench_tmp)
+try:
+    _bench_tmp.mkdir(parents=True, exist_ok=True)
+    tempfile.tempdir = str(_bench_tmp)
+except (PermissionError, OSError):
+    pass  # fall back to system default
 
 _BENCH_LOCK_FILE = config.DATA_DIR / "bench.lock"
 

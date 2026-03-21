@@ -12,6 +12,7 @@ from enum import StrEnum
 
 from pydantic import BaseModel
 
+from ... import config
 from ...llm.caller import llm_call
 from ...llm.prompts import QUERY_ROUTING_PROMPT
 
@@ -81,8 +82,8 @@ class QueryRouter:
             prompt=prompt,
             response_model=RoutingResponse,
             fallback=RoutingResponse(),
-            max_tokens=256,  # category + depth + flags + short reasoning
-            assistant_prefix='{"category": "',  # prefill to force JSON output
+            max_tokens=config.LLM_TOKENS_ROUTING,
+            assistant_prefix='{"category": "',
         )
 
         if result.success:

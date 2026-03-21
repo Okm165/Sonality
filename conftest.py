@@ -30,11 +30,24 @@ def _embedding_service_available() -> bool:
 
 def pytest_configure(config: pytest.Config) -> None:
     """Attach file and console log handlers to sonality loggers."""
-    _LOG_DIR.mkdir(parents=True, exist_ok=True)
     ts = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
     worker = getattr(config, "workerinput", {}).get("workerid", "")
     suffix = f"_{worker}" if worker else ""
-    log_file = _LOG_DIR / f"test_run_{ts}{suffix}.log"
+    log_name = f"test_run_{ts}{suffix}.log"
+
+    log_file: Path | None = None
+    for log_dir in (_LOG_DIR, Path("/tmp/sonality_test_logs")):
+        try:
+            log_dir.mkdir(parents=True, exist_ok=True)
+            candidate = log_dir / log_name
+            candidate.touch()
+            log_file = candidate
+            break
+        except (PermissionError, OSError):
+            continue
+
+    if log_file is None:
+        return
 
     file_handler = logging.FileHandler(log_file, encoding="utf-8")
     file_handler.setLevel(logging.DEBUG)
@@ -47,9 +60,7 @@ def pytest_configure(config: pytest.Config) -> None:
 
     console_handler = logging.StreamHandler(sys.stderr)
     console_handler.setLevel(logging.INFO)
-    console_handler.setFormatter(
-        logging.Formatter("%(levelname)-5s  %(name)s  %(message)s")
-    )
+    console_handler.setFormatter(logging.Formatter("%(levelname)-5s  %(name)s  %(message)s"))
 
     for logger_name in ("sonality", "benches", "tests"):
         logger = logging.getLogger(logger_name)

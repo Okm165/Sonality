@@ -13,6 +13,7 @@ from enum import StrEnum
 
 from pydantic import BaseModel
 
+from .. import config
 from ..llm.caller import llm_call
 from ..llm.prompts import BOUNDARY_DETECTION_PROMPT
 
@@ -98,7 +99,7 @@ class EventBoundaryDetector:
             prompt=prompt,
             response_model=BoundaryDetectionResponse,
             fallback=BoundaryDetectionResponse(),
-            max_tokens=256,  # BOUNDARY/CONTINUE + type + short reasoning
+            max_tokens=config.LLM_TOKENS_ROUTING,
             assistant_prefix='{"boundary_decision": "',
         )
         if not result.success:

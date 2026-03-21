@@ -15,6 +15,7 @@ from enum import StrEnum
 
 from pydantic import BaseModel, field_validator, model_validator
 
+from .. import config
 from ..llm.caller import llm_call
 from ..llm.prompts import BATCH_BELIEF_UPDATE_PROMPT, BELIEF_UPDATE_PROMPT
 from .graph import EdgeType, MemoryGraph
@@ -336,9 +337,8 @@ async def assess_belief_evidence_batch(
         ]
     )
     # ~160 tokens per topic: direction, strength, uncertainty, magnitude + 1-sentence reasoning.
-    # 80 was too tight — the LLM truncated at topic 1/3 causing two wasted fallback calls.
-    # Cap at 768 to bound latency; truncated responses still recover via per-topic fallback.
-    batch_max_tokens = min(768, max(128, len(topics) * 160))
+    # Use configurable assessment token budget, dynamically scaled per topic count.
+    batch_max_tokens = min(config.LLM_TOKENS_ASSESSMENT, max(128, len(topics) * 160))
     result = await asyncio.to_thread(
         llm_call,
         prompt=prompt,

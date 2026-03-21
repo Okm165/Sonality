@@ -430,6 +430,7 @@ class SonalityAgent:
         for content, reasoning in chat_completion_stream(
             model=self.model,
             max_tokens=config.FAST_LLM_MAX_TOKENS,
+            temperature=0.6,
             messages=({"role": "system", "content": system_prompt}, *self.conversation),
         ):
             if content:
@@ -531,6 +532,7 @@ class SonalityAgent:
                 completion = chat_completion(
                     model=self.model,
                     max_tokens=config.FAST_LLM_MAX_TOKENS,
+                    temperature=0.6,
                     messages=(
                         {"role": "system", "content": system_prompt},
                         *self.conversation,
@@ -1347,7 +1349,7 @@ class SonalityAgent:
                 prompt=prompt,
                 response_model=TopicCanonResponse,
                 fallback=TopicCanonResponse(mappings={raw: raw for raw, _ in need_llm}),
-                max_tokens=256,  # {"topic_raw": "canonical"} mapping — small output
+                max_tokens=config.LLM_TOKENS_ROUTING,
                 assistant_prefix='{"mappings": {',
             )
             for raw, _ in need_llm:
@@ -1488,7 +1490,7 @@ class SonalityAgent:
                 prompt=prompt,
                 response_model=DisagreementDetectionResponse,
                 fallback=DisagreementDetectionResponse(),
-                max_tokens=256,  # verdict + strength + short reasoning
+                max_tokens=config.LLM_TOKENS_ROUTING,
                 assistant_prefix='{"disagreement_verdict": "',
             )
         except Exception:
@@ -1858,7 +1860,7 @@ class SonalityAgent:
             prompt=prompt,
             response_model=ReflectionGateResponse,
             fallback=ReflectionGateResponse(trigger=ReflectionGateDecision.SKIP),
-            max_tokens=256,  # SKIP / PERIODIC / EVENT_DRIVEN + reasoning (128 too low, truncates)
+            max_tokens=config.LLM_TOKENS_ROUTING,
             assistant_prefix='{"trigger": "',
         )
         if not result.success:
@@ -2037,7 +2039,7 @@ class SonalityAgent:
             ),
             response_model=BatchBeliefDecayResponse,
             fallback=BatchBeliefDecayResponse(decisions=[]),
-            max_tokens=1024,  # 20 decisions x ~50 tokens each
+            max_tokens=config.LLM_TOKENS_REFLECTION,
         )
         dropped: list[str] = []
         decisions_by_topic = {d.topic: d for d in result.value.decisions}

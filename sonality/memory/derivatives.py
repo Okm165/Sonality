@@ -14,6 +14,7 @@ from enum import StrEnum
 
 from pydantic import BaseModel, field_validator, model_validator
 
+from .. import config
 from ..llm.caller import llm_call
 from ..llm.prompts import CHUNKING_PROMPT
 from .embedder import Embedder
@@ -51,12 +52,19 @@ class ChunkingResponse(BaseModel):
     def normalize_chunks(cls, data: object) -> object:
         """Handle LLM responses that omit the outer chunks wrapper or return empty items."""
         if isinstance(data, list):
-            return {"chunks": [x for x in data if isinstance(x, dict) and "text" in x]}
+            return {"chunks": [x for x in data if _is_valid_chunk(x)]}
         if isinstance(data, dict) and "text" in data and "chunks" not in data:
             return {"chunks": [data]}
         if isinstance(data, dict) and "chunks" in data and isinstance(data["chunks"], list):
-            data = {"chunks": [x for x in data["chunks"] if isinstance(x, dict) and "text" in x]}
+            data = {"chunks": [x for x in data["chunks"] if _is_valid_chunk(x)]}
         return data
+
+
+def _is_valid_chunk(x: object) -> bool:
+    """Check if x is a valid chunk (dict with 'text' key or ChunkItem instance)."""
+    if isinstance(x, ChunkItem):
+        return True
+    return isinstance(x, dict) and "text" in x
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,7 +87,7 @@ class DerivativeChunker:
             prompt=CHUNKING_PROMPT.format(text=text),
             response_model=ChunkingResponse,
             fallback=ChunkingResponse(chunks=[]),
-            max_tokens=512,
+            max_tokens=config.LLM_TOKENS_DERIVATIVES,
             max_retries=1,
             assistant_prefix='{"chunks": [',
         )

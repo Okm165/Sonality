@@ -6,6 +6,8 @@ WORKDIR /app
 
 ENV UV_COMPILE_BYTECODE=1
 ENV UV_LINK_MODE=copy
+# Store embedding model inside image — eliminates runtime HuggingFace downloads.
+ENV FASTEMBED_CACHE_PATH=/app/models
 
 COPY pyproject.toml uv.lock README.md ./
 RUN --mount=type=cache,target=/root/.cache/uv \
@@ -16,6 +18,11 @@ COPY sonality/ sonality/
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev
 
+# Pre-download BAAI/bge-large-en-v1.5 ONNX into the image (~300MB).
+# Prevents 80s model download on every cold start.
+RUN uv run --no-dev python -c \
+    "from fastembed import TextEmbedding; list(TextEmbedding('BAAI/bge-large-en-v1.5').embed(['warmup']))"
+
 RUN mkdir -p data
 
-ENTRYPOINT ["uv", "run", "sonality"]
+ENTRYPOINT ["uv", "run", "--no-dev", "sonality-server"]

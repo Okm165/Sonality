@@ -300,7 +300,7 @@ class SemanticIngestionWorker:
             prompt=prompt,
             response_model=FeatureExtractionResponse,
             fallback=FeatureExtractionResponse(),
-            max_tokens=256,
+            max_tokens=config.LLM_TOKENS_EXTRACTION,
             max_retries=1,
             assistant_prefix='{"commands": [',
         )
@@ -420,7 +420,7 @@ class SemanticIngestionWorker:
             prompt=FEATURE_CONSOLIDATION_PROMPT.format(category=category, features=features_text),
             response_model=FeatureConsolidationResponse,
             fallback=FeatureConsolidationResponse(),
-            max_tokens=1024,  # SKIP or 2 merges with full UIDs and canonical values
+            max_tokens=config.LLM_TOKENS_EXTRACTION,
             max_retries=1,
             assistant_prefix='{"consolidation_decision": "',
         )

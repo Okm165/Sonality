@@ -25,6 +25,11 @@ def _env_float(name: str, default: float) -> float:
     return float(_env_str(name, str(default)))
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    """Read an environment variable as boolean with a default."""
+    return _env_str(name, str(default).lower()).lower() in ("true", "1", "yes")
+
+
 DATA_DIR: Final = PROJECT_ROOT / "data"
 SPONGE_FILE: Final = DATA_DIR / "sponge.json"
 SPONGE_HISTORY_DIR: Final = DATA_DIR / "sponge_history"
@@ -43,7 +48,7 @@ SEMANTIC_RETRIEVAL_COUNT: Final = _env_int("SONALITY_SEMANTIC_RETRIEVAL_COUNT", 
 OPINION_COOLING_PERIOD: Final = _env_int("SONALITY_OPINION_COOLING_PERIOD", 3)
 
 MAX_CONVERSATION_CHARS: Final = 100_000
-REFLECTION_EVERY: Final = _env_int("SONALITY_REFLECTION_EVERY", 20)
+REFLECTION_EVERY: Final = _env_int("SONALITY_REFLECTION_EVERY", 10)
 
 # --- Database (Neo4j + Qdrant) ---
 NEO4J_URL: Final = _env_str("SONALITY_NEO4J_URL", "bolt://localhost:7687")
@@ -55,7 +60,7 @@ QDRANT_URL: Final = _env_str("SONALITY_QDRANT_URL", "http://localhost:6333")
 
 # --- Embedding (local FastEmbed bge-large-en-v1.5, 1024 dims) ---
 EMBEDDING_DIMENSIONS: Final = 1024
-EMBEDDING_MAX_CHARS: Final = _env_int("SONALITY_EMBEDDING_MAX_CHARS", 2000)
+EMBEDDING_MAX_CHARS: Final = _env_int("SONALITY_EMBEDDING_MAX_CHARS", 4096)
 # Optional API-based embedding override (falls back to local FastEmbed when unset).
 EMBEDDING_API_KEY: Final = _env_str("SONALITY_EMBEDDING_API_KEY", "")
 EMBEDDING_BASE_URL: Final = _env_str("SONALITY_EMBEDDING_BASE_URL", "")
@@ -69,7 +74,25 @@ QDRANT_RESCORE_QUANTIZED: Final = _env_str("SONALITY_QDRANT_RESCORE", "true").lo
 
 # --- LLM for scoring/assessment tasks (fast, cheap model) ---
 FAST_LLM_MODEL: Final = _env_str("SONALITY_FAST_LLM_MODEL", ESS_MODEL)
-FAST_LLM_MAX_TOKENS: Final = _env_int("SONALITY_FAST_LLM_MAX_TOKENS", 1024)
+FAST_LLM_MAX_TOKENS: Final = _env_int("SONALITY_FAST_LLM_MAX_TOKENS", 8192)
+
+# --- LLM max_tokens by task type (all env-configurable) ---
+# Routing/classification: category selection, sufficiency checks, split queries, segmentation
+LLM_TOKENS_ROUTING: Final = _env_int("SONALITY_LLM_TOKENS_ROUTING", 8192)
+# ESS classification: score + type + direction + urgency + topics + summary
+LLM_TOKENS_ESS: Final = _env_int("SONALITY_LLM_TOKENS_ESS", 8192)
+# Reranking: ordered list of candidate IDs + reasoning
+LLM_TOKENS_RERANK: Final = _env_int("SONALITY_LLM_TOKENS_RERANK", 8192)
+# Knowledge/feature extraction: multiple propositions with metadata
+LLM_TOKENS_EXTRACTION: Final = _env_int("SONALITY_LLM_TOKENS_EXTRACTION", 8192)
+# Short summaries: window context, update decisions
+LLM_TOKENS_SUMMARY: Final = _env_int("SONALITY_LLM_TOKENS_SUMMARY", 8192)
+# Belief assessment: direction + strength + uncertainty + reasoning per topic
+LLM_TOKENS_ASSESSMENT: Final = _env_int("SONALITY_LLM_TOKENS_ASSESSMENT", 8192)
+# Derivative/chunk generation: chunked episode text + metadata
+LLM_TOKENS_DERIVATIVES: Final = _env_int("SONALITY_LLM_TOKENS_DERIVATIVES", 8192)
+# Reflection/consolidation: decisions, health checks, snapshot updates
+LLM_TOKENS_REFLECTION: Final = _env_int("SONALITY_LLM_TOKENS_REFLECTION", 8192)
 
 # --- STM ---
 STM_BUFFER_CAPACITY: Final = _env_int("SONALITY_STM_BUFFER_CAPACITY", 64000)
@@ -81,12 +104,11 @@ STM_POLL_INTERVAL: Final = _env_float("SONALITY_STM_POLL_INTERVAL", 30.0)
 RETRIEVAL_MAX_ITERATIONS: Final = _env_int("SONALITY_RETRIEVAL_MAX_ITERATIONS", 3)
 RETRIEVAL_CONFIDENCE_THRESHOLD: Final = _env_float("SONALITY_RETRIEVAL_CONFIDENCE_THRESHOLD", 0.8)
 RETRIEVAL_OVER_FETCH_FACTOR: Final = _env_int("SONALITY_RETRIEVAL_OVER_FETCH_FACTOR", 3)
-MAX_RERANK_CANDIDATES: Final = _env_int("SONALITY_MAX_RERANK_CANDIDATES", 25)
+MAX_RERANK_CANDIDATES: Final = _env_int("SONALITY_MAX_RERANK_CANDIDATES", 50)
 
-# Per-HTTP-request timeout for LLM calls. 90s is sufficient for most calls; 180s
-# covers knowledge extraction (1500-token prompt + up to 1024-token output) on
-# slower endpoints. Increase further for 70B+ models or throttled endpoints.
-LLM_REQUEST_TIMEOUT: Final = _env_int("SONALITY_LLM_TIMEOUT", 180)
+# Per-HTTP-request timeout for LLM calls. 300s (5 min) covers 4096-token outputs
+# on slower endpoints. Increase further for 70B+ models or throttled endpoints.
+LLM_REQUEST_TIMEOUT: Final = _env_int("SONALITY_LLM_TIMEOUT", 300)
 
 # Timeout for async ops dispatched from the sync context via run_coroutine_threadsafe.
 # Must exceed the maximum realistic duration of any single coroutine, which in the

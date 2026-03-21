@@ -562,7 +562,7 @@ def _run_classification_attempts(
         else:
             completion = chat_completion(
                 model=model,
-                max_tokens=384,  # ESS tool call: 11 fields including one-sentence summary
+                max_tokens=config.LLM_TOKENS_ESS,
                 temperature=0.0,
                 messages=(
                     {
