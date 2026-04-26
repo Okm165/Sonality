@@ -31,24 +31,11 @@ def _env_bool(name: str, default: bool) -> bool:
 
 
 DATA_DIR: Final = PROJECT_ROOT / "data"
-SPONGE_FILE: Final = DATA_DIR / "sponge.json"
-SPONGE_HISTORY_DIR: Final = DATA_DIR / "sponge_history"
-ESS_AUDIT_LOG_FILE: Final = DATA_DIR / "ess_log.jsonl"
 API_KEY: Final = _env_str("SONALITY_API_KEY", os.environ.get("OPENAI_API_KEY", ""))
 BASE_URL: Final = _env_str("SONALITY_BASE_URL", "https://api.openai.com/v1")
 MODEL: Final = _env_str("SONALITY_MODEL", "gpt-4.1-mini")
 ESS_MODEL: Final = _env_str("SONALITY_ESS_MODEL", MODEL)
 LOG_LEVEL: Final = _env_str("SONALITY_LOG_LEVEL", "INFO")
-
-SPONGE_MAX_TOKENS: Final = 500
-MAX_BELIEFS: Final = _env_int("SONALITY_MAX_BELIEFS", 35)
-EPISODIC_RETRIEVAL_COUNT: Final = _env_int("SONALITY_EPISODIC_RETRIEVAL_COUNT", 3)
-SEMANTIC_RETRIEVAL_COUNT: Final = _env_int("SONALITY_SEMANTIC_RETRIEVAL_COUNT", 2)
-
-OPINION_COOLING_PERIOD: Final = _env_int("SONALITY_OPINION_COOLING_PERIOD", 3)
-
-MAX_CONVERSATION_CHARS: Final = 100_000
-REFLECTION_EVERY: Final = _env_int("SONALITY_REFLECTION_EVERY", 10)
 
 # --- Database (Neo4j + Qdrant) ---
 NEO4J_URL: Final = _env_str("SONALITY_NEO4J_URL", "bolt://localhost:7687")
@@ -61,45 +48,16 @@ QDRANT_URL: Final = _env_str("SONALITY_QDRANT_URL", "http://localhost:6333")
 # --- Embedding (local FastEmbed bge-large-en-v1.5, 1024 dims) ---
 EMBEDDING_DIMENSIONS: Final = 1024
 EMBEDDING_MAX_CHARS: Final = _env_int("SONALITY_EMBEDDING_MAX_CHARS", 4096)
-# Optional API-based embedding override (falls back to local FastEmbed when unset).
-EMBEDDING_API_KEY: Final = _env_str("SONALITY_EMBEDDING_API_KEY", "")
-EMBEDDING_BASE_URL: Final = _env_str("SONALITY_EMBEDDING_BASE_URL", "")
-EMBEDDING_SEND_DIMENSIONS: Final = (
-    _env_str("SONALITY_EMBEDDING_SEND_DIMENSIONS", "false").lower() == "true"
-)
-
 # --- Qdrant search tuning ---
 QDRANT_SEARCH_EF: Final = _env_int("SONALITY_QDRANT_SEARCH_EF", 128)
-QDRANT_RESCORE_QUANTIZED: Final = _env_str("SONALITY_QDRANT_RESCORE", "true").lower() == "true"
+QDRANT_RESCORE_QUANTIZED: Final = _env_bool("SONALITY_QDRANT_RESCORE", True)
 
 # --- LLM for scoring/assessment tasks (fast, cheap model) ---
 FAST_LLM_MODEL: Final = _env_str("SONALITY_FAST_LLM_MODEL", ESS_MODEL)
-FAST_LLM_MAX_TOKENS: Final = _env_int("SONALITY_FAST_LLM_MAX_TOKENS", 8192)
 AGENT_TEMPERATURE: Final = _env_float("SONALITY_AGENT_TEMPERATURE", 0.6)
 
-# --- LLM max_tokens by task type (all env-configurable) ---
-# Routing/classification: category selection, sufficiency checks, split queries, segmentation
-LLM_TOKENS_ROUTING: Final = _env_int("SONALITY_LLM_TOKENS_ROUTING", 8192)
-# ESS classification: score + type + direction + urgency + topics + summary
-LLM_TOKENS_ESS: Final = _env_int("SONALITY_LLM_TOKENS_ESS", 8192)
-# Reranking: ordered list of candidate IDs + reasoning
-LLM_TOKENS_RERANK: Final = _env_int("SONALITY_LLM_TOKENS_RERANK", 8192)
-# Knowledge/feature extraction: multiple propositions with metadata
-LLM_TOKENS_EXTRACTION: Final = _env_int("SONALITY_LLM_TOKENS_EXTRACTION", 8192)
-# Short summaries: window context, update decisions
-LLM_TOKENS_SUMMARY: Final = _env_int("SONALITY_LLM_TOKENS_SUMMARY", 8192)
-# Belief assessment: direction + strength + uncertainty + reasoning per topic
-LLM_TOKENS_ASSESSMENT: Final = _env_int("SONALITY_LLM_TOKENS_ASSESSMENT", 8192)
-# Derivative/chunk generation: chunked episode text + metadata
-LLM_TOKENS_DERIVATIVES: Final = _env_int("SONALITY_LLM_TOKENS_DERIVATIVES", 8192)
-# Reflection/consolidation: decisions, health checks, snapshot updates
-LLM_TOKENS_REFLECTION: Final = _env_int("SONALITY_LLM_TOKENS_REFLECTION", 8192)
-
-# --- STM ---
-STM_BUFFER_CAPACITY: Final = _env_int("SONALITY_STM_BUFFER_CAPACITY", 64000)
-STM_BATCH_THRESHOLD: Final = _env_int("SONALITY_STM_BATCH_THRESHOLD", 3)
-STM_MAX_BATCH_SIZE: Final = _env_int("SONALITY_STM_MAX_BATCH_SIZE", 10)
-STM_POLL_INTERVAL: Final = _env_float("SONALITY_STM_POLL_INTERVAL", 30.0)
+# --- LLM max_tokens (unified for all task types) ---
+LLM_MAX_TOKENS: Final = _env_int("SONALITY_LLM_MAX_TOKENS", 8192)
 
 # --- Retrieval ---
 RETRIEVAL_MAX_ITERATIONS: Final = _env_int("SONALITY_RETRIEVAL_MAX_ITERATIONS", 3)
@@ -114,8 +72,7 @@ LLM_REQUEST_TIMEOUT: Final = _env_int("SONALITY_LLM_TIMEOUT", 300)
 # Timeout for async ops dispatched from the sync context via run_coroutine_threadsafe.
 # Must exceed the maximum realistic duration of any single coroutine, which in the
 # worst case is: semaphore_queue_wait + max_retries x LLM_REQUEST_TIMEOUT.
-# Default: 5 x LLM_REQUEST_TIMEOUT covers one queued call (3 retries) + current call
-# (2 retries) with fail-fast TimeoutErrors: 5 x 90 = 450 s.
+# Default: 5 x LLM_REQUEST_TIMEOUT.
 ASYNC_TIMEOUT: Final = _env_int("SONALITY_ASYNC_TIMEOUT", LLM_REQUEST_TIMEOUT * 5)
 
 
