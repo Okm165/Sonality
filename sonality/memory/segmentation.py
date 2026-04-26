@@ -15,7 +15,7 @@ from pydantic import BaseModel
 
 from .. import config
 from ..llm.caller import llm_call
-from ..llm.prompts import BOUNDARY_DETECTION_PROMPT
+from ..prompts import BOUNDARY_DETECTION_PROMPT
 
 log = logging.getLogger(__name__)
 
@@ -25,17 +25,10 @@ class BoundaryDecision(StrEnum):
     CONTINUE = "CONTINUE"
 
 
-class BoundaryType(StrEnum):
-    TOPIC_SHIFT = "topic_shift"
-    GOAL_CHANGE = "goal_change"
-    EXPLICIT_TRANSITION = "explicit_transition"
-    NONE = "none"
-
-
 class BoundaryDetectionResponse(BaseModel):
     boundary_decision: BoundaryDecision = BoundaryDecision.CONTINUE
     confidence: float = 0.0
-    boundary_type: BoundaryType = BoundaryType.NONE
+    boundary_type: str = "none"
     reasoning: str = ""
     suggested_segment_label: str = ""
 
@@ -45,8 +38,6 @@ class BoundaryResult:
     boundary_decision: BoundaryDecision
     segment_id: str
     label: str = ""
-    boundary_type: BoundaryType = BoundaryType.NONE
-    reasoning: str = ""
 
 
 class EventBoundaryDetector:
@@ -85,9 +76,6 @@ class EventBoundaryDetector:
             return BoundaryResult(
                 boundary_decision=BoundaryDecision.BOUNDARY,
                 segment_id=self._current_segment_id,
-                label="",
-                boundary_type=BoundaryType.NONE,
-                reasoning="",
             )
 
         recent_context = "\n".join(self._recent_messages)
@@ -99,7 +87,7 @@ class EventBoundaryDetector:
             prompt=prompt,
             response_model=BoundaryDetectionResponse,
             fallback=BoundaryDetectionResponse(),
-            max_tokens=config.LLM_TOKENS_ROUTING,
+            max_tokens=config.LLM_MAX_TOKENS,
             assistant_prefix='{"boundary_decision": "',
         )
         if not result.success:
@@ -122,8 +110,6 @@ class EventBoundaryDetector:
                 boundary_decision=BoundaryDecision.BOUNDARY,
                 segment_id=self._current_segment_id,
                 label=response.suggested_segment_label or "",
-                boundary_type=response.boundary_type,
-                reasoning=response.reasoning,
             )
 
         return BoundaryResult(

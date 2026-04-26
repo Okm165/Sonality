@@ -15,7 +15,6 @@ from .. import config
 log = logging.getLogger(__name__)
 
 DENSE_MODEL: Final = "BAAI/bge-large-en-v1.5"
-EMBEDDING_DIMS: Final = 1024
 
 
 def cosine_similarity(a: list[float], b: list[float]) -> float:
@@ -24,10 +23,6 @@ def cosine_similarity(a: list[float], b: list[float]) -> float:
     norm_a = math.sqrt(sum(x * x for x in a))
     norm_b = math.sqrt(sum(x * x for x in b))
     return dot / (norm_a * norm_b) if norm_a > 0 and norm_b > 0 else 0.0
-
-
-class EmbeddingUnavailableError(Exception):
-    """Raised when embedding fails."""
 
 
 class Embedder:
@@ -51,7 +46,7 @@ class Embedder:
 
     @property
     def dimensions(self) -> int:
-        return EMBEDDING_DIMS
+        return config.EMBEDDING_DIMENSIONS
 
     def embed_query(self, query: str) -> list[float]:
         """Embed search query (cached)."""

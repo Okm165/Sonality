@@ -1,18 +1,10 @@
 """Knowledge proposition extraction, deduplication, and storage.
 
-Five-stage pipeline synthesizing recent NLP research:
-  1. Selection (Claimify, ACL 2025)
-  2. Decontextualization (FactReasoner, EMNLP 2025; Molecular Facts, EMNLP 2024)
-  3. Decomposition into molecular propositions (Dense X Retrieval, EMNLP 2024)
-  4. Confidence calibration (ConFix, Huawei/Tsinghua 2024)
-  5. Quality gate — reject under-decontextualized props
+Extracts self-contained propositions from text via LLM, deduplicates against
+existing Qdrant store using embedding similarity, and persists new knowledge.
+Long texts use overlapping sliding windows with LLM context summaries.
 
-Deduplication uses embedding similarity (intra-batch + against existing store)
-with canonicalization-aware merging (EDC, 2025).  Long texts are processed
-via overlapping sliding windows (SLIDE, 2025) with LLM-generated context
-summaries to mitigate the "lost in the middle" effect (Liu et al., TACL 2024).
-
-Called inline from agent._post_process when ESS knowledge_density >= LOW.
+Called from agent._extract_knowledge when ESS knowledge_density > NONE.
 """
 
 from __future__ import annotations
@@ -20,26 +12,22 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from collections.abc import Sequence
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any, cast
 
 from pydantic import BaseModel, Field, model_validator
 from qdrant_client import AsyncQdrantClient
-from qdrant_client.models import FieldCondition, Filter, MatchValue, PointIdsList, PointStruct
+from qdrant_client.models import FieldCondition, Filter, MatchValue, PointStruct
 
 from .. import config
 from ..llm.caller import llm_call
-from ..llm.prompts import (
-    KNOWLEDGE_CONSOLIDATION_PROMPT,
+from ..prompts import (
     KNOWLEDGE_EXTRACTION_PROMPT,
     WINDOW_CONTEXT_SUMMARY_PROMPT,
 )
 from ..provider import default_provider
+from ..schema import DENSE_VECTOR, ChatRole, Collection, SemanticCategory
 from .embedder import Embedder, cosine_similarity
-from .sponge import SpongeState
 
 log = logging.getLogger(__name__)
 
@@ -63,10 +51,8 @@ class ExtractedProposition(BaseModel):
     # as facts rather than silently discarded by the NOISE filter.
     type: PropositionType = PropositionType.FACT
     confidence: float = 0.5
-    source_entity: str = ""
     key_concepts: list[str] = Field(default_factory=list)
-    sentiment: float = 1.0  # -1.0 (unfavorable) to +1.0 (favorable), opinions only
-    negation: bool = False  # True if this is a rebuttal/negation of the claim
+    negation: bool = False
 
 
 class ExtractionResponse(BaseModel):
@@ -94,28 +80,6 @@ class ExtractionResponse(BaseModel):
             props = data["propositions"]
             if isinstance(props, list):
                 data = {"propositions": [x for x in props if isinstance(x, dict) and "text" in x]}
-        return data
-
-
-class KnowledgeConsolidation(BaseModel):
-    """LLM consolidation output used during reflection.
-
-    All references use UIDs, not proposition text, for exact matching.
-    """
-
-    contradictions: list[dict[str, str]] = Field(default_factory=list)
-    merges: list[dict[str, object]] = Field(default_factory=list)
-    weak_uids: list[str] = Field(default_factory=list)
-
-    @model_validator(mode="before")
-    @classmethod
-    def filter_nulls(cls, data: object) -> object:
-        """Remove None/null entries from list fields that the LLM occasionally emits."""
-        if not isinstance(data, dict):
-            return data
-        for key in ("contradictions", "merges", "weak_uids"):
-            if isinstance(data.get(key), list):
-                data[key] = [x for x in data[key] if x is not None]
         return data
 
 
@@ -151,11 +115,11 @@ def _split_windows(text: str) -> list[tuple[str, str]]:
                 model=config.FAST_LLM_MODEL,
                 messages=(
                     {
-                        "role": "user",
+                        "role": ChatRole.USER,
                         "content": WINDOW_CONTEXT_SUMMARY_PROMPT.format(text=window_text[:3000]),
                     },
                 ),
-                max_tokens=config.LLM_TOKENS_SUMMARY,
+                max_tokens=config.LLM_MAX_TOKENS,
                 enable_thinking=False,
             )
             prev_summary = result.text.strip()
@@ -189,7 +153,7 @@ def _extract_propositions(text: str, preceding_context: str = "") -> list[Extrac
         prompt=KNOWLEDGE_EXTRACTION_PROMPT.format(text=prompt_text),
         response_model=ExtractionResponse,
         fallback=ExtractionResponse(),
-        max_tokens=config.LLM_TOKENS_EXTRACTION,
+        max_tokens=config.LLM_MAX_TOKENS,
         max_retries=1,  # fail fast; retrying rarely helps prose-drift failures
         assistant_prefix='{"propositions": [',  # prefill forces JSON output, bypasses prose drift
     )
@@ -223,11 +187,11 @@ async def _find_nearest_knowledge(
     Replaces full-scan scroll with O(log N) vector search for scalable dedup.
     """
     response = await qdrant.query_points(
-        collection_name="semantic_features",
+        collection_name=Collection.SEMANTIC_FEATURES,
         query=embedding,
-        using="dense",
+        using=DENSE_VECTOR,
         query_filter=Filter(
-            must=[FieldCondition(key="category", match=MatchValue(value="knowledge"))]
+            must=[FieldCondition(key="category", match=MatchValue(value=SemanticCategory.KNOWLEDGE))]
         ),
         limit=1,
         with_payload=True,
@@ -301,10 +265,10 @@ async def _deduplicate_against_existing(
         try:
             for existing_uid, new_confidence in boosts:
                 results, _ = await qdrant.scroll(
-                    collection_name="semantic_features",
+                    collection_name=Collection.SEMANTIC_FEATURES,
                     scroll_filter=Filter(
                         must=[
-                            FieldCondition(key="category", match=MatchValue(value="knowledge")),
+                            FieldCondition(key="category", match=MatchValue(value=SemanticCategory.KNOWLEDGE)),
                             FieldCondition(key="uid", match=MatchValue(value=existing_uid)),
                         ]
                     ),
@@ -318,7 +282,7 @@ async def _deduplicate_against_existing(
                     old_citations = payload.get("episode_citations", []) or []
                     new_citations = list(dict.fromkeys([*old_citations, episode_uid]))
                     await qdrant.set_payload(
-                        collection_name="semantic_features",
+                        collection_name=Collection.SEMANTIC_FEATURES,
                         payload={
                             "confidence": min(
                                 0.99, max(float(payload.get("confidence") or 0), new_confidence)
@@ -367,7 +331,7 @@ async def _persist_proposition(
     now = datetime.now(UTC).isoformat()
 
     existing, _ = await qdrant.scroll(
-        collection_name="semantic_features",
+        collection_name=Collection.SEMANTIC_FEATURES,
         scroll_filter=Filter(must=[FieldCondition(key="uid", match=MatchValue(value=uid))]),
         limit=1,
         with_payload=True,
@@ -381,10 +345,10 @@ async def _persist_proposition(
 
     point = PointStruct(
         id=uid,
-        vector={"dense": embedding},
+        vector={DENSE_VECTOR: embedding},
         payload={
             "uid": uid,
-            "category": "knowledge",
+            "category": SemanticCategory.KNOWLEDGE,
             "tag": tag,
             "feature_name": feature_name,
             "value": text_to_store,
@@ -394,7 +358,7 @@ async def _persist_proposition(
             "updated_at": now,
         },
     )
-    await qdrant.upsert(collection_name="semantic_features", points=[point])
+    await qdrant.upsert(collection_name=Collection.SEMANTIC_FEATURES, points=[point])
 
 
 # ---------------------------------------------------------------------------
@@ -407,10 +371,6 @@ async def extract_and_store_knowledge(
     episode_uid: str,
     qdrant: AsyncQdrantClient,
     embedder: Embedder,
-    sponge: SpongeState,
-    *,
-    cooling_period: int = 3,
-    stage_opinions: bool = True,
 ) -> int:
     """Full pipeline: window → extract → dedup → store.
 
@@ -419,7 +379,7 @@ async def extract_and_store_knowledge(
       1-3. LLM extraction per window (Claimify three-stage, confidence calibrated by LLM)
       4a. Intra-batch deduplication (across windows)
       4b. Dedup against existing + evidence accumulation (MMA 2025)
-      5. Persist to semantic_features; route opinions to sponge when stage_opinions=True.
+      5. Persist to semantic_features collection in Qdrant.
     """
     windows = _split_windows(text)
     log.debug("Knowledge pipeline: %d windows from %d chars", len(windows), len(text))
@@ -434,13 +394,7 @@ async def extract_and_store_knowledge(
             ", ".join(f"{p.type}:{p.confidence:.2f}" for p in props),
         )
         for p in props:
-            log.debug(
-                "  prop[%s conf=%.2f sent=%+.1f] %s",
-                p.type,
-                p.confidence,
-                p.sentiment,
-                p.text[:100],
-            )
+            log.debug("  prop[%s conf=%.2f] %s", p.type, p.confidence, p.text[:100])
         all_propositions.extend(props)
 
     if not all_propositions:
@@ -464,43 +418,6 @@ async def extract_and_store_knowledge(
             stored += 1
         except Exception:
             log.exception("Failed to persist proposition: %s", prop.text[:60])
-            continue
-
-        combined = abs(prop.sentiment) * prop.confidence
-        is_user_opinion = prop.source_entity.lower() == "user"
-        if prop.type == PropositionType.OPINION and prop.key_concepts and combined >= 0.20:
-            if is_user_opinion:
-                log.debug(
-                    "  opinion skipped (user source): topic=%s combined=%.3f",
-                    prop.key_concepts[0],
-                    combined,
-                )
-                continue
-            if stage_opinions:
-                topic = prop.key_concepts[0]
-                direction = 1.0 if prop.sentiment > 0 else -1.0
-                magnitude = combined * 0.3
-                sponge.stage_opinion_update(
-                    topic=topic,
-                    direction=direction,
-                    magnitude=magnitude,
-                    cooling_period=cooling_period,
-                    provenance=f"knowledge_extraction: {prop.text[:80]}",
-                )
-                log.debug(
-                    "  opinion staged: topic=%s dir=%+.1f mag=%.3f combined=%.3f src=%s",
-                    topic,
-                    direction,
-                    magnitude,
-                    combined,
-                    prop.source_entity,
-                )
-            else:
-                log.debug(
-                    "  opinion skipped (facts-only): topic=%s combined=%.3f",
-                    prop.key_concepts[0],
-                    combined,
-                )
 
     intra_dedup = len(all_propositions) - len(batch)
     evidence_boosted = len(batch) - len(kept)
@@ -512,169 +429,6 @@ async def extract_and_store_knowledge(
         stored,
     )
     return stored
-
-
-# ---------------------------------------------------------------------------
-# Consolidation (called during reflection)
-# ---------------------------------------------------------------------------
-
-
-async def consolidate_knowledge(
-    qdrant: AsyncQdrantClient,
-    snapshot: str,
-    limit: int = 50,
-) -> KnowledgeConsolidation:
-    """Review stored propositions for contradictions and merges, then apply.
-
-    Executes merge and prune actions directly in Qdrant so the knowledge
-    base stays tidy across reflection cycles.
-    """
-    results, _ = await qdrant.scroll(
-        collection_name="semantic_features",
-        scroll_filter=Filter(
-            must=[FieldCondition(key="category", match=MatchValue(value="knowledge"))]
-        ),
-        limit=limit,
-        with_payload=True,
-    )
-
-    if len(results) < 2:
-        return KnowledgeConsolidation()
-
-    rows = [
-        (
-            p.payload.get("uid"),
-            p.payload.get("tag"),
-            p.payload.get("value"),
-            p.payload.get("confidence"),
-        )
-        for p in results
-        if p.payload
-    ]
-    rows.sort(key=lambda r: -(r[3] or 0))
-
-    valid_uids = {str(row[0]) for row in rows if row[0]}
-    propositions_text = "\n".join(
-        f"[{row[0]}] [{row[1]}] {row[2]} (confidence={row[3]:.2f})" for row in rows if row[0]
-    )
-
-    result = await asyncio.to_thread(
-        llm_call,
-        prompt=KNOWLEDGE_CONSOLIDATION_PROMPT.format(
-            propositions=propositions_text,
-            snapshot=snapshot,
-        ),
-        response_model=KnowledgeConsolidation,
-        fallback=KnowledgeConsolidation(),
-        assistant_prefix='{"contradictions": [',
-    )
-    if not result.success:
-        log.warning("Knowledge consolidation parse failed: %s", result.error)
-        return KnowledgeConsolidation()
-    consolidation = result.value
-
-    uids_to_delete: list[str] = []
-
-    for uid in consolidation.weak_uids:
-        if uid in valid_uids:
-            uids_to_delete.append(uid)
-        else:
-            log.debug("Consolidation: unknown weak UID skipped: %s", uid)
-
-    for contradiction in consolidation.contradictions:
-        keep = contradiction.get("keep", "").lower()
-        a_uid = contradiction.get("a_uid", "")
-        b_uid = contradiction.get("b_uid", "")
-        loser_uid = b_uid if keep == "a" else a_uid if keep == "b" else ""
-        if loser_uid and loser_uid in valid_uids:
-            uids_to_delete.append(loser_uid)
-            log.info("Contradiction resolved: pruning uid=%s", loser_uid[:8])
-
-    if uids_to_delete:
-        try:
-            await qdrant.delete(
-                collection_name="semantic_features",
-                points_selector=PointIdsList(points=cast(Sequence[str | int], uids_to_delete)),  # type: ignore[arg-type]
-            )
-            log.info(
-                "Consolidation: pruned %d entries (weak + contradictions)", len(uids_to_delete)
-            )
-        except Exception:
-            log.debug("Failed to prune entries", exc_info=True)
-
-    deleted_uids = set(uids_to_delete)
-    merge_updates: list[tuple[str, str]] = []
-    for merge in consolidation.merges:
-        source_uids = merge.get("source_uids", [])
-        merged_text = merge.get("merged", "")
-        if not source_uids or not merged_text or not isinstance(source_uids, list):
-            continue
-        merge_uid = next(
-            (
-                u
-                for u in source_uids
-                if isinstance(u, str) and u in valid_uids and u not in deleted_uids
-            ),
-            None,
-        )
-        if merge_uid:
-            merge_updates.append((str(merged_text), merge_uid))
-            log.info("Consolidation: merged uid=%s -> '%s'", merge_uid[:8], str(merged_text)[:50])
-    if merge_updates:
-        for merged_text, uid in merge_updates:
-            try:
-                await qdrant.set_payload(
-                    collection_name="semantic_features",
-                    payload={"value": merged_text, "updated_at": datetime.now(UTC).isoformat()},
-                    points=[uid],
-                )
-            except Exception:
-                log.debug("Failed to apply merge for uid=%s (may have been deleted)", uid[:8])
-
-    log.info(
-        "Knowledge consolidation: %d contradictions resolved, %d merges, %d pruned",
-        len(consolidation.contradictions),
-        len(consolidation.merges),
-        len(uids_to_delete),
-    )
-    return consolidation
-
-
-# ---------------------------------------------------------------------------
-# Reflection: prune stale/low-quality knowledge from Qdrant
-# ---------------------------------------------------------------------------
-
-
-async def prune_stale_knowledge(
-    qdrant: AsyncQdrantClient,
-    min_confidence: float = 0.2,
-) -> int:
-    """Remove low-confidence knowledge entries.
-
-    Called during reflection to keep the knowledge store lean and accurate.
-    """
-    results, _ = await qdrant.scroll(
-        collection_name="semantic_features",
-        scroll_filter=Filter(
-            must=[FieldCondition(key="category", match=MatchValue(value="knowledge"))]
-        ),
-        limit=1000,
-        with_payload=["uid", "confidence"],
-    )
-    to_delete = [
-        str(p.payload.get("uid"))
-        for p in results
-        if p.payload and float(p.payload.get("confidence", 1.0)) < min_confidence
-    ]
-    if to_delete:
-        await qdrant.delete(
-            collection_name="semantic_features",
-            points_selector=PointIdsList(points=cast(Sequence[str | int], to_delete)),  # type: ignore[arg-type]
-        )
-    pruned = len(to_delete)
-    if pruned:
-        log.info("Knowledge pruning: removed %d low-confidence stale entries", pruned)
-    return pruned
 
 
 # ---------------------------------------------------------------------------
@@ -702,11 +456,11 @@ async def retrieve_relevant_knowledge(
         return []
 
     response = await qdrant.query_points(
-        collection_name="semantic_features",
+        collection_name=Collection.SEMANTIC_FEATURES,
         query=query_embedding,
-        using="dense",
+        using=DENSE_VECTOR,
         query_filter=Filter(
-            must=[FieldCondition(key="category", match=MatchValue(value="knowledge"))]
+            must=[FieldCondition(key="category", match=MatchValue(value=SemanticCategory.KNOWLEDGE))]
         ),
         limit=top_k,
         score_threshold=min_confidence,
@@ -743,115 +497,3 @@ async def retrieve_relevant_knowledge(
         f"[{tag}] (confidence={confidence:.2f}) {value}"
         for tag, value, confidence, _similarity in rows
     ]
-
-
-# ---------------------------------------------------------------------------
-# Correlation Detection (called during reflection or on-demand)
-# ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True, slots=True)
-class DetectedCorrelation:
-    """A correlation detected between two belief topics."""
-
-    topic_a: str
-    topic_b: str
-    correlation_type: str  # CORRELATES_WITH, ANTI_CORRELATES_WITH, CAUSALLY_LINKED
-    strength: float
-    reasoning: str
-
-
-class CorrelationDetectionResponse(BaseModel):
-    """LLM response for correlation detection."""
-
-    correlations: list[dict[str, Any]] = Field(default_factory=list)
-
-
-async def detect_correlations(
-    qdrant: AsyncQdrantClient,
-    topics: list[str],
-    min_confidence: float = 0.40,
-) -> list[DetectedCorrelation]:
-    """Detect correlations between topics based on stored knowledge.
-
-    Uses the LLM to analyze stored propositions and identify causal,
-    correlative, or anti-correlative relationships between topics.
-    """
-    from ..llm.prompts import CORRELATION_DETECTION_PROMPT
-
-    if len(topics) < 2:
-        return []
-
-    results, _ = await qdrant.scroll(
-        collection_name="semantic_features",
-        scroll_filter=Filter(
-            must=[FieldCondition(key="category", match=MatchValue(value="knowledge"))]
-        ),
-        limit=100,
-        with_payload=["value", "confidence"],
-    )
-    rows = [
-        (p.payload.get("value"), float(p.payload.get("confidence", 0)))
-        for p in results
-        if p.payload and float(p.payload.get("confidence", 0)) >= min_confidence
-    ]
-    rows.sort(key=lambda r: -r[1])
-
-    if len(rows) < 3:
-        log.debug("Correlation detection: insufficient knowledge (%d props)", len(rows))
-        return []
-
-    propositions_text = "\n".join(f"- {row[0]} (conf={row[1]:.2f})" for row in rows)
-    topics_text = ", ".join(topics)
-
-    result = await asyncio.to_thread(
-        llm_call,
-        prompt=CORRELATION_DETECTION_PROMPT.format(
-            propositions=propositions_text,
-            topics=topics_text,
-        ),
-        response_model=CorrelationDetectionResponse,
-        fallback=CorrelationDetectionResponse(),
-        assistant_prefix='{"correlations": [',
-    )
-
-    if not result.success:
-        log.warning("Correlation detection failed: %s", result.error)
-        return []
-
-    detected: list[DetectedCorrelation] = []
-    valid_types = {"CORRELATES_WITH", "ANTI_CORRELATES_WITH", "CAUSALLY_LINKED"}
-
-    for corr in result.value.correlations:
-        try:
-            corr_type = str(corr.get("type", "")).upper()
-            if corr_type not in valid_types:
-                continue
-            strength = float(corr.get("strength") or 0.0)
-            if strength < 0.3:
-                continue
-            correlation = DetectedCorrelation(
-                topic_a=str(corr.get("topic_a", "")),
-                topic_b=str(corr.get("topic_b", "")),
-                correlation_type=corr_type,
-                strength=min(1.0, max(0.0, strength)),
-                reasoning=str(corr.get("reasoning", ""))[:200],
-            )
-            detected.append(correlation)
-            log.debug(
-                "Correlation detected: %s -[%s]-> %s (strength=%.2f)",
-                correlation.topic_a,
-                correlation.correlation_type,
-                correlation.topic_b,
-                correlation.strength,
-            )
-        except (ValueError, TypeError):
-            continue
-
-    log.info(
-        "Correlation detection: found %d correlations among %d topics from %d propositions",
-        len(detected),
-        len(topics),
-        len(rows),
-    )
-    return detected

@@ -9,16 +9,15 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import cast
+from typing import NamedTuple
+from uuid import UUID
 
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.models import (
     FieldCondition,
     Filter,
-    MatchText,
     MatchValue,
     PointIdsList,
     PointStruct,
@@ -27,8 +26,9 @@ from qdrant_client.models import (
 )
 
 from .. import config
-from .derivatives import DerivativeChunker, DerivativeWithEmbedding
-from .embedder import Embedder, EmbeddingUnavailableError
+from ..schema import DENSE_VECTOR, Collection
+from .derivatives import DerivativeWithEmbedding, chunk_and_embed
+from .embedder import Embedder
 from .graph import EpisodeNode, MemoryGraph
 
 log = logging.getLogger(__name__)
@@ -36,6 +36,14 @@ log = logging.getLogger(__name__)
 
 class EpisodeStorageError(Exception):
     """Raised when episode storage fails at any phase."""
+
+
+class SearchHit(NamedTuple):
+    """A derivative match from vector search."""
+
+    uid: str
+    episode_uid: str
+    score: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,15 +65,18 @@ class DualEpisodeStore:
         self,
         graph: MemoryGraph,
         qdrant: AsyncQdrantClient,
-        chunker: DerivativeChunker,
         embedder: Embedder,
     ) -> None:
         self._graph = graph
         self._qdrant = qdrant
-        self._chunker = chunker
         self._embedder = embedder
         self._last_episode_uid = ""
         self.has_episodes = False
+
+    def restore_last_episode(self, uid: str) -> None:
+        """Re-link to the last stored episode after restart."""
+        self._last_episode_uid = uid
+        self.has_episodes = True
 
     async def store(
         self,
@@ -77,7 +88,6 @@ class DualEpisodeStore:
         ess_score: float,
         segment_id: str = "",
         segment_label: str = "",
-        segment_reasoning: str = "",
     ) -> StoredEpisode:
         """Store an episode with derivatives in both Neo4j and Qdrant.
 
@@ -89,12 +99,10 @@ class DualEpisodeStore:
 
         try:
             derivatives = await asyncio.to_thread(
-                self._chunker.chunk_and_embed, content, episode_uid
+                chunk_and_embed, self._embedder, content, episode_uid
             )
-        except EmbeddingUnavailableError as exc:
-            raise EpisodeStorageError(f"Embedding failed: {exc}") from exc
         except Exception as exc:
-            raise EpisodeStorageError(f"Chunking failed: {exc}") from exc
+            raise EpisodeStorageError(f"Chunking/embedding failed: {exc}") from exc
 
         if not derivatives:
             raise EpisodeStorageError("No derivatives produced from chunking")
@@ -150,7 +158,6 @@ class DualEpisodeStore:
                 topics=topics,
                 segment_id=segment_id,
                 segment_label=segment_label,
-                segment_reasoning=segment_reasoning,
             )
         except Exception as exc:
             log.error("Neo4j write failed for episode %s: %s", episode_uid[:8], exc)
@@ -180,28 +187,14 @@ class DualEpisodeStore:
         self,
         query: str,
         top_k: int = 20,
-        text_filter: bool = False,
-    ) -> list[tuple[str, str, float]]:
-        """Search Qdrant for similar derivatives using dense vectors.
-
-        Returns (uid, episode_uid, score).
-        """
-        try:
-            query_embedding = await asyncio.to_thread(self._embedder.embed_query, query)
-        except Exception:
-            log.debug("Embedding unavailable; falling back to text-only search", exc_info=True)
-            return await self._text_only_search(query, top_k)
-
-        must: list[FieldCondition] = [FieldCondition(key="archived", match=MatchValue(value=False))]
-        should: list[FieldCondition] | None = (
-            [FieldCondition(key="text", match=MatchText(text=query))] if text_filter else None
-        )
-
+    ) -> list[SearchHit]:
+        """Search Qdrant for similar derivatives using dense vectors."""
+        query_embedding = await asyncio.to_thread(self._embedder.embed_query, query)
         response = await self._qdrant.query_points(
-            collection_name="derivatives",
+            collection_name=Collection.DERIVATIVES,
             query=query_embedding,
-            using="dense",
-            query_filter=Filter(must=must, should=should),  # type: ignore[arg-type]
+            using=DENSE_VECTOR,
+            query_filter=Filter(must=[FieldCondition(key="archived", match=MatchValue(value=False))]),
             limit=top_k,
             with_payload=True,
             search_params=SearchParams(
@@ -212,82 +205,48 @@ class DualEpisodeStore:
                 ),
             ),
         )
-        return [
-            (str(p.payload.get("uid", "")), str(p.payload.get("episode_uid", "")), p.score or 0.0)
+        hits = [
+            SearchHit(str(p.payload.get("uid", "")), str(p.payload.get("episode_uid", "")), p.score or 0.0)
             for p in response.points
             if p.payload
         ]
-
-    async def _text_only_search(self, query: str, top_k: int) -> list[tuple[str, str, float]]:
-        """Keyword-based fallback when embedding service is unavailable."""
-        results, _ = await self._qdrant.scroll(
-            collection_name="derivatives",
-            scroll_filter=Filter(
-                must=[
-                    FieldCondition(key="archived", match=MatchValue(value=False)),
-                    FieldCondition(key="text", match=MatchText(text=query)),
-                ]
-            ),
-            limit=top_k,
-            with_payload=True,
-        )
-        return [
-            (str(p.payload.get("uid", "")), str(p.payload.get("episode_uid", "")), 0.5)
-            for p in results
-            if p.payload
-        ]
+        log.debug("Qdrant vector_search top_k=%d hits=%d", top_k, len(hits))
+        return hits
 
     async def archive_derivatives(self, episode_uid: str) -> None:
         """Mark derivatives as archived in Qdrant (soft delete)."""
-        points, _ = await self._qdrant.scroll(
-            collection_name="derivatives",
-            scroll_filter=Filter(
-                must=[FieldCondition(key="episode_uid", match=MatchValue(value=episode_uid))]
-            ),
-            limit=1000,
+        filt = Filter(
+            must=[FieldCondition(key="episode_uid", match=MatchValue(value=episode_uid))]
         )
-        if points:
-            await self._qdrant.set_payload(
-                collection_name="derivatives",
-                payload={"archived": True},
-                points=[p.id for p in points if p.id is not None],
+        all_ids: list[int | str | UUID] = []
+        offset = None
+        while True:
+            points, offset = await self._qdrant.scroll(
+                collection_name=Collection.DERIVATIVES,
+                scroll_filter=filt,
+                limit=500,
+                offset=offset,
             )
+            all_ids.extend(str(p.id) for p in points if p.id is not None)
+            if offset is None:
+                break
+        if all_ids:
+            await self._qdrant.set_payload(
+                collection_name=Collection.DERIVATIVES,
+                payload={"archived": True},
+                points=PointIdsList(points=all_ids),
+            )
+            log.info("Qdrant archive_derivatives episode=%s points=%d", episode_uid[:8], len(all_ids))
 
     async def delete_derivatives(self, episode_uid: str) -> None:
         """Hard-delete derivatives by episode UID from Qdrant."""
         await self._qdrant.delete(
-            collection_name="derivatives",
+            collection_name=Collection.DERIVATIVES,
             points_selector=Filter(
                 must=[FieldCondition(key="episode_uid", match=MatchValue(value=episode_uid))]
             ),
         )
-
-    async def verify_consistency(self) -> list[str]:
-        """Check Neo4j-Qdrant sync and clean orphan derivatives."""
-        results, _ = await self._qdrant.scroll(
-            collection_name="derivatives",
-            limit=10000,
-            with_payload=["uid"],
-        )
-        qdrant_uids = {str(p.payload.get("uid", "")) for p in results if p.payload}
-
-        neo4j_uids = await self._graph.list_derivative_uids()
-
-        qdrant_only = sorted(qdrant_uids - neo4j_uids)
-        neo4j_only = sorted(neo4j_uids - qdrant_uids)
-
-        if qdrant_only:
-            await self._qdrant.delete(
-                collection_name="derivatives",
-                points_selector=PointIdsList(points=cast(Sequence[str | int], qdrant_only)),  # type: ignore[arg-type]
-            )
-            log.warning("Cleaned %d Qdrant-only orphan derivatives", len(qdrant_only))
-
-        if neo4j_only:
-            await self._graph.delete_derivatives(neo4j_only)
-            log.warning("Cleaned %d Neo4j-only orphan derivatives", len(neo4j_only))
-
-        return [*qdrant_only, *neo4j_only]
+        log.warning("Qdrant delete_derivatives episode=%s", episode_uid[:8])
 
     async def _insert_derivatives_qdrant(
         self, derivatives: list[DerivativeWithEmbedding], created_at: str
@@ -296,7 +255,7 @@ class DualEpisodeStore:
         points = [
             PointStruct(
                 id=d.node.uid,
-                vector={"dense": d.embedding},
+                vector={DENSE_VECTOR: d.embedding},
                 payload={
                     "uid": d.node.uid,
                     "episode_uid": d.node.source_episode_uid,
@@ -309,4 +268,4 @@ class DualEpisodeStore:
             )
             for d in derivatives
         ]
-        await self._qdrant.upsert(collection_name="derivatives", points=points)
+        await self._qdrant.upsert(collection_name=Collection.DERIVATIVES, points=points)

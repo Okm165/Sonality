@@ -1,44 +1,42 @@
-"""LLM-based forgetting engine with archival and hard-forget decisions.
+"""LLM-based forgetting with archival and hard-forget decisions.
 
-Replaces formula-based importance scoring with LLM holistic assessment.
-Supports both ARCHIVE (soft delete) and FORGET (hard delete) actions.
+Uses batch LLM assessment to decide which low-utility episodes to archive
+or permanently forget. Supports both ARCHIVE (soft) and FORGET (hard) actions.
 """
 
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
 from enum import StrEnum
 
 from pydantic import BaseModel, model_validator
 
 from ..llm.caller import llm_call
-from ..llm.prompts import BATCH_FORGETTING_PROMPT
+from ..prompts import BATCH_FORGETTING_PROMPT
 from .dual_store import DualEpisodeStore
 from .graph import EpisodeNode, MemoryGraph
 
 log = logging.getLogger(__name__)
 
 
-class ForgettingAction(StrEnum):
+class _Action(StrEnum):
     KEEP = "KEEP"
     ARCHIVE = "ARCHIVE"
     FORGET = "FORGET"
 
 
-class ForgettingDecision(BaseModel):
+class _Decision(BaseModel):
     uid: str
-    action: ForgettingAction = ForgettingAction.KEEP
+    action: _Action = _Action.KEEP
     reason: str = ""
 
 
-class BatchForgettingResponse(BaseModel):
-    decisions: list[ForgettingDecision]
+class _BatchResponse(BaseModel):
+    decisions: list[_Decision]
 
     @model_validator(mode="before")
     @classmethod
-    def normalize_decisions(cls, data: object) -> object:
-        """Handle LLM responses that omit the outer decisions wrapper."""
+    def normalize(cls, data: object) -> object:
         if isinstance(data, list):
             return {"decisions": data}
         if isinstance(data, dict) and "uid" in data and "decisions" not in data:
@@ -46,118 +44,73 @@ class BatchForgettingResponse(BaseModel):
         return data
 
 
-@dataclass(frozen=True, slots=True)
-class ForgettingResult:
-    """Result of a forgetting cycle."""
+async def assess_and_forget(
+    candidates: list[EpisodeNode],
+    graph: MemoryGraph,
+    store: DualEpisodeStore,
+    snapshot_excerpt: str = "",
+) -> None:
+    """Assess episode candidates and archive/forget low-importance ones."""
+    if not candidates:
+        return
 
-    kept: int
-    archived: int
-    total_assessed: int
+    candidates_summary = "\n\n".join(
+        f"UID: {ep.uid}\n"
+        f"Content: {ep.content[:200]}\n"
+        f"Topics: {', '.join(ep.topics)}\n"
+        f"ESS: {ep.ess_score:.2f} | Access count: {ep.access_count} | "
+        f"Last accessed: {ep.last_accessed or 'never'} | "
+        f"Consolidation: L{ep.consolidation_level}"
+        for ep in candidates
+    )
+    result = llm_call(
+        prompt=BATCH_FORGETTING_PROMPT.format(
+            candidates_summary=candidates_summary,
+            snapshot_excerpt=snapshot_excerpt or "No snapshot available",
+        ),
+        response_model=_BatchResponse,
+        assistant_prefix='{"decisions": [',
+        fallback=_BatchResponse(
+            decisions=[_Decision(uid=ep.uid, reason="Fallback: retain all") for ep in candidates]
+        ),
+    )
+    raw_decisions = (
+        result.value.decisions
+        if result.success
+        else [_Decision(uid=ep.uid, reason="Assessment failed") for ep in candidates]
+    )
 
+    candidate_uids = {ep.uid for ep in candidates}
+    seen: set[str] = set()
+    decisions: list[_Decision] = []
+    for d in raw_decisions:
+        uid = d.uid.strip()
+        if uid not in candidate_uids:
+            log.warning("Ignoring forgetting decision for unknown UID: %s", uid)
+            continue
+        decisions.append(_Decision(uid=uid, action=d.action, reason=d.reason.strip()))
+        seen.add(uid)
+    for ep in candidates:
+        if ep.uid not in seen:
+            decisions.append(_Decision(uid=ep.uid, reason="Missing decision; default keep"))
 
-class ForgettingEngine:
-    """LLM-based importance assessment with archive/forget actions."""
+    archived = 0
+    kept = 0
+    for decision in decisions:
+        if decision.action not in {_Action.ARCHIVE, _Action.FORGET}:
+            kept += 1
+            continue
+        try:
+            if decision.action is _Action.ARCHIVE:
+                await graph.archive_episode(decision.uid)
+                await store.archive_derivatives(decision.uid)
+            else:
+                await graph.delete_episode(decision.uid)
+                await store.delete_derivatives(decision.uid)
+            archived += 1
+            log.info("%s episode %s: %s", decision.action.value, decision.uid[:8], decision.reason)
+        except Exception:
+            log.exception("Failed to %s episode %s", decision.action.value.lower(), decision.uid[:8])
+            kept += 1
 
-    def __init__(self, graph: MemoryGraph, store: DualEpisodeStore) -> None:
-        self._graph = graph
-        self._store = store
-
-    async def assess_and_forget(
-        self,
-        candidates: list[EpisodeNode],
-        snapshot_excerpt: str = "",
-    ) -> ForgettingResult:
-        """Assess a batch of episode candidates and archive low-importance ones.
-
-        Uses batch LLM assessment for efficiency. Foundational episodes are
-        always retained regardless of other signals.
-        """
-        if not candidates:
-            return ForgettingResult(kept=0, archived=0, total_assessed=0)
-
-        # Batch LLM assessment
-        candidates_summary = "\n\n".join(
-            f"UID: {ep.uid}\n"
-            f"Content: {ep.content[:200]}\n"
-            f"Topics: {', '.join(ep.topics)}\n"
-            f"ESS: {ep.ess_score:.2f} | Access count: {ep.access_count} | "
-            f"Last accessed: {ep.last_accessed or 'never'} | "
-            f"Consolidation: L{ep.consolidation_level}"
-            for ep in candidates
-        )
-        result = llm_call(
-            prompt=BATCH_FORGETTING_PROMPT.format(
-                candidates_summary=candidates_summary,
-                snapshot_excerpt=snapshot_excerpt or "No snapshot available",
-            ),
-            response_model=BatchForgettingResponse,
-            assistant_prefix='{"decisions": [',
-            fallback=BatchForgettingResponse(
-                decisions=[
-                    ForgettingDecision(
-                        uid=ep.uid, action=ForgettingAction.KEEP, reason="Fallback: retain all"
-                    )
-                    for ep in candidates
-                ]
-            ),
-        )
-        raw_decisions = (
-            result.value.decisions
-            if result.success
-            else [
-                ForgettingDecision(
-                    uid=ep.uid, action=ForgettingAction.KEEP, reason="Assessment failed"
-                )
-                for ep in candidates
-            ]
-        )
-
-        # Validate and fill missing decisions
-        candidate_uids = {ep.uid for ep in candidates}
-        seen: set[str] = set()
-        decisions: list[ForgettingDecision] = []
-        for d in raw_decisions:
-            uid = d.uid.strip()
-            if uid not in candidate_uids:
-                log.warning("Ignoring forgetting decision for unknown UID: %s", uid)
-                continue
-            decisions.append(ForgettingDecision(uid=uid, action=d.action, reason=d.reason.strip()))
-            seen.add(uid)
-        for ep in candidates:
-            if ep.uid not in seen:
-                decisions.append(
-                    ForgettingDecision(
-                        uid=ep.uid,
-                        action=ForgettingAction.KEEP,
-                        reason="Missing decision; default keep",
-                    )
-                )
-
-        # Execute actions
-        archived = 0
-        kept = 0
-        for decision in decisions:
-            if decision.action not in {ForgettingAction.ARCHIVE, ForgettingAction.FORGET}:
-                kept += 1
-                continue
-            try:
-                if decision.action is ForgettingAction.ARCHIVE:
-                    await self._graph.archive_episode(decision.uid)
-                    await self._store.archive_derivatives(decision.uid)
-                    label = "Archived"
-                else:
-                    await self._graph.delete_episode(decision.uid)
-                    await self._store.delete_derivatives(decision.uid)
-                    label = "Forgot"
-                archived += 1
-                log.info("%s episode %s: %s", label, decision.uid[:8], decision.reason)
-            except Exception:
-                log.exception(
-                    "Failed to %s episode %s", decision.action.value.lower(), decision.uid[:8]
-                )
-                kept += 1
-
-        log.info(
-            "Forgetting cycle: %d assessed, %d kept, %d archived", len(candidates), kept, archived
-        )
-        return ForgettingResult(kept=kept, archived=archived, total_assessed=len(candidates))
+    log.info("Forgetting cycle: %d assessed, %d kept, %d archived", len(candidates), kept, archived)

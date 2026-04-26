@@ -25,14 +25,15 @@ from qdrant_client.models import FieldCondition, Filter, MatchValue, PointStruct
 
 from .. import config
 from ..llm.caller import llm_call
-from ..llm.prompts import FEATURE_CONSOLIDATION_PROMPT, FEATURE_EXTRACTION_PROMPT, FEATURE_TAGS
-from ..provider import interaction_active, llm_semaphore_idle
+from ..prompts import FEATURE_CONSOLIDATION_PROMPT, FEATURE_EXTRACTION_PROMPT, FEATURE_TAGS
+from ..provider import interaction_in_progress, llm_semaphore_idle
+from ..schema import DENSE_VECTOR, Collection, SemanticCategory
 from .embedder import Embedder
 
 _T = TypeVar("_T")
 log = logging.getLogger(__name__)
 
-SEMANTIC_CATEGORIES: list[str] = ["personality", "preferences", "knowledge", "relationships"]
+SEMANTIC_CATEGORIES: list[SemanticCategory] = list(SemanticCategory)
 
 
 class FeatureCommandType(StrEnum):
@@ -123,7 +124,7 @@ class SemanticIngestionWorker:
     ) -> None:
         self._embedder = embedder
         self._qdrant = AsyncQdrantClient(url=qdrant_url)
-        self._queue: queue.Queue[tuple[str, str, tuple[str, ...]]] = queue.Queue()
+        self._queue: queue.Queue[tuple[str, str, tuple[SemanticCategory, ...]]] = queue.Queue()
         self._loop = asyncio.new_event_loop()
         self._loop_thread = threading.Thread(
             target=self._loop.run_forever, name="semantic-ingestion-loop", daemon=True
@@ -162,27 +163,6 @@ class SemanticIngestionWorker:
             await asyncio.gather(*tasks, return_exceptions=True)
         await self._qdrant.close()
 
-    def drain(self, timeout: float = 120.0) -> bool:
-        """Block until all queued items are processed or timeout expires.
-
-        Returns True if the queue was fully drained.
-        Must be called before stop() to ensure background feature extraction completes.
-        """
-        done = threading.Event()
-
-        def _join() -> None:
-            self._queue.join()
-            done.set()
-
-        t = threading.Thread(target=_join, daemon=True)
-        t.start()
-        drained = done.wait(timeout=timeout)
-        if not drained:
-            log.warning(
-                "Semantic worker drain timed out after %.0fs; queue may have pending items", timeout
-            )
-        return drained
-
     def stop(self) -> None:
         self._stop_event.set()
         if self._thread.is_alive():
@@ -204,7 +184,7 @@ class SemanticIngestionWorker:
         self,
         episode_uid: str,
         content: str,
-        categories: tuple[str, ...] = (),
+        categories: tuple[SemanticCategory, ...] = (),
     ) -> None:
         self._queue.put((episode_uid, content, categories))
 
@@ -222,10 +202,10 @@ class SemanticIngestionWorker:
                 except queue.Empty:
                     break
 
-            requeue: list[tuple[str, str, tuple[str, ...]]] = []
+            requeue: list[tuple[str, str, tuple[SemanticCategory, ...]]] = []
             for item in batch:
                 episode_uid, content, categories = item
-                if interaction_active.is_set():
+                if interaction_in_progress():
                     log.debug("Semantic worker deferring: interaction active")
                     requeue.append(item)
                 else:
@@ -246,14 +226,14 @@ class SemanticIngestionWorker:
         self,
         episode_uid: str,
         content: str,
-        categories: tuple[str, ...],
+        categories: tuple[SemanticCategory, ...],
     ) -> None:
         target_cats = list(categories) if categories else SEMANTIC_CATEGORIES
         for category in target_cats:
             if self._stop_event.is_set():
                 log.debug("Semantic worker stopping mid-episode at category=%s", category)
                 return
-            if interaction_active.is_set():
+            if interaction_in_progress():
                 log.debug(
                     "Semantic worker pausing mid-episode: interaction active at category=%s",
                     category,
@@ -271,18 +251,17 @@ class SemanticIngestionWorker:
                     category,
                 )
 
-    def _extract_features(self, episode_uid: str, content: str, category: str) -> None:
+    def _extract_features(self, episode_uid: str, content: str, category: SemanticCategory) -> None:
         if self._stop_event.is_set():
             return
-        # Skip immediately if the main interaction thread holds the LLM semaphore.
-        # Each category makes one LLM call; waiting up to 4x90 s blocks foreground
-        # routing and knowledge-extraction calls. Defer to the next poll cycle instead.
         if not llm_semaphore_idle():
             log.debug(
-                "LLM busy; skipping semantic feature extraction for episode=%s category=%s",
+                "LLM busy; re-queuing episode=%s from category=%s",
                 episode_uid[:8],
                 category,
             )
+            remaining = SEMANTIC_CATEGORIES[SEMANTIC_CATEGORIES.index(category):]
+            self._queue.put((episode_uid, content, tuple(remaining)))
             return
         existing = self._load_existing_features(category)
         tags = FEATURE_TAGS.get(category, "")
@@ -300,7 +279,7 @@ class SemanticIngestionWorker:
             prompt=prompt,
             response_model=FeatureExtractionResponse,
             fallback=FeatureExtractionResponse(),
-            max_tokens=config.LLM_TOKENS_EXTRACTION,
+            max_tokens=config.LLM_MAX_TOKENS,
             max_retries=1,
             assistant_prefix='{"commands": [',
         )
@@ -420,7 +399,7 @@ class SemanticIngestionWorker:
             prompt=FEATURE_CONSOLIDATION_PROMPT.format(category=category, features=features_text),
             response_model=FeatureConsolidationResponse,
             fallback=FeatureConsolidationResponse(),
-            max_tokens=config.LLM_TOKENS_EXTRACTION,
+            max_tokens=config.LLM_MAX_TOKENS,
             max_retries=1,
             assistant_prefix='{"consolidation_decision": "',
         )
@@ -446,7 +425,7 @@ class SemanticIngestionWorker:
 
     async def _load_feature_rows_async(self, category: str, limit: int) -> list[SemanticFeatureRow]:
         results, _ = await self._qdrant.scroll(
-            collection_name="semantic_features",
+            collection_name=Collection.SEMANTIC_FEATURES,
             scroll_filter=Filter(
                 must=[FieldCondition(key="category", match=MatchValue(value=category))]
             ),
@@ -482,7 +461,7 @@ class SemanticIngestionWorker:
         action: FeatureConsolidationAction,
     ) -> None:
         results, _ = await self._qdrant.scroll(
-            collection_name="semantic_features",
+            collection_name=Collection.SEMANTIC_FEATURES,
             scroll_filter=Filter(
                 must=[
                     FieldCondition(key="category", match=MatchValue(value=category)),
@@ -498,7 +477,7 @@ class SemanticIngestionWorker:
         citations = list(target.get("episode_citations", []))
         confidence = max(float(target.get("confidence", 0.0)), 0.5)
         await self._qdrant.set_payload(
-            collection_name="semantic_features",
+            collection_name=Collection.SEMANTIC_FEATURES,
             payload={
                 "tag": action.canonical_tag or target.get("tag", ""),
                 "feature_name": action.canonical_feature or target.get("feature_name", ""),
@@ -510,7 +489,7 @@ class SemanticIngestionWorker:
             points=[target_uid],
         )
         await self._qdrant.delete(
-            collection_name="semantic_features",
+            collection_name=Collection.SEMANTIC_FEATURES,
             points_selector=Filter(
                 must=[FieldCondition(key="uid", match=MatchValue(value=source_uid))]
             ),
@@ -526,7 +505,7 @@ class SemanticIngestionWorker:
 
         if cmd.command in {FeatureCommandType.ADD, FeatureCommandType.UPDATE}:
             existing, _ = await self._qdrant.scroll(
-                collection_name="semantic_features",
+                collection_name=Collection.SEMANTIC_FEATURES,
                 scroll_filter=Filter(
                     must=[FieldCondition(key="uid", match=MatchValue(value=feature_uid))]
                 ),
@@ -541,7 +520,7 @@ class SemanticIngestionWorker:
 
             point = PointStruct(
                 id=feature_uid,
-                vector={"dense": embedding},
+                vector={DENSE_VECTOR: embedding},
                 payload={
                     "uid": feature_uid,
                     "category": category,
@@ -554,10 +533,10 @@ class SemanticIngestionWorker:
                     "updated_at": now,
                 },
             )
-            await self._qdrant.upsert(collection_name="semantic_features", points=[point])
+            await self._qdrant.upsert(collection_name=Collection.SEMANTIC_FEATURES, points=[point])
         elif cmd.command is FeatureCommandType.DELETE:
             await self._qdrant.delete(
-                collection_name="semantic_features",
+                collection_name=Collection.SEMANTIC_FEATURES,
                 points_selector=Filter(
                     must=[
                         FieldCondition(key="category", match=MatchValue(value=category)),
