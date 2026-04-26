@@ -1,9 +1,8 @@
 """FastAPI wrapper for programmatic Sonality access.
 
-Provides HTTP endpoints for data ingestion, belief querying, probability estimation,
-and OpenAI-compatible chat completions for integration with external LLM tools.
-Uses a singleton SonalityAgent with an async lock to prevent concurrent mutation
-while keeping the event loop responsive during long-running operations.
+Provides HTTP endpoints for data ingestion, belief querying, and
+OpenAI-compatible chat completions. Uses a singleton SonalityAgent with
+an async lock to prevent concurrent mutation.
 """
 
 from __future__ import annotations
@@ -16,12 +15,19 @@ import uuid
 from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import asynccontextmanager
 from functools import partial
+from typing import Final
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from . import __version__
 from .agent import SonalityAgent
+from .ess import ReasoningType, UrgencyLevel
+from .memory.graph import BeliefNode
+from .schema import ChatRole
+
+MODEL_ID: Final = "sonality"
 
 log = logging.getLogger(__name__)
 
@@ -57,7 +63,7 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
 app = FastAPI(
     title="Sonality API",
     description="World-understanding intelligence layer with OpenAI-compatible chat interface",
-    version="0.1.0",
+    version=__version__,
     lifespan=lifespan,
 )
 
@@ -66,18 +72,16 @@ app = FastAPI(
 
 
 class ChatMessage(BaseModel):
-    role: str = Field(..., description="Role: system, user, or assistant")
+    role: ChatRole = Field(..., description="Role: system, user, or assistant")
     content: str = Field(..., description="Message content")
 
 
 class ChatCompletionRequest(BaseModel):
-    model: str = Field(
-        default="sonality", description="Model identifier (ignored, always uses Sonality)"
-    )
-    messages: list[ChatMessage] = Field(..., description="Conversation messages")
+    model: str = Field(default=MODEL_ID)
+    messages: list[ChatMessage] = Field(..., description="Full conversation history")
     temperature: float = Field(default=0.7, ge=0.0, le=2.0)
     max_tokens: int = Field(default=1024, ge=1, le=8192)
-    stream: bool = Field(default=False, description="Stream responses (not yet supported)")
+    stream: bool = Field(default=False)
 
 
 class ChatCompletionChoice(BaseModel):
@@ -117,31 +121,26 @@ class ModelsResponse(BaseModel):
 async def chat_completions(
     request: ChatCompletionRequest,
 ) -> ChatCompletionResponse | StreamingResponse:
-    """OpenAI-compatible chat completions endpoint.
-
-    Enables Sonality to be used as an LLM model by external tools like
-    LangChain, AutoGen, OpenAI SDK, and other OpenAI-compatible clients.
-
-    The last user message is processed through Sonality's respond() method,
-    which includes ESS classification, belief updates, and personality-aware responses.
-    """
+    """OpenAI-compatible chat completions. Passes full messages[] to the agent."""
+    log.info("HTTP /v1/chat/completions stream=%s messages=%d", request.stream, len(request.messages))
     agent = _get_agent()
-    user_messages = [m for m in request.messages if m.role == "user"]
+    user_messages = [m for m in request.messages if m.role is ChatRole.USER]
     if not user_messages:
         raise HTTPException(status_code=400, detail="No user message provided")
-    user_message = user_messages[-1].content
+
+    messages = [{"role": m.role, "content": m.content} for m in request.messages]
 
     if request.stream:
         chunk_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
         created = int(time.time())
 
         def sse_chunk(delta: dict[str, str], finish: str | None = None) -> str:
-            return f"data: {json.dumps({'id': chunk_id, 'object': 'chat.completion.chunk', 'created': created, 'model': 'sonality', 'choices': [{'index': 0, 'delta': delta, 'finish_reason': finish}]})}\n\n"
+            return f"data: {json.dumps({'id': chunk_id, 'object': 'chat.completion.chunk', 'created': created, 'model': MODEL_ID, 'choices': [{'index': 0, 'delta': delta, 'finish_reason': finish}]})}\n\n"
 
         async def generate() -> AsyncIterator[str]:
             async with _get_lock():
                 loop = asyncio.get_event_loop()
-                stream_iter = await loop.run_in_executor(None, agent.respond_stream, user_message)
+                stream_iter = await loop.run_in_executor(None, agent.respond_stream, messages)
                 for content, reasoning in stream_iter:
                     delta = {
                         k: v
@@ -156,7 +155,7 @@ async def chat_completions(
         return StreamingResponse(generate(), media_type="text/event-stream")
 
     async with _get_lock():
-        response_text = await asyncio.to_thread(agent.respond, user_message)
+        response_text = await asyncio.to_thread(agent.respond, messages)
 
     prompt_tokens = sum(len(m.content.split()) for m in request.messages) * 4 // 3
     completion_tokens = len(response_text.split()) * 4 // 3
@@ -164,11 +163,11 @@ async def chat_completions(
     return ChatCompletionResponse(
         id=f"chatcmpl-{uuid.uuid4().hex[:24]}",
         created=int(time.time()),
-        model="sonality",
+        model=MODEL_ID,
         choices=[
             ChatCompletionChoice(
                 index=0,
-                message=ChatMessage(role="assistant", content=response_text),
+                message=ChatMessage(role=ChatRole.ASSISTANT, content=response_text),
                 finish_reason="stop",
             )
         ],
@@ -182,100 +181,47 @@ async def chat_completions(
 
 @app.get("/v1/models", response_model=ModelsResponse)
 async def list_models() -> ModelsResponse:
-    """List available models (OpenAI-compatible)."""
     return ModelsResponse(
-        data=[
-            ModelInfo(
-                id="sonality",
-                created=int(time.time()),
-                owned_by="sonality",
-            )
-        ]
+        data=[ModelInfo(id=MODEL_ID, created=int(time.time()), owned_by=MODEL_ID)]
     )
 
 
 @app.get("/v1/models/{model_id}", response_model=ModelInfo)
 async def get_model(model_id: str) -> ModelInfo:
-    """Get model info (OpenAI-compatible)."""
-    if model_id != "sonality":
+    if model_id != MODEL_ID:
         raise HTTPException(status_code=404, detail=f"Model {model_id} not found")
-    return ModelInfo(
-        id="sonality",
-        created=int(time.time()),
-        owned_by="sonality",
-    )
-
-
-# --- Embeddings API (OpenAI-compatible) ---
-
-
-class EmbeddingRequest(BaseModel):
-    input: str | list[str] = Field(..., description="Text(s) to embed")
-    model: str = Field(default="sonality-embed", description="Model identifier")
-
-
-class EmbeddingData(BaseModel):
-    object: str = "embedding"
-    embedding: list[float]
-    index: int
-
-
-class EmbeddingResponse(BaseModel):
-    object: str = "list"
-    data: list[EmbeddingData]
-    model: str
-    usage: ChatCompletionUsage
-
-
-@app.post("/v1/embeddings", response_model=EmbeddingResponse)
-async def create_embeddings(request: EmbeddingRequest) -> EmbeddingResponse:
-    """Create embeddings for text (OpenAI-compatible).
-
-    Uses the same embedding model as Sonality's internal retrieval system.
-    """
-    agent = _get_agent()
-    texts = [request.input] if isinstance(request.input, str) else request.input
-    embeddings = await asyncio.to_thread(agent._embedder.embed_documents, texts)
-    total_tokens = sum(len(t.split()) for t in texts) * 4 // 3
-    return EmbeddingResponse(
-        data=[EmbeddingData(embedding=emb, index=i) for i, emb in enumerate(embeddings)],
-        model="sonality-embed",
-        usage=ChatCompletionUsage(
-            prompt_tokens=total_tokens,
-            completion_tokens=0,
-            total_tokens=total_tokens,
-        ),
-    )
+    return ModelInfo(id=MODEL_ID, created=int(time.time()), owned_by=MODEL_ID)
 
 
 # --- Simple Chat Endpoint ---
 
 
 class SimpleChatRequest(BaseModel):
-    message: str = Field(..., description="User message to send to Sonality")
+    message: str = Field(..., description="User message")
+    context: list[ChatMessage] = Field(default_factory=list, description="Optional conversation history")
 
 
 class SimpleChatResponse(BaseModel):
     response: str
     ess_score: float
-    reasoning_type: str
+    reasoning_type: ReasoningType
     topics: list[str]
 
 
 @app.post("/chat", response_model=SimpleChatResponse)
 async def simple_chat(request: SimpleChatRequest) -> SimpleChatResponse:
-    """Simple chat endpoint for quick interactions.
-
-    Simpler than the OpenAI-compatible endpoint, returns response with ESS metadata.
-    """
+    """Simple chat endpoint. Optionally accepts context for multi-turn."""
+    log.info("HTTP /chat context=%d", len(request.context))
     agent = _get_agent()
+    messages = [{"role": m.role, "content": m.content} for m in request.context]
+    messages.append({"role": ChatRole.USER, "content": request.message})
     async with _get_lock():
-        response_text = await asyncio.to_thread(agent.respond, request.message)
+        response_text = await asyncio.to_thread(agent.respond, messages)
         ess = agent.last_ess
     return SimpleChatResponse(
         response=response_text,
         ess_score=ess.score,
-        reasoning_type=str(ess.reasoning_type),
+        reasoning_type=ess.reasoning_type,
         topics=list(ess.topics),
     )
 
@@ -284,176 +230,101 @@ async def simple_chat(request: SimpleChatRequest) -> SimpleChatResponse:
 
 
 class IngestRequest(BaseModel):
-    text: str = Field(..., description="Content to ingest (news article, social media post, etc.)")
-    topic_override: str = Field(
-        default="",
-        description="Optional canonical topic name to use instead of LLM-extracted topics",
-    )
+    text: str = Field(..., description="Content to ingest")
+    topic_override: str = Field(default="")
 
 
 class IngestResponse(BaseModel):
     success: bool
     score: float
-    reasoning_type: str
+    reasoning_type: ReasoningType
     belief_update_recommended: bool
-    urgency: str
+    urgency: UrgencyLevel
     topics: list[str]
     summary: str
 
 
 class BeliefResponse(BaseModel):
     topic: str
-    position: float
+    valence: float
     confidence: float
     evidence_count: int
     uncertainty: float
+    belief_text: str
 
-
-class ProbabilityRequest(BaseModel):
-    base_rate: float = Field(
-        default=0.5,
-        ge=0.0,
-        le=1.0,
-        description="Prior probability from general knowledge or caller's context",
-    )
-
-
-class ProbabilityResponse(BaseModel):
-    topic: str
-    probability: float
-    evidence_weight: float
-    opinion: float
-    confidence: float
-    evidence_count: int
-    raw_probability: float
-
-
-class CorrelationResponse(BaseModel):
-    source_topic: str
-    target_topic: str
-    correlation_type: str
-    strength: float
-    reasoning: str
+    @classmethod
+    def from_node(cls, b: BeliefNode) -> BeliefResponse:
+        return cls(
+            topic=b.topic, valence=b.valence, confidence=b.confidence,
+            evidence_count=b.evidence_count, uncertainty=b.uncertainty,
+            belief_text=b.belief_text,
+        )
 
 
 class HealthResponse(BaseModel):
-    version: int
-    interaction_count: int
     belief_count: int
-    topic_count: int
-    staged_updates: int
+    snapshot_version: int
 
 
 @app.post("/ingest", response_model=IngestResponse)
 async def ingest(request: IngestRequest) -> IngestResponse:
-    """Ingest non-conversational content (news, social media, reports).
-
-    Bypasses response generation and runs the evidence assessment pipeline directly.
-    """
+    log.info("HTTP /ingest chars=%d", len(request.text))
     agent = _get_agent()
     async with _get_lock():
         ess = await asyncio.to_thread(
             partial(agent.ingest, request.text, topic_override=request.topic_override)
         )
     return IngestResponse(
-        success=True,
-        score=ess.score,
-        reasoning_type=str(ess.reasoning_type),
+        success=True, score=ess.score, reasoning_type=ess.reasoning_type,
         belief_update_recommended=ess.belief_update_recommended,
-        urgency=str(ess.urgency),
-        topics=list(ess.topics),
-        summary=ess.summary,
+        urgency=ess.urgency, topics=list(ess.topics), summary=ess.summary,
     )
 
 
 @app.get("/beliefs", response_model=list[BeliefResponse])
 async def get_beliefs() -> list[BeliefResponse]:
-    """Return all current belief states, sorted by absolute position strength."""
+    """Return all current beliefs from graph, sorted by absolute valence."""
     agent = _get_agent()
-    beliefs = [
-        BeliefResponse(
-            topic=topic,
-            position=b.position,
-            confidence=b.confidence,
-            evidence_count=b.evidence_count,
-            uncertainty=b.uncertainty,
-        )
-        for topic in agent.sponge.opinion_vectors
-        for b in (agent.sponge.get_belief(topic),)
-    ]
-    return sorted(beliefs, key=lambda b: abs(b.position), reverse=True)
+    beliefs = await asyncio.to_thread(agent.get_all_beliefs)
+    return [BeliefResponse.from_node(b) for b in beliefs]
 
 
 @app.get("/beliefs/{topic}", response_model=BeliefResponse)
 async def get_belief_endpoint(topic: str) -> BeliefResponse:
-    """Return belief state for a specific topic."""
     agent = _get_agent()
-    b = agent.sponge.get_belief(topic)
-    return BeliefResponse(
-        topic=b.topic,
-        position=b.position,
-        confidence=b.confidence,
-        evidence_count=b.evidence_count,
-        uncertainty=b.uncertainty,
-    )
-
-
-@app.post("/beliefs/{topic}/probability", response_model=ProbabilityResponse)
-async def estimate_probability(topic: str, request: ProbabilityRequest) -> ProbabilityResponse:
-    """Estimate calibrated probability for a topic using Platt scaling."""
-    agent = _get_agent()
-    estimate = agent.sponge.estimate_probability(topic, base_rate=request.base_rate)
-    return ProbabilityResponse(
-        topic=estimate.topic,
-        probability=estimate.probability,
-        evidence_weight=estimate.evidence_weight,
-        opinion=estimate.opinion,
-        confidence=estimate.confidence,
-        evidence_count=estimate.evidence_count,
-        raw_probability=estimate.raw_probability,
-    )
-
-
-@app.get("/probability/{topic}", response_model=ProbabilityResponse)
-async def estimate_probability_compat(topic: str, base_rate: float = 0.5) -> ProbabilityResponse:
-    """Plan-compatible probability endpoint alias."""
-    return await estimate_probability(topic, ProbabilityRequest(base_rate=base_rate))
-
-
-@app.get("/beliefs/{topic}/correlations", response_model=list[CorrelationResponse])
-async def get_correlations(topic: str) -> list[CorrelationResponse]:
-    """Return all belief correlations for a topic."""
-    agent = _get_agent()
-    correlations = await asyncio.to_thread(
-        agent._run_async, agent._graph.get_belief_correlations(topic)
-    )
-    return [
-        CorrelationResponse(
-            source_topic=c.source_topic,
-            target_topic=c.target_topic,
-            correlation_type=str(c.correlation_type),
-            strength=c.strength,
-            reasoning=c.reasoning,
-        )
-        for c in correlations
-    ]
-
-
-@app.get("/correlations/{topic}", response_model=list[CorrelationResponse])
-async def get_correlations_compat(topic: str) -> list[CorrelationResponse]:
-    """Plan-compatible correlations endpoint alias."""
-    return await get_correlations(topic)
+    b = await asyncio.to_thread(agent.get_belief, topic)
+    if b is None:
+        raise HTTPException(status_code=404, detail=f"No belief for topic: {topic}")
+    return BeliefResponse.from_node(b)
 
 
 @app.get("/health", response_model=HealthResponse)
 @app.get("/v1/health", response_model=HealthResponse, include_in_schema=False)
 async def health() -> HealthResponse:
-    """Return agent health status."""
     agent = _get_agent()
-    return HealthResponse(
-        version=agent.sponge.version,
-        interaction_count=agent.sponge.interaction_count,
-        belief_count=len(agent.sponge.opinion_vectors),
-        topic_count=len(agent.sponge.behavioral_signature.topic_engagement),
-        staged_updates=len(agent.sponge.staged_opinion_updates),
+    belief_count, snapshot_version = await asyncio.to_thread(agent.get_health)
+    return HealthResponse(belief_count=belief_count, snapshot_version=snapshot_version)
+
+
+def serve() -> None:
+    """CLI entry point: ``sonality-server``."""
+    import argparse
+    import os
+
+    import uvicorn
+
+    parser = argparse.ArgumentParser(description="Sonality API Server")
+    parser.add_argument("--host", default="0.0.0.0", help="Host to bind to")
+    parser.add_argument("--port", type=int, default=8000, help="Port to bind to")
+    parser.add_argument("--reload", action="store_true", help="Enable auto-reload")
+    parser.add_argument("--log-level", default=None, help="Log level")
+    args = parser.parse_args()
+    log_level = args.log_level or os.environ.get("SONALITY_LOG_LEVEL", "info")
+    logging.basicConfig(
+        level=getattr(logging, log_level.upper()),
+        format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+    )
+    uvicorn.run(
+        "sonality.api:app", host=args.host, port=args.port,
+        reload=args.reload, log_level=log_level.lower(),
     )
