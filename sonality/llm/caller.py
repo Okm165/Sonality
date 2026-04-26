@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import time
 from dataclasses import dataclass
@@ -11,7 +10,8 @@ from typing import Final
 from pydantic import BaseModel, ValidationError
 
 from .. import config
-from ..provider import default_provider, extract_last_json_object
+from ..provider import decode_llm_json, default_provider
+from ..schema import ChatRole
 
 log = logging.getLogger(__name__)
 
@@ -61,10 +61,10 @@ def _raw_call(
     """
     messages: list[dict[str, str]] = []
     if system:
-        messages.append({"role": "system", "content": system})
-    messages.append({"role": "user", "content": prompt})
+        messages.append({"role": ChatRole.SYSTEM, "content": system})
+    messages.append({"role": ChatRole.USER, "content": prompt})
     if assistant_prefix:
-        messages.append({"role": "assistant", "content": assistant_prefix})
+        messages.append({"role": ChatRole.ASSISTANT, "content": assistant_prefix})
     completion = default_provider.chat_completion(
         model=model,
         messages=tuple(messages),
@@ -77,36 +77,13 @@ def _raw_call(
     return (assistant_prefix + completion.text) if assistant_prefix else completion.text
 
 
-def _parse_json(text: str) -> dict[str, object] | list[object]:
-    """Extract JSON from LLM response text; returns a dict or bare list.
-
-    Tries whole-text parse first so bare JSON arrays (e.g. BatchBeliefUpdateResponse)
-    are returned intact. Falls back to extract_last_json_object which handles
-    markdown fences, trailing prose, multiple JSON blocks, and schema-template notation.
-    """
-    cleaned = text.strip().replace("```json", "").replace("```", "").strip()
-    try:
-        parsed = json.loads(cleaned)
-        if isinstance(parsed, list):
-            log.debug("_parse_json: bare JSON array (%d items)", len(parsed))
-            return parsed
-        if isinstance(parsed, dict):
-            return parsed
-    except json.JSONDecodeError:
-        pass
-    obj = extract_last_json_object(text)
-    if obj is not None:
-        return obj
-    raise ValueError(f"No valid JSON in LLM response: {text[:120]!r}")
-
-
 def llm_call[T: BaseModel](
     *,
     prompt: str,
     response_model: type[T],
     fallback: T,
     model: str = config.FAST_LLM_MODEL,
-    max_tokens: int = config.FAST_LLM_MAX_TOKENS,
+    max_tokens: int = config.LLM_MAX_TOKENS,
     system: str = _JSON_SYSTEM_PROMPT,
     max_retries: int = _MAX_RETRIES,
     assistant_prefix: str = "",
@@ -122,7 +99,7 @@ def llm_call[T: BaseModel](
     model:
         Model ID. Defaults to ``config.FAST_LLM_MODEL``.
     max_tokens:
-        Max output tokens. Defaults to ``config.FAST_LLM_MAX_TOKENS``.
+        Max output tokens. Defaults to ``config.LLM_MAX_TOKENS``.
     system:
         Optional system message.
     fallback:
@@ -151,7 +128,7 @@ def llm_call[T: BaseModel](
                 system=system,
                 assistant_prefix=assistant_prefix,
             )
-            data = _parse_json(raw_text)
+            data = decode_llm_json(raw_text)
             value = response_model.model_validate(data)
             log.debug(
                 "llm_call OK schema=%s attempt=%d raw=%.80r",
@@ -189,7 +166,7 @@ def llm_call[T: BaseModel](
                     model=model,
                     max_tokens=max_tokens,
                 )
-                repaired_data = _parse_json(repaired_text)
+                repaired_data = decode_llm_json(repaired_text)
                 value = response_model.model_validate(repaired_data)
                 log.info("llm_call repaired schema=%s attempt=%d", schema_name, attempt)
                 return LLMCallResult(
