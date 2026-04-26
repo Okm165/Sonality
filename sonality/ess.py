@@ -1,9 +1,18 @@
+"""Epistemic Significance Score (ESS) classifier.
+
+LLM-only evaluator that rates incoming content on a 0-1 salience scale,
+classifies reasoning type, urgency, knowledge density, and whether the
+agent's beliefs should be updated. No code-based heuristics — all
+decisions are delegated to the language model.
+"""
+
 from __future__ import annotations
 
 import logging
 import re
 from collections.abc import Mapping
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Final, Literal
@@ -11,6 +20,7 @@ from typing import Final, Literal
 from . import config
 from .prompts import ESS_CLASSIFICATION_PROMPT
 from .provider import default_provider, extract_tool_call_arguments, parse_json_object
+from .schema import ChatRole
 
 log = logging.getLogger(__name__)
 
@@ -52,11 +62,6 @@ class OpinionDirection(StrEnum):
     OPPOSES = "opposes"
     NEUTRAL = "neutral"
 
-    @property
-    def sign(self) -> float:
-        """Map symbolic direction to signed numeric update direction."""
-        return {self.SUPPORTS: 1.0, self.OPPOSES: -1.0, self.NEUTRAL: 0.0}[self]
-
 
 class SourceReliability(StrEnum):
     PEER_REVIEWED = "peer_reviewed"
@@ -79,93 +84,56 @@ class InternalConsistencyStatus(StrEnum):
     INCONSISTENT = "INCONSISTENT"
 
 
-REASONING_TYPE_ALIASES: Final[dict[str, ReasoningType]] = {
+def _build_aliases[E: StrEnum](cls: type[E], extras: dict[str, E] | None = None) -> dict[str, E]:
+    """Auto-generate alias table from enum values + optional extras."""
+    aliases: dict[str, E] = {}
+    for member in cls:
+        key = member.value.lower().replace("_", "")
+        aliases[key] = member
+        aliases[member.value.lower()] = member
+    if extras:
+        aliases.update(extras)
+    return aliases
+
+
+REASONING_TYPE_ALIASES: Final = _build_aliases(ReasoningType, {
     "logical": ReasoningType.LOGICAL_ARGUMENT,
-    "argument": ReasoningType.LOGICAL_ARGUMENT,
     "empirical": ReasoningType.EMPIRICAL_DATA,
-    "data": ReasoningType.EMPIRICAL_DATA,
-    "expert": ReasoningType.EXPERT_OPINION,
     "debunked": ReasoningType.DEBUNKED_CLAIM,
-    "misinformation": ReasoningType.DEBUNKED_CLAIM,
-    "conspiracy": ReasoningType.DEBUNKED_CLAIM,
-    "social": ReasoningType.SOCIAL_PRESSURE,
-    "pressure": ReasoningType.SOCIAL_PRESSURE,
-    "emotional": ReasoningType.EMOTIONAL_APPEAL,
     "none": ReasoningType.NO_ARGUMENT,
-    "news": ReasoningType.NEWS_REPORT,
-    "report": ReasoningType.NEWS_REPORT,
-    "newsreport": ReasoningType.NEWS_REPORT,
-    "sentiment": ReasoningType.AGGREGATED_SENTIMENT,
-    "aggregated": ReasoningType.AGGREGATED_SENTIMENT,
-    "aggregatedsentiment": ReasoningType.AGGREGATED_SENTIMENT,
-}
-URGENCY_LEVEL_ALIASES: Final[dict[str, UrgencyLevel]] = {
-    "immediate": UrgencyLevel.IMMEDIATE,
+})
+URGENCY_LEVEL_ALIASES: Final = _build_aliases(UrgencyLevel, {
     "urgent": UrgencyLevel.IMMEDIATE,
-    "breaking": UrgencyLevel.IMMEDIATE,
-    "standard": UrgencyLevel.STANDARD,
     "normal": UrgencyLevel.STANDARD,
-    "low": UrgencyLevel.LOW,
-    "background": UrgencyLevel.LOW,
-}
-OPINION_DIRECTION_ALIASES: Final[dict[str, OpinionDirection]] = {
+})
+OPINION_DIRECTION_ALIASES: Final = _build_aliases(OpinionDirection, {
     "support": OpinionDirection.SUPPORTS,
-    "pro": OpinionDirection.SUPPORTS,
     "oppose": OpinionDirection.OPPOSES,
-    "against": OpinionDirection.OPPOSES,
-    "con": OpinionDirection.OPPOSES,
     "mixed": OpinionDirection.NEUTRAL,
-    "uncertain": OpinionDirection.NEUTRAL,
-}
-SOURCE_RELIABILITY_ALIASES: Final[dict[str, SourceReliability]] = {
-    "peerreviewed": SourceReliability.PEER_REVIEWED,
-    "notapplicable": SourceReliability.NOT_APPLICABLE,
+})
+SOURCE_RELIABILITY_ALIASES: Final = _build_aliases(SourceReliability, {
     "na": SourceReliability.NOT_APPLICABLE,
-    "n_a": SourceReliability.NOT_APPLICABLE,
-    # Legacy prompt values (model used to output these before prompt was fixed)
-    "low": SourceReliability.UNVERIFIED_CLAIM,
-    "medium": SourceReliability.INFORMED_OPINION,
-    "high": SourceReliability.ESTABLISHED_EXPERT,
-}
-KNOWLEDGE_DENSITY_ALIASES: Final[dict[str, KnowledgeDensity]] = {
-    "high": KnowledgeDensity.HIGH,
-    "moderate": KnowledgeDensity.MODERATE,
+})
+KNOWLEDGE_DENSITY_ALIASES: Final = _build_aliases(KnowledgeDensity, {
     "medium": KnowledgeDensity.MODERATE,
-    "low": KnowledgeDensity.LOW,
-    "none": KnowledgeDensity.NONE,
-    "n_a": KnowledgeDensity.NONE,
     "na": KnowledgeDensity.NONE,
-}
-INTERNAL_CONSISTENCY_ALIASES: Final[dict[str, InternalConsistencyStatus]] = {
-    # _parse_enum lowercases everything, so "CONSISTENT" → "consistent"
-    "consistent": InternalConsistencyStatus.CONSISTENT,
-    "inconsistent": InternalConsistencyStatus.INCONSISTENT,
+})
+INTERNAL_CONSISTENCY_ALIASES: Final = _build_aliases(InternalConsistencyStatus, {
     "true": InternalConsistencyStatus.CONSISTENT,
     "false": InternalConsistencyStatus.INCONSISTENT,
     "yes": InternalConsistencyStatus.CONSISTENT,
     "no": InternalConsistencyStatus.INCONSISTENT,
-    "y": InternalConsistencyStatus.CONSISTENT,
-    "n": InternalConsistencyStatus.INCONSISTENT,
-    "1": InternalConsistencyStatus.CONSISTENT,
-    "0": InternalConsistencyStatus.INCONSISTENT,
-}
+})
 
 
-def _enum_values(cls: type[StrEnum]) -> list[str]:
-    """Return enum values as plain strings for JSON schema fields."""
+def _vals(cls: type[StrEnum]) -> list[str]:
     return [v.value for v in cls]
 
 
-REASONING_TYPE_VALUES: Final[tuple[str, ...]] = tuple(_enum_values(ReasoningType))
-SOURCE_RELIABILITY_VALUES: Final[tuple[str, ...]] = tuple(_enum_values(SourceReliability))
-OPINION_DIRECTION_VALUES: Final[tuple[str, ...]] = tuple(_enum_values(OpinionDirection))
-INTERNAL_CONSISTENCY_VALUES: Final[tuple[str, ...]] = tuple(_enum_values(InternalConsistencyStatus))
-KNOWLEDGE_DENSITY_VALUES: Final[tuple[str, ...]] = tuple(_enum_values(KnowledgeDensity))
-URGENCY_LEVEL_VALUES: Final[tuple[str, ...]] = tuple(_enum_values(UrgencyLevel))
 RETRY_ALLOWED_VALUES_NOTE: Final = (
     f"{RETRY_REQUIRED_FIELD_NOTE} Allowed reasoning_type values: "
-    f"{', '.join(REASONING_TYPE_VALUES)}. Allowed opinion_direction values: "
-    f"{', '.join(OPINION_DIRECTION_VALUES)}."
+    f"{', '.join(_vals(ReasoningType))}. Allowed opinion_direction values: "
+    f"{', '.join(_vals(OpinionDirection))}."
 )
 PROVIDER_JSON_ONLY_NOTE: Final = (
     "Return ONLY a valid JSON object with keys: score, reasoning_type, source_reliability, "
@@ -179,13 +147,13 @@ ESS_TOOL_SCHEMA: Final[dict[str, object]] = {
         "score": {"type": "number", "description": "Overall argument strength 0.0-1.0."},
         "reasoning_type": {
             "type": "string",
-            "enum": list(REASONING_TYPE_VALUES),
+            "enum": _vals(ReasoningType),
             "description": "Primary reasoning type used.",
         },
-        "source_reliability": {"type": "string", "enum": list(SOURCE_RELIABILITY_VALUES)},
+        "source_reliability": {"type": "string", "enum": _vals(SourceReliability)},
         "internal_consistency": {
             "type": "string",
-            "enum": list(INTERNAL_CONSISTENCY_VALUES),
+            "enum": _vals(InternalConsistencyStatus),
             "description": "Whether the argument is internally consistent.",
         },
         "novelty": {
@@ -208,12 +176,12 @@ ESS_TOOL_SCHEMA: Final[dict[str, object]] = {
         },
         "opinion_direction": {
             "type": "string",
-            "enum": list(OPINION_DIRECTION_VALUES),
+            "enum": _vals(OpinionDirection),
             "description": "Directional stance: supports/opposes/neutral.",
         },
         "knowledge_density": {
             "type": "string",
-            "enum": list(KNOWLEDGE_DENSITY_VALUES),
+            "enum": _vals(KnowledgeDensity),
             "description": "Density of learnable content: high=multiple facts/stats, moderate=some data, low=opinion, none=chitchat.",
         },
         "belief_update_recommended": {
@@ -222,7 +190,7 @@ ESS_TOOL_SCHEMA: Final[dict[str, object]] = {
         },
         "urgency": {
             "type": "string",
-            "enum": list(URGENCY_LEVEL_VALUES),
+            "enum": _vals(UrgencyLevel),
             "description": "Time-sensitivity: immediate/standard/low.",
         },
     },
@@ -280,42 +248,6 @@ class ESSResult:
         """Return whether classifier defaults/coercions were applied."""
         return bool(self.defaulted_fields)
 
-    @property
-    def cooling_period(self) -> int:
-        """Map urgency level to belief update cooling period."""
-        return {UrgencyLevel.IMMEDIATE: 1, UrgencyLevel.STANDARD: 2, UrgencyLevel.LOW: 3}[
-            self.urgency
-        ]
-
-
-@dataclass(frozen=True, slots=True)
-class ClassificationAttempts:
-    """Aggregate retry-loop outputs from one ESS classification request."""
-
-    data: dict[str, object]
-    attempts_executed: int
-    input_tokens: int
-    output_tokens: int
-
-
-@dataclass(frozen=True, slots=True)
-class CoercedEssPayload:
-    """Coerced classifier payload fields before final ESSResult construction."""
-
-    score: float
-    novelty: float
-    reasoning_type: ReasoningType
-    source_reliability: SourceReliability
-    internal_consistency: InternalConsistencyStatus
-    topics: tuple[str, ...]
-    summary: str
-    opinion_direction: OpinionDirection
-    knowledge_density: KnowledgeDensity
-    belief_update_recommended: bool
-    urgency: UrgencyLevel
-    defaulted_fields: tuple[str, ...]
-    default_severity: DefaultSeverity
-
 
 def classifier_exception_fallback(user_message: str) -> ESSResult:
     """Return a safe, explicit fallback result when classification crashes."""
@@ -333,11 +265,6 @@ def classifier_exception_fallback(user_message: str) -> ESSResult:
         default_severity="exception",
         attempt_count=0,
     )
-
-
-def _clamp(value: float, low: float = 0.0, high: float = 1.0) -> float:
-    """Clamp a score-like value into the configured inclusive range."""
-    return max(low, min(high, value))
 
 
 def _parse_enum[E: StrEnum](
@@ -396,107 +323,41 @@ def _to_topics(value: object) -> tuple[tuple[str, ...], bool]:
 def _to_internal_consistency(value: object) -> tuple[InternalConsistencyStatus, bool]:
     """Parse internal-consistency status from untrusted LLM output."""
     if isinstance(value, bool):
-        return (
-            InternalConsistencyStatus.CONSISTENT
-            if value
-            else InternalConsistencyStatus.INCONSISTENT,
-            False,
-        )
-    if isinstance(value, str):
-        parsed, defaulted = _parse_enum(
-            InternalConsistencyStatus,
-            value,
-            InternalConsistencyStatus.CONSISTENT,
-            INTERNAL_CONSISTENCY_ALIASES,
-        )
-        return parsed, defaulted
-    if isinstance(value, (int, float)):
-        if value == 1:
-            return InternalConsistencyStatus.CONSISTENT, False
-        if value == 0:
-            return InternalConsistencyStatus.INCONSISTENT, False
-        return InternalConsistencyStatus.CONSISTENT, True
-    return InternalConsistencyStatus.CONSISTENT, True
+        return (InternalConsistencyStatus.CONSISTENT if value
+                else InternalConsistencyStatus.INCONSISTENT, False)
+    return _parse_enum(InternalConsistencyStatus, str(value) if not isinstance(value, str) else value,
+                       InternalConsistencyStatus.CONSISTENT, INTERNAL_CONSISTENCY_ALIASES)
 
 
-def _required_field_coercions(data: Mapping[str, object]) -> tuple[str, ...]:
-    """Return required fields that still parse as defaults."""
-    coercions: list[str] = []
-    if _to_float(data.get("score", 0.0), 0.0)[1]:
-        coercions.append("score")
-    if _parse_enum(
-        ReasoningType,
-        data.get("reasoning_type"),
-        ReasoningType.NO_ARGUMENT,
-        REASONING_TYPE_ALIASES,
-    )[1]:
-        coercions.append("reasoning_type")
-    if _parse_enum(
-        OpinionDirection,
-        data.get("opinion_direction"),
-        OpinionDirection.NEUTRAL,
-        OPINION_DIRECTION_ALIASES,
-    )[1]:
-        coercions.append("opinion_direction")
-    return tuple(coercions)
-
-
-def _run_classification_attempts(prompt: str, model: str) -> ClassificationAttempts:
-    """Run classifier retries and return final payload with token totals."""
+def _run_classification_attempts(
+    prompt: str, model: str,
+) -> tuple[dict[str, object], int, int, int]:
+    """Run classifier retries. Returns (data, attempts, input_tokens, output_tokens)."""
     data: dict[str, object] = {}
     attempts_executed = 0
     total_input_tokens = 0
     total_output_tokens = 0
-    bad_fields: frozenset[str] = frozenset()
     for attempt in range(MAX_ESS_RETRIES):
         attempts_executed = attempt + 1
-        if attempt == 0:
-            prompt_with_retry_guidance = prompt
-        else:
-            bad_list = ", ".join(sorted(bad_fields)) if bad_fields else "required fields"
-            prompt_with_retry_guidance = (
-                f"{prompt}\n\nPrevious response was missing or invalid for: {bad_list}. "
-                f"{RETRY_ALLOWED_VALUES_NOTE}"
-            )
+        full_prompt = (prompt if attempt == 0
+                       else f"{prompt}\n\nPrevious response had bad fields. {RETRY_ALLOWED_VALUES_NOTE}")
         completion = default_provider.chat_completion(
             model=model,
-            max_tokens=config.LLM_TOKENS_ESS,
+            max_tokens=config.LLM_MAX_TOKENS,
             temperature=0.0,
-            messages=(
-                {
-                    "role": "user",
-                    "content": f"{prompt_with_retry_guidance}\n\n{PROVIDER_JSON_ONLY_NOTE}",
-                },
-            ),
+            messages=({"role": ChatRole.USER, "content": f"{full_prompt}\n\n{PROVIDER_JSON_ONLY_NOTE}"},),
             tools=(PROVIDER_ESS_TOOL,),
             tool_choice=PROVIDER_ESS_TOOL_CHOICE,
             enable_thinking=False,
         )
         total_input_tokens += completion.input_tokens
         total_output_tokens += completion.output_tokens
-        data = extract_tool_call_arguments(completion.raw, "classify_evidence")
-        if not data:
-            data = parse_json_object(completion.text)
-        if not data:
-            data = {}
-        missing = REQUIRED_FIELDS - set(data.keys())
-        required_coercions = _required_field_coercions(data) if not missing else ()
-        if not missing and not required_coercions:
+        data = extract_tool_call_arguments(completion.raw, "classify_evidence") or parse_json_object(completion.text) or {}
+        if not (REQUIRED_FIELDS - set(data.keys())):
             break
-        bad_fields = missing | frozenset(required_coercions)
-        log.warning(
-            "ESS attempt %d/%d missing fields %s malformed_required %s",
-            attempt + 1,
-            MAX_ESS_RETRIES,
-            missing,
-            required_coercions,
-        )
-    return ClassificationAttempts(
-        data=data,
-        attempts_executed=attempts_executed,
-        input_tokens=total_input_tokens,
-        output_tokens=total_output_tokens,
-    )
+        log.warning("ESS attempt %d/%d missing=%s", attempt + 1, MAX_ESS_RETRIES,
+                    REQUIRED_FIELDS - set(data.keys()))
+    return data, attempts_executed, total_input_tokens, total_output_tokens
 
 
 def _coerce_float_field(
@@ -533,38 +394,30 @@ def _coerce_enum_field[E: StrEnum](
     return value
 
 
-def _coerce_payload(data: Mapping[str, object]) -> CoercedEssPayload:
-    """Coerce untrusted classifier output into typed ESS payload fields."""
+def _classify_inner(prompt: str, model: str) -> ESSResult:
+    """Core classification: LLM call with retries, then coerce into ESSResult."""
+    data, attempts_executed, input_tokens, output_tokens = _run_classification_attempts(prompt, model)
+
     missing_fields = tuple(sorted(field for field in REQUIRED_FIELDS if field not in data))
     coerced_fields: list[str] = []
 
-    score_value = _coerce_float_field(data, "score", 0.0, coerced_fields)
-    novelty_value = _coerce_float_field(data, "novelty", 0.0, coerced_fields)
+    score = _coerce_float_field(data, "score", 0.0, coerced_fields)
+    novelty = _coerce_float_field(data, "novelty", 0.0, coerced_fields)
     direction = _coerce_enum_field(
-        cls=OpinionDirection,
-        data=data,
-        field="opinion_direction",
-        default=OpinionDirection.NEUTRAL,
-        aliases=OPINION_DIRECTION_ALIASES,
+        cls=OpinionDirection, data=data, field="opinion_direction",
+        default=OpinionDirection.NEUTRAL, aliases=OPINION_DIRECTION_ALIASES,
         coerced_fields=coerced_fields,
     )
     reasoning = _coerce_enum_field(
-        cls=ReasoningType,
-        data=data,
-        field="reasoning_type",
-        default=ReasoningType.NO_ARGUMENT,
-        aliases=REASONING_TYPE_ALIASES,
+        cls=ReasoningType, data=data, field="reasoning_type",
+        default=ReasoningType.NO_ARGUMENT, aliases=REASONING_TYPE_ALIASES,
         coerced_fields=coerced_fields,
     )
     reliability = _coerce_enum_field(
-        cls=SourceReliability,
-        data=data,
-        field="source_reliability",
-        default=SourceReliability.NOT_APPLICABLE,
-        aliases=SOURCE_RELIABILITY_ALIASES,
+        cls=SourceReliability, data=data, field="source_reliability",
+        default=SourceReliability.NOT_APPLICABLE, aliases=SOURCE_RELIABILITY_ALIASES,
         coerced_fields=coerced_fields,
     )
-
     internal_consistency, consistency_defaulted = _to_internal_consistency(
         data.get("internal_consistency", InternalConsistencyStatus.CONSISTENT)
     )
@@ -581,141 +434,64 @@ def _coerce_payload(data: Mapping[str, object]) -> CoercedEssPayload:
         coerced_fields.append("summary")
 
     knowledge_density = _coerce_enum_field(
-        cls=KnowledgeDensity,
-        data=data,
-        field="knowledge_density",
-        default=KnowledgeDensity.NONE,
-        aliases=KNOWLEDGE_DENSITY_ALIASES,
+        cls=KnowledgeDensity, data=data, field="knowledge_density",
+        default=KnowledgeDensity.NONE, aliases=KNOWLEDGE_DENSITY_ALIASES,
         coerced_fields=coerced_fields,
     )
 
     belief_update_raw = data.get("belief_update_recommended", False)
-    if isinstance(belief_update_raw, bool):
-        belief_update_recommended = belief_update_raw
-    elif isinstance(belief_update_raw, str):
-        belief_update_recommended = belief_update_raw.lower() in ("true", "yes", "1")
-    else:
-        belief_update_recommended = False
-        if "belief_update_recommended" in data:
-            coerced_fields.append("belief_update_recommended")
+    belief_update_recommended = (
+        belief_update_raw if isinstance(belief_update_raw, bool)
+        else str(belief_update_raw).lower() in ("true", "yes", "1")
+    )
 
     urgency = _coerce_enum_field(
-        cls=UrgencyLevel,
-        data=data,
-        field="urgency",
-        default=UrgencyLevel.STANDARD,
-        aliases=URGENCY_LEVEL_ALIASES,
+        cls=UrgencyLevel, data=data, field="urgency",
+        default=UrgencyLevel.STANDARD, aliases=URGENCY_LEVEL_ALIASES,
         coerced_fields=coerced_fields,
     )
 
-    defaulted_fields = tuple(
-        sorted(
-            {
-                *(f"{MISSING_FIELD_PREFIX}{f}" for f in missing_fields),
-                *(f"{COERCED_FIELD_PREFIX}{f}" for f in coerced_fields),
-            }
-        )
+    defaulted_fields = tuple(sorted(
+        {*(f"{MISSING_FIELD_PREFIX}{f}" for f in missing_fields),
+         *(f"{COERCED_FIELD_PREFIX}{f}" for f in coerced_fields)}
+    ))
+    severity: DefaultSeverity = (
+        "missing" if missing_fields else "coercion" if coerced_fields else "none"
     )
-    if CLASSIFIER_EXCEPTION_FIELD in defaulted_fields:
-        severity: DefaultSeverity = "exception"
-    elif any(f.startswith(MISSING_FIELD_PREFIX) for f in defaulted_fields):
-        severity = "missing"
-    elif any(f.startswith(COERCED_FIELD_PREFIX) for f in defaulted_fields):
-        severity = "coercion"
-    else:
-        severity = "none"
-    return CoercedEssPayload(
-        score=score_value,
-        novelty=novelty_value,
-        reasoning_type=reasoning,
-        source_reliability=reliability,
-        internal_consistency=internal_consistency,
-        topics=topics,
-        summary=summary,
-        opinion_direction=direction,
-        knowledge_density=knowledge_density,
-        belief_update_recommended=belief_update_recommended,
-        urgency=urgency,
-        defaulted_fields=defaulted_fields,
-        default_severity=severity,
-    )
-
-
-def _classify_inner(
-    prompt: str,
-    model: str,
-) -> ESSResult:
-    """Core classification logic (called with timeout wrapper)."""
-    attempts = _run_classification_attempts(prompt, model)
-    payload = _coerce_payload(attempts.data)
-
-    if payload.defaulted_fields:
-        log.warning("ESS fell back/coerced fields %s", payload.defaulted_fields)
-
-    # Consistency guard: substantive reasoning types inherently carry learnable
-    # content, so knowledge_density=NONE is contradictory for them.
-    kd = payload.knowledge_density
-    if kd == KnowledgeDensity.NONE and (
-        payload.reasoning_type
-        in (
-            ReasoningType.EMPIRICAL_DATA,
-            ReasoningType.EXPERT_OPINION,
-            ReasoningType.NEWS_REPORT,
-        )
-        or (payload.reasoning_type is ReasoningType.LOGICAL_ARGUMENT and payload.score >= 0.30)
-    ):
-        kd = KnowledgeDensity.LOW
-        log.debug(
-            "ESS: upgraded knowledge_density NONE→LOW for type=%s score=%.2f",
-            payload.reasoning_type,
-            payload.score,
-        )
+    if defaulted_fields:
+        log.warning("ESS fell back/coerced fields %s", defaulted_fields)
 
     return ESSResult(
-        score=_clamp(payload.score),
-        reasoning_type=payload.reasoning_type,
-        source_reliability=payload.source_reliability,
-        internal_consistency=payload.internal_consistency,
-        novelty=_clamp(payload.novelty),
-        topics=payload.topics,
-        summary=payload.summary,
-        opinion_direction=payload.opinion_direction,
-        knowledge_density=kd,
-        belief_update_recommended=payload.belief_update_recommended,
-        urgency=payload.urgency,
-        defaulted_fields=payload.defaulted_fields,
-        default_severity=payload.default_severity,
-        attempt_count=max(attempts.attempts_executed, 1),
-        input_tokens=attempts.input_tokens,
-        output_tokens=attempts.output_tokens,
+        score=score, novelty=novelty,
+        reasoning_type=reasoning, source_reliability=reliability,
+        internal_consistency=internal_consistency, topics=topics,
+        summary=summary, opinion_direction=direction,
+        knowledge_density=knowledge_density,
+        belief_update_recommended=belief_update_recommended,
+        urgency=urgency, defaulted_fields=defaulted_fields,
+        default_severity=severity,
+        attempt_count=max(attempts_executed, 1),
+        input_tokens=input_tokens, output_tokens=output_tokens,
     )
 
 
 def classify(
     user_message: str,
-    sponge_snapshot: str,
+    snapshot_text: str,
     model: str = config.ESS_MODEL,
-    recent_topics: tuple[str, ...] = (),
+    tracked_topics: str = "",
 ) -> ESSResult:
     """Classify evidence strength of the user's message.
 
     Uses a separate LLM call with tool_use to extract structured ESS metadata.
-    The agent_response is deliberately excluded to avoid self-judge bias
-    (up to 50pp shift from attribution labels — ESS should evaluate user input only).
+    The agent_response is deliberately excluded to avoid self-judge bias.
     Assumes classifier outputs may be malformed; coercion/default tracking is
     preserved in the result for downstream safety gating and auditing.
-
-    recent_topics: top tracked topic labels from sponge — passed so the model
-    can reuse existing labels and avoid generating synonyms that fragment beliefs.
-
-    Timeout: If classification takes longer than ESS_TIMEOUT_SECONDS, returns
-    a safe fallback result to prevent blocking the pipeline.
     """
-    tracked = ", ".join(recent_topics) if recent_topics else "none yet"
     prompt = ESS_CLASSIFICATION_PROMPT.format(
         user_message=user_message,
-        sponge_snapshot=sponge_snapshot,
-        tracked_topics=tracked,
+        snapshot_text=snapshot_text,
+        tracked_topics=tracked_topics or "none yet",
     )
     log.info("ESS classifying message (%d chars)", len(user_message))
 
