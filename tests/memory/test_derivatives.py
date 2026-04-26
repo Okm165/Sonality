@@ -4,30 +4,14 @@ from __future__ import annotations
 
 import pytest
 
-from sonality.memory.derivatives import ChunkImportance, ChunkingResponse, ChunkItem
+from sonality.memory.derivatives import ChunkingResponse, ChunkItem
 
 
-class TestChunkItemImportanceCoercion:
-    """ChunkItem.coerce_importance accepts placeholders and slash-separated options."""
+class _FakeEmbedder:
+    """Stub embedder returning fixed-dimension vectors."""
 
-    @pytest.mark.parametrize(
-        "raw,expected",
-        [
-            ("high", ChunkImportance.HIGH),
-            ("medium", ChunkImportance.MEDIUM),
-            ("low", ChunkImportance.LOW),
-            # Slash-separated — first token wins
-            ("high/medium/low", ChunkImportance.HIGH),
-            ("medium/low", ChunkImportance.MEDIUM),
-            # Template placeholders → MEDIUM fallback
-            ("...", ChunkImportance.MEDIUM),
-            ("", ChunkImportance.MEDIUM),
-            ("none", ChunkImportance.MEDIUM),
-        ],
-    )
-    def test_coerce_importance(self, raw: str, expected: ChunkImportance) -> None:
-        item = ChunkItem(text="hello", importance=raw)  # type: ignore[arg-type]
-        assert item.importance is expected
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        return [[0.1] * 4 for _ in texts]
 
 
 class TestChunkingResponseNormalization:
@@ -61,7 +45,6 @@ class TestChunkingResponseNormalization:
     def test_fallback_chunk_item_defaults(self) -> None:
         item = ChunkItem(text="just text")
         assert item.key_concept == ""
-        assert item.importance is ChunkImportance.MEDIUM
 
 
 class TestChunkingResponseFallbackPath:
@@ -74,14 +57,7 @@ class TestChunkingResponseFallbackPath:
         from pydantic import BaseModel
 
         from sonality.llm.caller import LLMCallResult
-        from sonality.memory.derivatives import DerivativeChunker
-
-        def fake_embed(texts: list[str]) -> list[list[float]]:
-            return [[0.1] * 4 for _ in texts]
-
-        class FakeEmbedder:
-            def embed_documents(self, texts: list[str]) -> list[list[float]]:
-                return fake_embed(texts)
+        from sonality.memory.derivatives import chunk_and_embed
 
         def failing_call[T: BaseModel](
             *,
@@ -101,8 +77,7 @@ class TestChunkingResponseFallbackPath:
 
         monkeypatch.setattr("sonality.memory.derivatives.llm_call", failing_call)
 
-        chunker = DerivativeChunker(FakeEmbedder())  # type: ignore[arg-type]
-        results = chunker.chunk_and_embed("Some long text about science.", "ep-001")
+        results = chunk_and_embed(_FakeEmbedder(), "Some long text about science.", "ep-001")  # type: ignore[arg-type]
 
         assert len(results) == 1
         assert results[0].node.key_concept == "full_content"
@@ -113,14 +88,7 @@ class TestChunkingResponseFallbackPath:
         from unittest.mock import patch
 
         from sonality.llm.caller import LLMCallResult
-        from sonality.memory.derivatives import ChunkingResponse, ChunkItem, DerivativeChunker
-
-        def fake_embed(texts: list[str]) -> list[list[float]]:
-            return [[0.1] * 4 for _ in texts]
-
-        class FakeEmbedder:
-            def embed_documents(self, texts: list[str]) -> list[list[float]]:
-                return fake_embed(texts)
+        from sonality.memory.derivatives import ChunkingResponse, ChunkItem, chunk_and_embed
 
         payload = ChunkingResponse(
             chunks=[
@@ -137,8 +105,7 @@ class TestChunkingResponseFallbackPath:
         )
 
         with patch("sonality.memory.derivatives.llm_call", return_value=mock_result):
-            chunker = DerivativeChunker(FakeEmbedder())  # type: ignore[arg-type]
-            results = chunker.chunk_and_embed("Some text.", "ep-002")
+            results = chunk_and_embed(_FakeEmbedder(), "Some text.", "ep-002")  # type: ignore[arg-type]
 
         assert len(results) == 1
         assert results[0].node.text == "Real content"

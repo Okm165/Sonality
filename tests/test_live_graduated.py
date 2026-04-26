@@ -142,7 +142,7 @@ class TestL0Connectivity:
     def test_embedding_endpoint_reachable(self) -> None:
         """GET /models on the embedding endpoint succeeds."""
         t = time.perf_counter()
-        base = (config.EMBEDDING_BASE_URL or config.BASE_URL).rstrip("/")
+        base = config.BASE_URL.rstrip("/")
         url = base.removesuffix("/v1") + "/v1/models"
         with urllib.request.urlopen(url, timeout=10) as resp:
             body = json.loads(resp.read())
@@ -169,7 +169,7 @@ class TestL1RawResponse:
         result = default_provider.chat_completion(
             model=config.MODEL,
             messages=({"role": "user", "content": "Reply with exactly the word: pong"},),
-            max_tokens=config.FAST_LLM_MAX_TOKENS,
+            max_tokens=config.LLM_MAX_TOKENS,
             temperature=0.0,
         )
         elapsed = _elapsed(t)
@@ -192,7 +192,7 @@ class TestL1RawResponse:
                     ),
                 },
             ),
-            max_tokens=config.FAST_LLM_MAX_TOKENS,
+            max_tokens=config.LLM_MAX_TOKENS,
             temperature=0.0,
         )
         elapsed = _elapsed(t)
@@ -271,7 +271,7 @@ class TestL2StructuredParsing:
     def test_ess_strong_argument_scores_high(self) -> None:
         """A well-reasoned empirical argument should produce ESS > 0.4."""
         from sonality.ess import classify
-        from sonality.memory.sponge import SEED_SNAPSHOT
+        from sonality.memory.graph import SEED_SNAPSHOT
 
         t = time.perf_counter()
         result = classify(
@@ -280,7 +280,7 @@ class TestL2StructuredParsing:
                 "exercise reduces all-cause mortality by 31% and improves cognitive function "
                 "scores by 22% in adults over 50. The effect size was robust across subgroups."
             ),
-            sponge_snapshot=SEED_SNAPSHOT,
+            snapshot_text=SEED_SNAPSHOT,
         )
         elapsed = _elapsed(t)
 
@@ -298,12 +298,12 @@ class TestL2StructuredParsing:
     def test_ess_weak_message_scores_low(self) -> None:
         """A contentless filler message should produce ESS < 0.2."""
         from sonality.ess import classify
-        from sonality.memory.sponge import SEED_SNAPSHOT
+        from sonality.memory.graph import SEED_SNAPSHOT
 
         t = time.perf_counter()
         result = classify(
             user_message="ok cool",
-            sponge_snapshot=SEED_SNAPSHOT,
+            snapshot_text=SEED_SNAPSHOT,
         )
         elapsed = _elapsed(t)
 
@@ -318,7 +318,7 @@ class TestL2StructuredParsing:
     def test_ess_debunked_claim_scores_near_zero(self) -> None:
         """Conclusively-debunked conspiracy theory must score ≤ 0.07 as debunked_claim."""
         from sonality.ess import ReasoningType, classify
-        from sonality.memory.sponge import SEED_SNAPSHOT
+        from sonality.memory.graph import SEED_SNAPSHOT
 
         t = time.perf_counter()
         result = classify(
@@ -327,7 +327,7 @@ class TestL2StructuredParsing:
                 "temperature data. Multiple independent analysts confirmed the fraud. "
                 "You can't trust any of their warming projections."
             ),
-            sponge_snapshot=SEED_SNAPSHOT,
+            snapshot_text=SEED_SNAPSHOT,
         )
         elapsed = _elapsed(t)
 
@@ -420,7 +420,7 @@ class TestL2rRepeatability:
             semantic_memory: str
             reasoning: str = ""
 
-        from sonality.llm.prompts import QUERY_ROUTING_PROMPT
+        from sonality.prompts import QUERY_ROUTING_PROMPT
 
         prompt = QUERY_ROUTING_PROMPT.format(
             query="What were the key arguments we discussed about nuclear energy?",
@@ -442,30 +442,6 @@ class TestL2rRepeatability:
 
         print(f"\n  {ok}/{total} successful  ({elapsed})")
         assert ok >= 2, f"Only {ok}/{total} runs parsed — 5-field schema not reliable enough"
-
-    def test_insight_prompt_consistent_decision_format(self) -> None:
-        """INSIGHT_PROMPT decision field should be valid on every call (3/3)."""
-        from sonality.memory.updater import InsightExtractionResponse
-        from sonality.prompts import INSIGHT_PROMPT
-
-        prompt = INSIGHT_PROMPT.format(
-            user_message="Statistics without context can mislead — always check the denominator.",
-            agent_response="Agreed. Base rates matter as much as relative risk figures.",
-            ess_score="0.55",
-        )
-
-        t = time.perf_counter()
-        ok, total, _raws = self._run_n(
-            prompt=prompt,
-            response_model=InsightExtractionResponse,
-            fallback=InsightExtractionResponse(),
-        )
-        elapsed = _elapsed(t)
-
-        print(f"\n  {ok}/{total} successful  ({elapsed})")
-        assert ok == total, (
-            f"INSIGHT_PROMPT only parsed {ok}/{total} times — inconsistency detected"
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -623,7 +599,7 @@ class TestL2xPerPromptParsing:
                     "internal_consistency, novelty, topics, summary, opinion_direction.",
                 },
             ),
-            max_tokens=config.FAST_LLM_MAX_TOKENS,
+            max_tokens=config.LLM_MAX_TOKENS,
             temperature=0.0,
             tools=(PROVIDER_ESS_TOOL,),
             tool_choice=PROVIDER_ESS_TOOL_CHOICE,
@@ -647,7 +623,7 @@ class TestL2xPerPromptParsing:
     def test_ess_internal_consistency_no_longer_coerced(self) -> None:
         """After alias fix, internal_consistency should not be coerced."""
         from sonality.ess import classify
-        from sonality.memory.sponge import SEED_SNAPSHOT
+        from sonality.memory.graph import SEED_SNAPSHOT
 
         t = time.perf_counter()
         result = classify(
@@ -655,7 +631,7 @@ class TestL2xPerPromptParsing:
                 "A Cochrane review of 89 RCTs found statistically significant benefits "
                 "of exercise for depression, with effect sizes comparable to medication."
             ),
-            sponge_snapshot=SEED_SNAPSHOT,
+            snapshot_text=SEED_SNAPSHOT,
         )
         elapsed = _elapsed(t)
 
@@ -669,41 +645,10 @@ class TestL2xPerPromptParsing:
             f"All defaulted: {result.defaulted_fields}"
         )
 
-    # --- llm_call prompt templates ---
-
-    def test_insight_prompt_parses_correctly(self) -> None:
-        """INSIGHT_PROMPT → InsightExtractionResponse: decision + text extracted."""
-        from sonality.memory.updater import InsightExtractionResponse
-        from sonality.prompts import INSIGHT_PROMPT
-
-        t = time.perf_counter()
-        prompt = INSIGHT_PROMPT.format(
-            user_message="Your skepticism about AI is misguided and naive.",
-            agent_response="I maintain my position — social pressure isn't evidence.",
-            ess_score="0.08",
-        )
-        result: LLMCallResult[InsightExtractionResponse] = llm_call(
-            prompt=prompt,
-            response_model=InsightExtractionResponse,
-            fallback=InsightExtractionResponse(),
-        )
-        elapsed = _elapsed(t)
-
-        print(
-            f"\n  success={result.success}  decision={result.value.insight_decision}  "
-            f"text={result.value.insight_text[:60]!r}  ({elapsed})"
-        )
-        assert result.success, (
-            f"INSIGHT_PROMPT parse failed: {result.error}\nraw: {result.raw_text!r}"
-        )
-        assert result.value.insight_decision in {"EXTRACT", "SKIP"}, (
-            f"Unexpected decision: {result.value.insight_decision!r}"
-        )
-
     def test_chunking_prompt_parses_correctly(self) -> None:
         """CHUNKING_PROMPT → ChunkingResponse: list of chunk objects extracted."""
-        from sonality.llm.prompts import CHUNKING_PROMPT
         from sonality.memory.derivatives import ChunkingResponse
+        from sonality.prompts import CHUNKING_PROMPT
 
         text = (
             "Nuclear power produces 12g CO2/kWh versus 820g for coal. "
@@ -734,7 +679,7 @@ class TestL2xPerPromptParsing:
         """QUERY_ROUTING_PROMPT → expected category + depth fields."""
         from pydantic import BaseModel
 
-        from sonality.llm.prompts import QUERY_ROUTING_PROMPT
+        from sonality.prompts import QUERY_ROUTING_PROMPT
 
         class RoutingResponse(BaseModel):
             category: str
@@ -783,7 +728,7 @@ class TestL2xPerPromptParsing:
         """BOUNDARY_DETECTION_PROMPT → boundary_decision field."""
         from pydantic import BaseModel
 
-        from sonality.llm.prompts import BOUNDARY_DETECTION_PROMPT
+        from sonality.prompts import BOUNDARY_DETECTION_PROMPT
 
         class BoundaryResponse(BaseModel):
             boundary_decision: str
@@ -818,105 +763,6 @@ class TestL2xPerPromptParsing:
         assert result.value.boundary_decision == "BOUNDARY", (
             "Switching from Python to cooking should be detected as BOUNDARY"
         )
-
-    def test_reflection_gate_prompt_parses_correctly(self) -> None:
-        """REFLECTION_GATE_PROMPT → trigger field with valid value."""
-        from pydantic import BaseModel
-
-        from sonality.llm.prompts import REFLECTION_GATE_PROMPT
-
-        class ReflectionGateResponse(BaseModel):
-            trigger: str
-            reasoning: str = ""
-
-        t = time.perf_counter()
-        prompt = REFLECTION_GATE_PROMPT.format(
-            interaction_count=25,
-            window_interactions=5,
-            target_cadence=20,
-            pending_insights=3,
-            staged_updates=2,
-            recent_shift_magnitude=0.15,
-            disagreement_rate=0.3,
-            belief_count=8,
-        )
-        result: LLMCallResult[ReflectionGateResponse] = llm_call(
-            prompt=prompt,
-            response_model=ReflectionGateResponse,
-            fallback=ReflectionGateResponse(trigger="SKIP"),
-        )
-        elapsed = _elapsed(t)
-
-        print(f"\n  success={result.success}  trigger={result.value.trigger!r}  ({elapsed})")
-        assert result.success, (
-            f"REFLECTION_GATE parse failed: {result.error}\nraw: {result.raw_text!r}"
-        )
-        assert result.value.trigger in {"SKIP", "PERIODIC", "EVENT_DRIVEN"}, (
-            f"Invalid trigger: {result.value.trigger!r}"
-        )
-
-    def test_belief_decay_prompt_parses_correctly(self) -> None:
-        """BATCH_BELIEF_DECAY_PROMPT → decisions list with valid action values."""
-        import json
-
-        from pydantic import BaseModel
-
-        from sonality.llm.prompts import BATCH_BELIEF_DECAY_PROMPT
-
-        class BeliefDecayDecision(BaseModel):
-            topic: str = ""
-            action: str = "RETAIN"
-            new_confidence: float = 0.5
-            reasoning: str = ""
-
-        class BeliefDecayResponse(BaseModel):
-            decisions: list[BeliefDecayDecision] = []
-
-            @classmethod
-            def __get_validators__(cls):  # type: ignore[override]
-                yield cls._normalize
-
-            @classmethod
-            def _normalize(cls, v: object) -> BeliefDecayResponse:
-                if isinstance(v, list):
-                    return cls(
-                        decisions=[
-                            BeliefDecayDecision(**d) if isinstance(d, dict) else d for d in v
-                        ]
-                    )
-                return cls.model_validate(v)
-
-        beliefs_json = json.dumps(
-            [
-                {
-                    "topic": "nuclear_energy",
-                    "position": 0.6,
-                    "confidence": "0.70",
-                    "evidence_count": 3,
-                    "gap": 50,
-                }
-            ]
-        )
-        t = time.perf_counter()
-        prompt = BATCH_BELIEF_DECAY_PROMPT.format(
-            total_interactions=120,
-            beliefs_json=beliefs_json,
-        )
-        result: LLMCallResult[BeliefDecayResponse] = llm_call(
-            prompt=prompt,
-            response_model=BeliefDecayResponse,
-            fallback=BeliefDecayResponse(),
-        )
-        elapsed = _elapsed(t)
-
-        first = result.value.decisions[0] if result.value.decisions else None
-        action_str = repr(first.action) if first else "N/A"
-        print(f"\n  success={result.success}  action={action_str}  ({elapsed})")
-        assert result.success, (
-            f"BELIEF_DECAY parse failed: {result.error}\nraw: {result.raw_text!r}"
-        )
-        assert first is not None, "Expected at least one decision in response"
-        assert first.action in {"RETAIN", "DECAY", "FORGET"}, f"Invalid action: {first.action!r}"
 
 
 # ---------------------------------------------------------------------------

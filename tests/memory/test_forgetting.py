@@ -6,7 +6,7 @@ from typing import cast
 from unittest.mock import AsyncMock
 
 from sonality.memory.dual_store import DualEpisodeStore
-from sonality.memory.forgetting import ForgettingEngine, ForgettingResult
+from sonality.memory.forgetting import assess_and_forget
 from sonality.memory.graph import EpisodeNode, MemoryGraph
 
 
@@ -26,16 +26,13 @@ def _assess(
     graph: MemoryGraph,
     store: DualEpisodeStore,
     candidates: list[EpisodeNode],
-) -> ForgettingResult:
-    return asyncio.run(
-        ForgettingEngine(
-            graph=cast(MemoryGraph, graph),
-            store=cast(DualEpisodeStore, store),
-        ).assess_and_forget(
-            candidates,
-            snapshot_excerpt="snapshot",
-        )
-    )
+) -> None:
+    asyncio.run(assess_and_forget(
+        candidates,
+        graph=cast(MemoryGraph, graph),
+        store=cast(DualEpisodeStore, store),
+        snapshot_excerpt="snapshot",
+    ))
 
 
 def _graph_mock() -> MemoryGraph:
@@ -76,14 +73,12 @@ def test_forgetting_uses_full_uid_and_hard_delete_path(
 
     graph = _graph_mock()
     store = _store_mock()
-    result = _assess(graph, store, [_candidate("episode-aaa"), _candidate("episode-bbb")])
+    _assess(graph, store, [_candidate("episode-aaa"), _candidate("episode-bbb")])
 
     cast(AsyncMock, graph.delete_episode).assert_awaited_once_with("episode-aaa")
     cast(AsyncMock, store.delete_derivatives).assert_awaited_once_with("episode-aaa")
     cast(AsyncMock, graph.archive_episode).assert_not_awaited()
     cast(AsyncMock, store.archive_derivatives).assert_not_awaited()
-    assert result.archived == 1
-    assert result.kept == 1
 
 
 def test_forgetting_does_not_use_foundational_substring_heuristic(
@@ -104,8 +99,6 @@ def test_forgetting_does_not_use_foundational_substring_heuristic(
     )
     graph = _graph_mock()
     store = _store_mock()
-    result = _assess(graph, store, [_candidate("episode-aaa")])
+    _assess(graph, store, [_candidate("episode-aaa")])
     cast(AsyncMock, graph.archive_episode).assert_awaited_once_with("episode-aaa")
     cast(AsyncMock, store.archive_derivatives).assert_awaited_once_with("episode-aaa")
-    assert result.archived == 1
-    assert result.kept == 0

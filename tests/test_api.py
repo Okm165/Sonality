@@ -24,8 +24,8 @@ from sonality.ess import (
     SourceReliability,
     UrgencyLevel,
 )
-from sonality.memory.graph import BeliefCorrelation, EdgeType
-from sonality.memory.sponge import BeliefState, ProbabilityEstimate
+from sonality.memory.graph import BeliefNode
+from sonality.schema import ChatRole
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -50,37 +50,14 @@ def _make_ess(**kwargs: Any) -> ESSResult:
     return ESSResult(**defaults)
 
 
-def _make_belief(topic: str = "climate", position: float = 0.4) -> BeliefState:
-    return BeliefState(
+def _make_belief(topic: str = "climate", valence: float = 0.4) -> BeliefNode:
+    return BeliefNode(
         topic=topic,
-        position=position,
+        valence=valence,
         confidence=0.7,
         uncertainty=0.3,
         evidence_count=3,
-        supporting_count=2,
-        contradicting_count=1,
-    )
-
-
-def _make_probability(topic: str = "climate") -> ProbabilityEstimate:
-    return ProbabilityEstimate(
-        topic=topic,
-        probability=0.72,
-        evidence_weight=0.6,
-        opinion=0.4,
-        confidence=0.7,
-        evidence_count=3,
-        raw_probability=0.65,
-    )
-
-
-def _make_correlation() -> BeliefCorrelation:
-    return BeliefCorrelation(
-        source_topic="climate",
-        target_topic="energy",
-        correlation_type=EdgeType.CORRELATES_WITH,
-        strength=0.8,
-        reasoning="Climate mitigation often involves energy transition.",
+        belief_text=f"Agent's position on {topic}",
     )
 
 
@@ -88,20 +65,17 @@ def _make_correlation() -> BeliefCorrelation:
 def mock_agent() -> MagicMock:
     agent = MagicMock()
     ess = _make_ess()
-    prob = _make_probability()
+    beliefs = [_make_belief("climate", 0.4), _make_belief("energy", 0.3)]
+    belief_map = {b.topic: b for b in beliefs}
 
     agent.respond.return_value = "Renewable energy does reduce emissions significantly."
     agent.last_ess = ess
     agent.ingest.return_value = ess
-    agent.sponge.opinion_vectors = {"climate": 0.4, "energy": 0.3}
-    agent.sponge.get_belief.side_effect = lambda t: _make_belief(topic=t)
-    agent.sponge.estimate_probability.return_value = prob
-    agent.sponge.version = 5
-    agent.sponge.interaction_count = 42
-    agent.sponge.belief_count = 2
-    agent.sponge.behavioral_signature.topic_engagement = {"climate": 5, "energy": 3}
-    agent.sponge.staged_opinion_updates = []
-    agent._run_async.return_value = [_make_correlation()]
+
+    agent.get_all_beliefs.return_value = beliefs
+    agent.get_belief.side_effect = lambda topic: belief_map.get(topic)
+    agent.get_health.return_value = (len(beliefs), 5)
+
     return agent
 
 
@@ -128,11 +102,8 @@ class TestHealth:
         r = client.get("/health")
         assert r.status_code == 200
         body = r.json()
-        assert body["version"] == 5
-        assert body["interaction_count"] == 42
         assert body["belief_count"] == 2
-        assert body["topic_count"] == 2
-        assert body["staged_updates"] == 0
+        assert body["snapshot_version"] == 5
 
     def test_503_when_agent_not_initialized(self, client_no_agent: TestClient) -> None:
         r = client_no_agent.get("/health")
@@ -177,7 +148,7 @@ class TestChatCompletions:
         assert r.status_code == 200
         body = r.json()
         assert body["object"] == "chat.completion"
-        assert body["choices"][0]["message"]["role"] == "assistant"
+        assert body["choices"][0]["message"]["role"] == ChatRole.ASSISTANT
         assert "emissions" in body["choices"][0]["message"]["content"]
         assert body["choices"][0]["finish_reason"] == "stop"
         assert body["usage"]["total_tokens"] > 0
@@ -189,6 +160,22 @@ class TestChatCompletions:
         )
         assert r.status_code == 400
         assert "No user message" in r.json()["detail"]
+
+    def test_passes_full_messages_to_agent(self, client: TestClient, mock_agent: MagicMock) -> None:
+        client.post(
+            "/v1/chat/completions",
+            json={
+                "messages": [
+                    {"role": "user", "content": "First message"},
+                    {"role": "assistant", "content": "Some reply"},
+                    {"role": "user", "content": "Second message"},
+                ]
+            },
+        )
+        mock_agent.respond.assert_called_once()
+        passed_messages = mock_agent.respond.call_args[0][0]
+        assert len(passed_messages) == 3
+        assert passed_messages[-1]["content"] == "Second message"
 
     def test_stream_returns_sse(self, client: TestClient, mock_agent: MagicMock) -> None:
         mock_agent.respond_stream.return_value = iter([("Hello", ""), (" world", "")])
@@ -205,57 +192,12 @@ class TestChatCompletions:
         assert len(lines) >= 2
         assert "data: [DONE]" in r.text
 
-    def test_uses_last_user_message(self, client: TestClient, mock_agent: MagicMock) -> None:
-        client.post(
-            "/v1/chat/completions",
-            json={
-                "messages": [
-                    {"role": "user", "content": "First message"},
-                    {"role": "assistant", "content": "Some reply"},
-                    {"role": "user", "content": "Second message"},
-                ]
-            },
-        )
-        mock_agent.respond.assert_called_once_with("Second message")
-
     def test_503_when_agent_not_initialized(self, client_no_agent: TestClient) -> None:
         r = client_no_agent.post(
             "/v1/chat/completions",
             json={"messages": [{"role": "user", "content": "Hello"}]},
         )
         assert r.status_code == 503
-
-
-# ---------------------------------------------------------------------------
-# Embeddings
-# ---------------------------------------------------------------------------
-
-
-class TestEmbeddings:
-    def test_single_text_embedding(self, client: TestClient, mock_agent: MagicMock) -> None:
-        mock_agent._embedder.embed_documents.return_value = [[0.1, 0.2, 0.3]]
-        r = client.post("/v1/embeddings", json={"input": "Hello world"})
-        assert r.status_code == 200
-        body = r.json()
-        assert body["object"] == "list"
-        assert len(body["data"]) == 1
-        assert body["data"][0]["embedding"] == [0.1, 0.2, 0.3]
-        assert body["data"][0]["index"] == 0
-
-    def test_multiple_texts_embedding(self, client: TestClient, mock_agent: MagicMock) -> None:
-        mock_agent._embedder.embed_documents.return_value = [[0.1], [0.2], [0.3]]
-        r = client.post("/v1/embeddings", json={"input": ["text one", "text two", "text three"]})
-        assert r.status_code == 200
-        body = r.json()
-        assert len(body["data"]) == 3
-        assert body["data"][1]["index"] == 1
-
-    def test_usage_counts_tokens(self, client: TestClient, mock_agent: MagicMock) -> None:
-        mock_agent._embedder.embed_documents.return_value = [[0.0] * 10]
-        r = client.post("/v1/embeddings", json={"input": "five words in here"})
-        assert r.status_code == 200
-        assert r.json()["usage"]["completion_tokens"] == 0
-        assert r.json()["usage"]["total_tokens"] > 0
 
 
 # ---------------------------------------------------------------------------
@@ -270,7 +212,7 @@ class TestSimpleChat:
         body = r.json()
         assert "emissions" in body["response"]
         assert body["ess_score"] == pytest.approx(0.55)
-        assert body["reasoning_type"] == "empirical_data"
+        assert body["reasoning_type"] == ReasoningType.EMPIRICAL_DATA
         assert "climate" in body["topics"]
 
     def test_503_when_agent_not_initialized(self, client_no_agent: TestClient) -> None:
@@ -290,7 +232,7 @@ class TestIngest:
         body = r.json()
         assert body["success"] is True
         assert body["score"] == pytest.approx(0.55)
-        assert body["reasoning_type"] == "empirical_data"
+        assert body["reasoning_type"] == ReasoningType.EMPIRICAL_DATA
         assert body["belief_update_recommended"] is True
         assert "climate" in body["topics"]
 
@@ -320,87 +262,19 @@ class TestBeliefs:
         assert len(beliefs) == 2
         for b in beliefs:
             assert "topic" in b
-            assert "position" in b
+            assert "valence" in b
             assert "confidence" in b
             assert "evidence_count" in b
             assert "uncertainty" in b
-
-    def test_beliefs_sorted_by_absolute_position(
-        self, client: TestClient, mock_agent: MagicMock
-    ) -> None:
-        mock_agent.sponge.opinion_vectors = {"low": 0.1, "high": 0.8, "mid": -0.5}
-        mock_agent.sponge.get_belief.side_effect = lambda t: _make_belief(
-            topic=t, position={"low": 0.1, "high": 0.8, "mid": -0.5}[t]
-        )
-        r = client.get("/beliefs")
-        positions = [abs(b["position"]) for b in r.json()]
-        assert positions == sorted(positions, reverse=True)
+            assert "belief_text" in b
 
     def test_get_specific_belief(self, client: TestClient) -> None:
         r = client.get("/beliefs/climate")
         assert r.status_code == 200
         body = r.json()
         assert body["topic"] == "climate"
-        assert "position" in body
+        assert "valence" in body
 
-    def test_get_unknown_belief_returns_defaults(
-        self, client: TestClient, mock_agent: MagicMock
-    ) -> None:
-        mock_agent.sponge.get_belief.side_effect = None
-        mock_agent.sponge.get_belief.return_value = _make_belief(topic="unknown", position=0.0)
+    def test_get_unknown_belief_returns_404(self, client: TestClient) -> None:
         r = client.get("/beliefs/unknown_topic")
-        assert r.status_code == 200
-        assert r.json()["position"] == pytest.approx(0.0)
-
-
-# ---------------------------------------------------------------------------
-# Probability
-# ---------------------------------------------------------------------------
-
-
-class TestProbability:
-    def test_post_probability(self, client: TestClient) -> None:
-        r = client.post("/beliefs/climate/probability", json={"base_rate": 0.5})
-        assert r.status_code == 200
-        body = r.json()
-        assert body["topic"] == "climate"
-        assert body["probability"] == pytest.approx(0.72)
-        assert body["evidence_count"] == 3
-
-    def test_get_probability_compat(self, client: TestClient) -> None:
-        r = client.get("/probability/climate?base_rate=0.3")
-        assert r.status_code == 200
-        assert r.json()["topic"] == "climate"
-
-    def test_default_base_rate(self, client: TestClient, mock_agent: MagicMock) -> None:
-        client.get("/probability/climate")
-        mock_agent.sponge.estimate_probability.assert_called_with("climate", base_rate=0.5)
-
-
-# ---------------------------------------------------------------------------
-# Correlations
-# ---------------------------------------------------------------------------
-
-
-class TestCorrelations:
-    def test_get_correlations(self, client: TestClient) -> None:
-        r = client.get("/beliefs/climate/correlations")
-        assert r.status_code == 200
-        corrs = r.json()
-        assert isinstance(corrs, list)
-        assert len(corrs) == 1
-        c = corrs[0]
-        assert c["source_topic"] == "climate"
-        assert c["target_topic"] == "energy"
-        assert c["strength"] == pytest.approx(0.8)
-
-    def test_get_correlations_compat(self, client: TestClient) -> None:
-        r = client.get("/correlations/climate")
-        assert r.status_code == 200
-        assert len(r.json()) == 1
-
-    def test_empty_correlations(self, client: TestClient, mock_agent: MagicMock) -> None:
-        mock_agent._run_async.return_value = []
-        r = client.get("/beliefs/niche_topic/correlations")
-        assert r.status_code == 200
-        assert r.json() == []
+        assert r.status_code == 404

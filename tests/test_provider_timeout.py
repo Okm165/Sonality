@@ -7,6 +7,8 @@ from urllib.error import URLError
 
 import pytest
 
+from sonality.schema import SemanticCategory
+
 
 class TestTimeoutFailsFast:
     """TimeoutError should raise immediately without retry waits."""
@@ -155,7 +157,7 @@ class TestLLMSemaphoreContention:
             provider.default_provider._semaphore,
             patch("sonality.memory.semantic_features.llm_call", side_effect=fake_llm_call),
         ):
-            worker._extract_features("ep-uid-test", "some content", "personality")
+            worker._extract_features("ep-uid-test", "some content", SemanticCategory.PERSONALITY)
 
         assert llm_call_count == 0
 
@@ -183,7 +185,7 @@ class TestLLMSemaphoreContention:
             patch("sonality.memory.semantic_features.llm_call", side_effect=fake_llm_call),
             patch.object(worker, "_load_existing_features", return_value=""),
         ):
-            worker._extract_features("ep-uid-test", "some content", "personality")
+            worker._extract_features("ep-uid-test", "some content", SemanticCategory.PERSONALITY)
 
         assert llm_call_count == 1
 

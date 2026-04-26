@@ -110,44 +110,32 @@ def test_classify_marks_defaults_on_invalid_fields() -> None:
     assert result.default_severity == "coercion"
 
 
-def test_classify_retries_on_malformed_required_fields() -> None:
-    """Test that classify retries on malformed required fields."""
-    payloads: list[Mapping[str, object]] = [
-        {
-            "score": "0.71",
-            "reasoning_type": "vibes_only",
-            "source_reliability": "peer_reviewed",
-            "internal_consistency": True,
-            "novelty": 0.4,
-            "topics": ["governance"],
-            "summary": "First pass with malformed required enum.",
-            "opinion_direction": "supports",
-        },
-        {
-            "score": "0.71",
-            "reasoning_type": "logical_argument",
-            "source_reliability": "peer_reviewed",
-            "internal_consistency": True,
-            "novelty": 0.4,
-            "topics": ["governance"],
-            "summary": "Second pass corrected enum.",
-            "opinion_direction": "supports",
-        },
-    ]
+def test_classify_coerces_malformed_enum_without_retry() -> None:
+    """Malformed enum values are coerced to defaults (no retry for present-but-invalid)."""
+    payload: Mapping[str, object] = {
+        "score": "0.71",
+        "reasoning_type": "vibes_only",
+        "source_reliability": "peer_reviewed",
+        "internal_consistency": True,
+        "novelty": 0.4,
+        "topics": ["governance"],
+        "summary": "Malformed required enum gets coerced.",
+        "opinion_direction": "supports",
+    }
     with patch("sonality.ess.default_provider") as mock_provider:
-        mock_provider.chat_completion = _mock_completion(payloads)
+        mock_provider.chat_completion = _mock_completion([payload])
         result = classify("message", "snapshot")
 
-    assert result.attempt_count == 2
-    assert result.reasoning_type == ReasoningType.LOGICAL_ARGUMENT
-    assert not result.used_defaults
-    assert result.defaulted_fields == ()
-    assert result.default_severity == "none"
+    assert result.attempt_count == 1
+    assert result.reasoning_type == ReasoningType.NO_ARGUMENT
+    assert result.used_defaults
+    assert "coerced:reasoning_type" in result.defaulted_fields
+    assert result.default_severity == "coercion"
 
 
 def test_classify_debunked_claim_aliases_resolve() -> None:
-    """debunked, misinformation, conspiracy all map to debunked_claim."""
-    for alias in ("debunked", "misinformation", "conspiracy", "debunked_claim"):
+    """debunked and debunked_claim map to DEBUNKED_CLAIM."""
+    for alias in ("debunked", "debunked_claim", "debunkedclaim"):
         payload = {
             "score": "0.04",
             "reasoning_type": alias,
