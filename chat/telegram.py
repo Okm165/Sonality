@@ -103,7 +103,7 @@ async def cmd_beliefs(msg: Message, client: SonalityClient) -> None:
             await msg.answer("No beliefs yet.")
             return
         lines = [
-            f"• <b>{b.topic}</b>: {b.position:+.2f} ({b.confidence:.0%})" for b in beliefs[:15]
+            f"• <b>{b.topic}</b>: {b.valence:+.2f} ({b.confidence:.0%})" for b in beliefs[:15]
         ]
         await msg.answer("<b>Beliefs:</b>\n" + "\n".join(lines), parse_mode="HTML")
     except Exception as e:
@@ -116,8 +116,7 @@ async def cmd_health(msg: Message, client: SonalityClient) -> None:
     try:
         h = await client.health()
         await msg.answer(
-            f"<b>Health:</b> v{h.version} | {h.interaction_count} interactions | "
-            f"{h.belief_count} beliefs | {h.staged_updates} staged",
+            f"<b>Health:</b> snapshot v{h.snapshot_version} | {h.belief_count} beliefs",
             parse_mode="HTML",
         )
     except Exception as e:
@@ -223,7 +222,7 @@ async def _main() -> None:
     async with SonalityClient() as client, AudioProcessor() as audio:
         try:
             h = await client.health()
-            log.info("Connected: v%d, %d beliefs", h.version, h.belief_count)
+            log.info("Connected: snapshot_v%d, %d beliefs", h.snapshot_version, h.belief_count)
         except Exception as e:
             sys.exit(f"Cannot connect to Sonality: {e}")
 

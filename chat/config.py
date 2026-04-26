@@ -37,5 +37,6 @@ TTS_OPTIMIZE_TEMPERATURE: Final = _env_float("CHAT_TTS_OPTIMIZE_TEMPERATURE", 0.
 TTS_OPTIMIZE_TIMEOUT: Final = _env_float("CHAT_TTS_OPTIMIZE_TIMEOUT", 60.0)
 
 # --- General ---
+MODEL_ID: Final = _env_str("CHAT_MODEL_ID", "sonality")
 HTTP_TIMEOUT: Final = _env_float("CHAT_HTTP_TIMEOUT", 512.0)
 LOG_LEVEL: Final = _env_str("CHAT_LOG_LEVEL", "DEBUG")

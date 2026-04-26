@@ -1,4 +1,4 @@
-"""Async Sonality API client."""
+"""Async Sonality API client with client-side conversation history."""
 
 from __future__ import annotations
 
@@ -23,106 +23,110 @@ class ChatResponse:
 
 @dataclass(frozen=True, slots=True)
 class HealthStatus:
-    version: int
-    interaction_count: int
     belief_count: int
-    topic_count: int
-    staged_updates: int
+    snapshot_version: int
 
 
 @dataclass(frozen=True, slots=True)
 class Belief:
     topic: str
-    position: float
+    valence: float
     confidence: float
+    belief_text: str = ""
 
 
 class SonalityClient:
-    """Async client for Sonality API."""
+    """Async client that owns conversation history and sends it with each request."""
 
-    def __init__(self) -> None:
+    def __init__(self, max_history: int = 40) -> None:
         self._client = httpx.AsyncClient(
             base_url=config.SONALITY_URL, timeout=httpx.Timeout(config.HTTP_TIMEOUT, connect=10.0)
         )
-        log.debug("SonalityClient: url=%s timeout=%.0fs", config.SONALITY_URL, config.HTTP_TIMEOUT)
+        self._history: list[dict[str, str]] = []
+        self._max_history = max_history
+
+    def clear_history(self) -> None:
+        self._history.clear()
 
     async def health(self) -> HealthStatus:
-        log.debug("Health request")
         r = await self._client.get("/health")
-        if r.status_code != 200:
-            log.error("Health failed: status=%d body=%s", r.status_code, r.text[:500])
         r.raise_for_status()
         d = r.json()
-        status = HealthStatus(
-            version=d.get("version", 0),
-            interaction_count=d.get("interaction_count", 0),
+        return HealthStatus(
             belief_count=d.get("belief_count", 0),
-            topic_count=d.get("topic_count", 0),
-            staged_updates=d.get("staged_updates", 0),
+            snapshot_version=d.get("snapshot_version", 0),
         )
-        log.debug(
-            "Health: v%d interactions=%d beliefs=%d",
-            status.version,
-            status.interaction_count,
-            status.belief_count,
-        )
-        return status
 
     async def beliefs(self) -> list[Belief]:
-        log.debug("Beliefs request")
         r = await self._client.get("/beliefs")
-        if r.status_code != 200:
-            log.error("Beliefs failed: status=%d body=%s", r.status_code, r.text[:500])
         r.raise_for_status()
         data = r.json()
         items = data if isinstance(data, list) else data.get("beliefs", [])
-        beliefs = [
+        return [
             Belief(
                 topic=b.get("topic", ""),
-                position=float(b.get("position", 0)),
+                valence=float(b.get("valence", 0)),
                 confidence=float(b.get("confidence", 0)),
+                belief_text=b.get("belief_text", ""),
             )
             for b in items
         ]
-        log.debug("Beliefs: %d items", len(beliefs))
-        return beliefs
 
     async def chat(self, message: str) -> ChatResponse:
-        log.debug("Chat request: %d chars", len(message))
-        r = await self._client.post("/chat", json={"message": message})
-        if r.status_code != 200:
-            log.error("Chat failed: status=%d body=%s", r.status_code, r.text[:500])
-        r.raise_for_status()
+        """Send message with full conversation history."""
+        self._history.append({"role": "user", "content": message})
+        self._trim_history()
+        try:
+            r = await self._client.post(
+                "/chat", json={"message": message, "context": self._history[:-1]}
+            )
+            r.raise_for_status()
+        except Exception:
+            self._history.pop()
+            raise
         d = r.json()
-        result = ChatResponse(
-            text=d.get("response", ""),
+        response_text = d.get("response", "")
+        self._history.append({"role": "assistant", "content": response_text})
+        return ChatResponse(
+            text=response_text,
             ess_score=float(d.get("ess_score", 0)),
             topics=tuple(d.get("topics", [])),
         )
-        log.info("Chat: %.50s... -> %.50s... (ess=%.2f)", message, result.text, result.ess_score)
-        return result
 
     async def chat_stream(self, message: str) -> AsyncIterator[str]:
-        """Stream chat response (SSE)."""
-        async with self._client.stream(
-            "POST",
-            "/v1/chat/completions",
-            json={
-                "model": "sonality",
-                "messages": [{"role": "user", "content": message}],
-                "stream": True,
-            },
-        ) as r:
-            r.raise_for_status()
-            async for line in r.aiter_lines():
-                if not line or line == "data: [DONE]" or not line.startswith("data: "):
-                    continue
-                try:
-                    chunk = json.loads(line[6:])
-                    if content := chunk.get("choices", [{}])[0].get("delta", {}).get("content"):
-                        yield content
-                except (json.JSONDecodeError, IndexError):
-                    continue
+        """Stream chat response with full history via SSE."""
+        self._history.append({"role": "user", "content": message})
+        self._trim_history()
+        chunks: list[str] = []
+        try:
+            async with self._client.stream(
+                "POST",
+                "/v1/chat/completions",
+                json={
+                    "model": config.MODEL_ID,
+                    "messages": list(self._history),
+                    "stream": True,
+                },
+            ) as r:
+                r.raise_for_status()
+                async for line in r.aiter_lines():
+                    if not line or line == "data: [DONE]" or not line.startswith("data: "):
+                        continue
+                    try:
+                        chunk = json.loads(line[6:])
+                        if content := chunk.get("choices", [{}])[0].get("delta", {}).get("content"):
+                            chunks.append(content)
+                            yield content
+                    except (json.JSONDecodeError, IndexError):
+                        continue
+        except Exception:
+            self._history.pop()
+            raise
+        self._history.append({"role": "assistant", "content": "".join(chunks)})
+
+    def _trim_history(self) -> None:
+        while len(self._history) > self._max_history:
+            self._history.pop(0)
 
     async def close(self) -> None:
         await self._client.aclose()
