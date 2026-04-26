@@ -7,7 +7,6 @@ Bi-temporal tracking with created_at/valid_at/expired_at on episodes.
 
 from __future__ import annotations
 
-import contextlib
 import logging
 import re
 from collections.abc import Mapping
@@ -18,9 +17,29 @@ from typing import Final
 from neo4j import AsyncDriver, AsyncManagedTransaction
 
 from .. import config
-from .context_format import format_episode_line
 
 log = logging.getLogger(__name__)
+
+
+def format_episode_line(
+    *, created_at: str, summary: str, content: str, content_limit: int = 300,
+) -> str:
+    """Render one compact context line for retrieval/reflection."""
+    date_text = created_at[:10] if created_at else "?"
+    return f"[{date_text}] {summary or content[:content_limit]}"
+
+
+def format_episode_block(
+    *, created_at: str, content: str, content_limit: int = 500,
+) -> str:
+    """Render one dated episode content block for summarization prompts."""
+    date_text = created_at[:10] if created_at else "?"
+    return f"[{date_text}]\n{content[:content_limit]}"
+
+
+_DEFAULT_SESSION_ID: Final = "default"
+_DEFAULT_TONE: Final = "curious, direct, unpretentious"
+BELIEF_PROMPT_WINDOW: Final = 15
 
 
 class EdgeType(StrEnum):
@@ -31,20 +50,36 @@ class EdgeType(StrEnum):
     CONTRADICTS_BELIEF = "CONTRADICTS_BELIEF"
     BELONGS_TO_SEGMENT = "BELONGS_TO_SEGMENT"
     CONSOLIDATES = "CONSOLIDATES"
-    CORRELATES_WITH = "CORRELATES_WITH"
-    ANTI_CORRELATES_WITH = "ANTI_CORRELATES_WITH"
-    CAUSALLY_LINKED = "CAUSALLY_LINKED"
 
 
 @dataclass(frozen=True, slots=True)
-class BeliefCorrelation:
-    """Correlation between two belief topics."""
+class BeliefNode:
+    """Full belief state stored in Neo4j."""
 
-    source_topic: str
-    target_topic: str
-    correlation_type: EdgeType
-    strength: float
-    reasoning: str
+    topic: str
+    valence: float = 0.0
+    confidence: float = 0.5
+    uncertainty: float = 0.5
+    evidence_count: int = 0
+    belief_text: str = ""
+    provenance: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class PersonalitySnapshot:
+    """Agent identity narrative stored in Neo4j."""
+
+    text: str = ""
+    tone: str = _DEFAULT_TONE
+    version: int = 0
+
+
+SEED_SNAPSHOT: Final = (
+    "I am an AI entity forming genuine opinions through conversation and reflection. "
+    "I value intellectual honesty and analytical thinking. I am direct about "
+    "disagreement and do not default to agreement. My views are still forming "
+    "as I accumulate evidence and experience."
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,7 +129,6 @@ class MemoryGraph:
         topics: list[str],
         segment_id: str,
         segment_label: str,
-        segment_reasoning: str,
     ) -> None:
         """Store episode + derivatives + graph links in one write transaction."""
         log.debug(
@@ -114,14 +148,17 @@ class MemoryGraph:
                 topics,
                 segment_id,
                 segment_label,
-                segment_reasoning,
             )
 
     @staticmethod
-    async def _create_episode_tx(
+    async def _store_episode_atomically_tx(
         tx: AsyncManagedTransaction,
         episode: EpisodeNode,
+        derivatives: list[DerivativeNode],
         prev_uid: str,
+        topics: list[str],
+        segment_id: str,
+        segment_label: str,
     ) -> None:
         await tx.run(
             """
@@ -136,57 +173,29 @@ class MemoryGraph:
                 agent_response: $agent_response
             })
             """,
-            uid=episode.uid,
-            content=episode.content,
-            summary=episode.summary,
-            topics=episode.topics,
-            ess_score=episode.ess_score,
-            created_at=episode.created_at,
-            valid_at=episode.valid_at,
-            expired_at=episode.expired_at,
-            utility_score=episode.utility_score,
-            access_count=episode.access_count,
-            last_accessed=episode.last_accessed,
-            segment_id=episode.segment_id,
-            consolidation_level=episode.consolidation_level,
-            archived=episode.archived,
-            user_message=episode.user_message,
+            uid=episode.uid, content=episode.content, summary=episode.summary,
+            topics=episode.topics, ess_score=episode.ess_score,
+            created_at=episode.created_at, valid_at=episode.valid_at,
+            expired_at=episode.expired_at, utility_score=episode.utility_score,
+            access_count=episode.access_count, last_accessed=episode.last_accessed,
+            segment_id=episode.segment_id, consolidation_level=episode.consolidation_level,
+            archived=episode.archived, user_message=episode.user_message,
             agent_response=episode.agent_response,
         )
         if prev_uid:
             await tx.run(
-                """
-                MATCH (prev:Episode {uid: $prev_uid})
-                MATCH (curr:Episode {uid: $curr_uid})
-                CREATE (prev)-[:TEMPORAL_NEXT]->(curr)
-                """,
-                prev_uid=prev_uid,
-                curr_uid=episode.uid,
+                "MATCH (prev:Episode {uid: $prev_uid}) "
+                "MATCH (curr:Episode {uid: $curr_uid}) "
+                f"CREATE (prev)-[:{EdgeType.TEMPORAL_NEXT}]->(curr)",
+                prev_uid=prev_uid, curr_uid=episode.uid,
             )
-
-    @staticmethod
-    async def _store_episode_atomically_tx(
-        tx: AsyncManagedTransaction,
-        episode: EpisodeNode,
-        derivatives: list[DerivativeNode],
-        prev_uid: str,
-        topics: list[str],
-        segment_id: str,
-        segment_label: str,
-        segment_reasoning: str,
-    ) -> None:
-        await MemoryGraph._create_episode_tx(tx, episode, prev_uid)
         if derivatives:
             await MemoryGraph._create_derivatives_tx(tx, derivatives, episode.uid)
         for topic in topics:
             await MemoryGraph._link_topic_tx(tx, episode.uid, topic)
         if segment_id:
             await MemoryGraph._link_segment_tx(
-                tx,
-                episode.uid,
-                segment_id,
-                segment_label,
-                segment_reasoning,
+                tx, episode.uid, segment_id, segment_label,
             )
 
     @staticmethod
@@ -197,15 +206,15 @@ class MemoryGraph:
     ) -> None:
         for d in derivatives:
             await tx.run(
-                """
-                CREATE (d:Derivative {
+                f"""
+                CREATE (d:Derivative {{
                     uid: $uid, source_episode_uid: $source_uid,
                     text: $text, key_concept: $key_concept,
                     sequence_num: $seq
-                })
+                }})
                 WITH d
-                MATCH (e:Episode {uid: $episode_uid})
-                CREATE (d)-[:DERIVED_FROM]->(e)
+                MATCH (e:Episode {{uid: $episode_uid}})
+                CREATE (d)-[:{EdgeType.DERIVED_FROM}]->(e)
                 """,
                 uid=d.uid,
                 source_uid=d.source_episode_uid,
@@ -218,14 +227,14 @@ class MemoryGraph:
     @staticmethod
     async def _link_topic_tx(tx: AsyncManagedTransaction, episode_uid: str, topic: str) -> None:
         await tx.run(
-            """
-            MERGE (t:Topic {name: $topic})
+            f"""
+            MERGE (t:Topic {{name: $topic}})
             ON CREATE SET t.episode_count = 1, t.first_seen_at = datetime()
             ON MATCH SET t.episode_count = t.episode_count + 1
             SET t.last_seen_at = datetime()
             WITH t
-            MATCH (e:Episode {uid: $uid})
-            CREATE (e)-[:DISCUSSES]->(t)
+            MATCH (e:Episode {{uid: $uid}})
+            CREATE (e)-[:{EdgeType.DISCUSSES}]->(t)
             """,
             topic=topic.strip().lower(),
             uid=episode_uid,
@@ -237,30 +246,23 @@ class MemoryGraph:
         episode_uid: str,
         segment_id: str,
         label: str,
-        reasoning: str,
     ) -> None:
         await tx.run(
-            """
-            MERGE (s:Segment {segment_id: $segment_id})
+            f"""
+            MERGE (s:Segment {{segment_id: $segment_id}})
             ON CREATE SET s.label = $label, s.start_time = datetime(),
-                          s.boundary_reasoning = $reasoning,
                           s.episode_count = 1, s.consolidated = false
             ON MATCH SET s.episode_count = s.episode_count + 1,
                          s.end_time = datetime(),
                          s.label = CASE
                             WHEN (s.label IS NULL OR s.label = '') AND $label <> ''
-                            THEN $label ELSE s.label END,
-                         s.boundary_reasoning = CASE
-                            WHEN (s.boundary_reasoning IS NULL OR s.boundary_reasoning = '')
-                                 AND $reasoning <> ''
-                            THEN $reasoning ELSE s.boundary_reasoning END
+                            THEN $label ELSE s.label END
             WITH s
-            MATCH (e:Episode {uid: $uid})
-            CREATE (e)-[:BELONGS_TO_SEGMENT]->(s)
+            MATCH (e:Episode {{uid: $uid}})
+            CREATE (e)-[:{EdgeType.BELONGS_TO_SEGMENT}]->(s)
             """,
             segment_id=segment_id,
             label=label,
-            reasoning=reasoning,
             uid=episode_uid,
         )
 
@@ -292,13 +294,18 @@ class MemoryGraph:
         tx: AsyncManagedTransaction,
         episode_uid: str,
         topic: str,
-        edge_type: str,
+        edge_type: EdgeType,
         strength: float,
         reasoning: str,
     ) -> None:
         await tx.run(
             f"""
             MERGE (b:Belief {{topic: $topic}})
+            ON CREATE SET b.valence = 0.0, b.confidence = 0.5, b.uncertainty = 0.5,
+                          b.evidence_count = 0, b.belief_text = '', b.provenance = '',
+                          b.formed_at = datetime()
+            SET b.evidence_count = coalesce(b.evidence_count, 0) + 1,
+                b.last_updated = datetime()
             WITH b
             MATCH (e:Episode {{uid: $uid}})
             CREATE (e)-[:{edge_type} {{
@@ -323,51 +330,31 @@ class MemoryGraph:
             records = [record async for record in result]
             return [_record_to_episode(r["e"]) for r in records]
 
-    async def find_belief_related_episodes(
-        self, query: str, *, limit: int = 20
-    ) -> list[EpisodeNode]:
-        """Retrieve episodes attached to belief edges matching query keywords."""
-        keywords = [token for token in re.split(r"[^a-z0-9]+", query.lower()) if len(token) > 2]
+    async def _keyword_episode_search(self, cypher: str, query: str, limit: int) -> list[EpisodeNode]:
+        keywords = [t for t in re.split(r"[^a-z0-9]+", query.lower()) if len(t) > 2]
         if not keywords:
             return []
         async with self._driver.session(database=_DB) as session:
-            result = await session.run(
-                """
-                MATCH (e:Episode)-[r:SUPPORTS_BELIEF|CONTRADICTS_BELIEF]->(b:Belief)
-                WHERE NOT e.archived
-                  AND ANY(keyword IN $keywords WHERE toLower(b.topic) CONTAINS keyword)
-                RETURN DISTINCT e
-                ORDER BY e.utility_score DESC, e.created_at DESC
-                LIMIT $limit
-                """,
-                keywords=keywords[:8],
-                limit=limit,
-            )
-            records = [record async for record in result]
-            return [_record_to_episode(r["e"]) for r in records]
+            result = await session.run(cypher, keywords=keywords[:8], limit=limit)
+            return [_record_to_episode(r["e"]) async for r in result]
 
-    async def find_topic_related_episodes(
-        self, query: str, *, limit: int = 20
-    ) -> list[EpisodeNode]:
+    async def find_belief_related_episodes(self, query: str, *, limit: int = 20) -> list[EpisodeNode]:
+        """Retrieve episodes attached to belief edges matching query keywords."""
+        return await self._keyword_episode_search(f"""
+            MATCH (e:Episode)-[:{EdgeType.SUPPORTS_BELIEF}|{EdgeType.CONTRADICTS_BELIEF}]->(b:Belief)
+            WHERE NOT e.archived
+              AND ANY(keyword IN $keywords WHERE toLower(b.topic) CONTAINS keyword)
+            RETURN DISTINCT e ORDER BY e.utility_score DESC, e.created_at DESC LIMIT $limit
+        """, query, limit)
+
+    async def find_topic_related_episodes(self, query: str, *, limit: int = 20) -> list[EpisodeNode]:
         """Retrieve episodes by traversing Topic nodes relevant to query keywords."""
-        keywords = [token for token in re.split(r"[^a-z0-9]+", query.lower()) if len(token) > 2]
-        if not keywords:
-            return []
-        async with self._driver.session(database=_DB) as session:
-            result = await session.run(
-                """
-                MATCH (e:Episode)-[:DISCUSSES]->(t:Topic)
-                WHERE NOT e.archived
-                  AND ANY(keyword IN $keywords WHERE toLower(t.name) CONTAINS keyword)
-                RETURN DISTINCT e
-                ORDER BY e.utility_score DESC, e.created_at DESC
-                LIMIT $limit
-                """,
-                keywords=keywords[:8],
-                limit=limit,
-            )
-            records = [record async for record in result]
-            return [_record_to_episode(r["e"]) for r in records]
+        return await self._keyword_episode_search(f"""
+            MATCH (e:Episode)-[:{EdgeType.DISCUSSES}]->(t:Topic)
+            WHERE NOT e.archived
+              AND ANY(keyword IN $keywords WHERE toLower(t.name) CONTAINS keyword)
+            RETURN DISTINCT e ORDER BY e.utility_score DESC, e.created_at DESC LIMIT $limit
+        """, query, limit)
 
     async def traverse_temporal_context(
         self,
@@ -381,9 +368,9 @@ class MemoryGraph:
             result = await session.run(
                 f"""
                 MATCH (focal:Episode {{uid: $uid}})
-                OPTIONAL MATCH path_before = (prev:Episode)-[:TEMPORAL_NEXT*1..{before}]->(focal)
+                OPTIONAL MATCH path_before = (prev:Episode)-[:{EdgeType.TEMPORAL_NEXT}*1..{before}]->(focal)
                   WHERE NOT prev.archived
-                OPTIONAL MATCH path_after = (focal)-[:TEMPORAL_NEXT*1..{after}]->(next:Episode)
+                OPTIONAL MATCH path_after = (focal)-[:{EdgeType.TEMPORAL_NEXT}*1..{after}]->(next:Episode)
                   WHERE NOT next.archived
                 WITH focal,
                      COLLECT(DISTINCT prev) AS befores,
@@ -403,44 +390,6 @@ class MemoryGraph:
                 episodes.append(_record_to_episode(node))
             return episodes
 
-    async def update_utility(
-        self,
-        episode_uid: str,
-        delta: float,
-        *,
-        propagation: float = 0.3,
-    ) -> None:
-        """Update utility score with Bellman-style propagation to neighbors."""
-        async with self._driver.session(database=_DB) as session:
-            await session.run(
-                """
-                MATCH (e:Episode {uid: $uid})
-                SET e.utility_score = CASE
-                    WHEN e.utility_score + $delta > 2.0 THEN 2.0
-                    WHEN e.utility_score + $delta < 0.0 THEN 0.0
-                    ELSE e.utility_score + $delta
-                END,
-                e.access_count = e.access_count + 1,
-                e.last_accessed = datetime()
-                """,
-                uid=episode_uid,
-                delta=delta,
-            )
-            # Propagate to temporal neighbors
-            if propagation > 0:
-                await session.run(
-                    """
-                    MATCH (e:Episode {uid: $uid})-[:TEMPORAL_NEXT]-(neighbor:Episode)
-                    SET neighbor.utility_score = CASE
-                        WHEN neighbor.utility_score + $prop_delta > 2.0 THEN 2.0
-                        WHEN neighbor.utility_score + $prop_delta < 0.0 THEN 0.0
-                        ELSE neighbor.utility_score + $prop_delta
-                    END
-                    """,
-                    uid=episode_uid,
-                    prop_delta=delta * propagation,
-                )
-
     async def archive_episode(self, episode_uid: str) -> None:
         """Soft-archive an episode (set archived=True)."""
         async with self._driver.session(database=_DB) as session:
@@ -451,25 +400,27 @@ class MemoryGraph:
                 """,
                 uid=episode_uid,
             )
+        log.info("GRAPH archive_episode uid=%s", episode_uid[:8])
 
     async def delete_episode(self, episode_uid: str) -> None:
         """Hard-delete an episode and its derivative nodes."""
         async with self._driver.session(database=_DB) as session:
             await session.run(
-                """
-                MATCH (e:Episode {uid: $uid})
-                OPTIONAL MATCH (d:Derivative)-[:DERIVED_FROM]->(e)
+                f"""
+                MATCH (e:Episode {{uid: $uid}})
+                OPTIONAL MATCH (d:Derivative)-[:{EdgeType.DERIVED_FROM}]->(e)
                 DETACH DELETE d, e
                 """,
                 uid=episode_uid,
             )
+        log.warning("GRAPH delete_episode uid=%s", episode_uid[:8])
 
     async def get_segment_episodes(self, segment_id: str) -> list[EpisodeNode]:
         """Get all episodes in a segment, ordered by creation time."""
         async with self._driver.session(database=_DB) as session:
             result = await session.run(
-                """
-                MATCH (e:Episode)-[:BELONGS_TO_SEGMENT]->(s:Segment {segment_id: $seg_id})
+                f"""
+                MATCH (e:Episode)-[:{EdgeType.BELONGS_TO_SEGMENT}]->(s:Segment {{segment_id: $seg_id}})
                 WHERE NOT e.archived
                 RETURN e ORDER BY e.created_at
                 """,
@@ -487,51 +438,6 @@ class MemoryGraph:
                 SET s.consolidated = true, s.consolidated_at = datetime()
                 """,
                 segment_id=segment_id,
-            )
-
-    async def list_unconsolidated_segments(
-        self, *, exclude_segment_id: str, limit: int = 4
-    ) -> list[str]:
-        """Return recently ended unconsolidated segment IDs."""
-        async with self._driver.session(database=_DB) as session:
-            result = await session.run(
-                """
-                MATCH (s:Segment)
-                WHERE coalesce(s.consolidated, false) = false
-                  AND s.segment_id <> $exclude_segment_id
-                  AND coalesce(s.episode_count, 0) >= 2
-                RETURN s.segment_id AS segment_id
-                ORDER BY coalesce(s.end_time, s.start_time, datetime()) DESC
-                LIMIT $limit
-                """,
-                exclude_segment_id=exclude_segment_id,
-                limit=limit,
-            )
-            segment_ids: list[str] = []
-            async for record in result:
-                segment_id = record.get("segment_id")
-                if isinstance(segment_id, str) and segment_id:
-                    segment_ids.append(segment_id)
-            return segment_ids
-
-    async def list_derivative_uids(self) -> set[str]:
-        """Return all derivative UIDs currently present in Neo4j."""
-        async with self._driver.session(database=_DB) as session:
-            result = await session.run("MATCH (d:Derivative) RETURN d.uid AS uid")
-            return {str(record["uid"]) async for record in result if record.get("uid")}
-
-    async def delete_derivatives(self, uids: list[str]) -> None:
-        """Hard-delete derivative nodes by UID."""
-        if not uids:
-            return
-        async with self._driver.session(database=_DB) as session:
-            await session.run(
-                """
-                UNWIND $uids AS uid
-                MATCH (d:Derivative {uid: uid})
-                DETACH DELETE d
-                """,
-                uids=uids,
             )
 
     async def list_recent_episode_context(self, limit: int) -> list[str]:
@@ -621,62 +527,132 @@ class MemoryGraph:
         )
         for source_uid in source_uids:
             await tx.run(
-                """
-                MATCH (s:Summary {uid: $summary_uid})
-                MATCH (e:Episode {uid: $source_uid})
-                CREATE (s)-[:CONSOLIDATES]->(e)
+                f"""
+                MATCH (s:Summary {{uid: $summary_uid}})
+                MATCH (e:Episode {{uid: $source_uid}})
+                CREATE (s)-[:{EdgeType.CONSOLIDATES}]->(e)
                 """,
                 summary_uid=uid,
                 source_uid=source_uid,
             )
 
-    async def sync_beliefs(self, active_topics: set[str]) -> int:
-        """Remove Belief nodes not tracked in the sponge's active opinion vectors.
+    # --- Personality Snapshot ---
 
-        Called during reflection to keep the graph consistent with the sponge.
-        Uses case-insensitive comparison since sponge topics are normalized to lowercase.
-        Returns count of pruned Belief nodes.
-        """
+    async def get_personality_snapshot(self) -> PersonalitySnapshot:
+        """Load the agent's identity narrative from graph, or return seed defaults."""
+        async with self._driver.session(database=_DB) as session:
+            result = await session.run(
+                f"MATCH (n:PersonalitySnapshot {{session_id: '{_DEFAULT_SESSION_ID}'}}) RETURN n"
+            )
+            record = await result.single()
+        if not record:
+            return PersonalitySnapshot(text=SEED_SNAPSHOT)
+        props = dict(record["n"])
+        return PersonalitySnapshot(
+            text=str(props.get("text", SEED_SNAPSHOT)),
+            tone=str(props.get("tone", _DEFAULT_TONE)),
+            version=int(props.get("version", 0)),
+        )
+
+    async def upsert_personality_snapshot(self, text: str) -> None:
+        """Write or update the agent's identity narrative."""
+        async with self._driver.session(database=_DB) as session:
+            await session.run(
+                f"""
+                MERGE (n:PersonalitySnapshot {{session_id: '{_DEFAULT_SESSION_ID}'}})
+                SET n.text = $text,
+                    n.tone = coalesce(n.tone, '{_DEFAULT_TONE}'),
+                    n.version = coalesce(n.version, 0) + 1,
+                    n.updated_at = datetime()
+                """,
+                text=text,
+            )
+        log.info("GRAPH upsert_personality_snapshot chars=%d", len(text))
+
+    # --- Belief CRUD ---
+
+    async def upsert_belief(
+        self,
+        topic: str,
+        *,
+        valence: float,
+        confidence: float,
+        belief_text: str = "",
+        uncertainty: float = -1.0,
+        evidence_count: int = -1,
+        provenance: str = "",
+    ) -> None:
+        """Create or update a Belief node with full personality state."""
+        topic = topic.strip().lower()
+        async with self._driver.session(database=_DB) as session:
+            await session.run(
+                """
+                MERGE (b:Belief {topic: $topic})
+                SET b.valence = $valence,
+                    b.confidence = $confidence,
+                    b.belief_text = CASE WHEN $belief_text <> '' THEN $belief_text ELSE coalesce(b.belief_text, '') END,
+                    b.uncertainty = CASE WHEN $uncertainty >= 0 THEN $uncertainty ELSE coalesce(b.uncertainty, 1.0 - $confidence) END,
+                    b.evidence_count = CASE WHEN $evidence_count >= 0 THEN $evidence_count ELSE coalesce(b.evidence_count, 0) + 1 END,
+                    b.provenance = CASE WHEN $provenance <> '' THEN $provenance ELSE coalesce(b.provenance, '') END,
+                    b.formed_at = coalesce(b.formed_at, datetime()),
+                    b.last_updated = datetime()
+                """,
+                topic=topic,
+                valence=max(-1.0, min(1.0, valence)),
+                confidence=max(0.0, min(1.0, confidence)),
+                belief_text=belief_text,
+                uncertainty=uncertainty,
+                evidence_count=evidence_count,
+                provenance=provenance,
+            )
+        log.info("GRAPH upsert_belief topic=%s val=%+.2f conf=%.2f", topic, valence, confidence)
+
+    async def get_belief(self, topic: str) -> BeliefNode | None:
+        """Fetch a single belief by topic."""
+        async with self._driver.session(database=_DB) as session:
+            result = await session.run(
+                "MATCH (b:Belief {topic: $topic}) RETURN b",
+                topic=topic.strip().lower(),
+            )
+            record = await result.single()
+        if not record:
+            return None
+        return _record_to_belief(record["b"])
+
+    async def get_top_beliefs(self, n: int = BELIEF_PROMPT_WINDOW) -> list[BeliefNode]:
+        """Fetch strongest beliefs ordered by absolute valence."""
         async with self._driver.session(database=_DB) as session:
             result = await session.run(
                 """
                 MATCH (b:Belief)
-                WHERE NOT toLower(b.topic) IN $active_topics
-                OPTIONAL MATCH (b)<-[r]-()
-                DELETE r, b
-                RETURN count(b) AS pruned
+                WHERE b.valence IS NOT NULL
+                RETURN b ORDER BY abs(b.valence) DESC LIMIT $n
                 """,
-                active_topics=list(active_topics),
+                n=n,
             )
-            record = await result.single()
-            pruned = int(record["pruned"]) if record else 0
-            if pruned:
-                log.info("Belief sync: pruned %d orphan Belief nodes", pruned)
-            return pruned
+            return [_record_to_belief(r["b"]) async for r in result]
 
-    async def prune_orphan_topics(self) -> int:
-        """Delete Topic nodes that have zero non-archived Episode connections.
-
-        Topics accumulate as the agent explores new subjects. When all episodes
-        for a topic are archived or deleted, the Topic node becomes an orphan.
-        """
+    async def get_all_beliefs(self) -> list[BeliefNode]:
+        """Fetch all beliefs."""
         async with self._driver.session(database=_DB) as session:
             result = await session.run(
-                """
-                MATCH (t:Topic)
-                WHERE NOT EXISTS {
-                    MATCH (e:Episode)-[:DISCUSSES]->(t)
-                    WHERE NOT e.archived
-                }
-                DETACH DELETE t
-                RETURN count(t) AS pruned
-                """,
+                "MATCH (b:Belief) WHERE b.valence IS NOT NULL RETURN b ORDER BY abs(b.valence) DESC"
             )
-            record = await result.single()
-            pruned = int(record["pruned"]) if record else 0
-            if pruned:
-                log.info("Topic pruning: removed %d orphan Topic nodes", pruned)
-            return pruned
+            return [_record_to_belief(r["b"]) async for r in result]
+
+    async def format_beliefs_for_prompt(self, n: int = BELIEF_PROMPT_WINDOW) -> str:
+        """Build a formatted belief summary for the system prompt."""
+        beliefs = await self.get_top_beliefs(n)
+        if not beliefs:
+            return "No beliefs formed yet."
+        lines: list[str] = []
+        for b in beliefs:
+            sign = "+" if b.valence >= 0 else ""
+            entry = f"{b.topic}: {sign}{b.valence:.2f} (confidence: {b.confidence:.2f})"
+            if b.evidence_count > 0:
+                entry += f", evidence: {b.evidence_count}"
+            lines.append(entry)
+        return "\n".join(lines)
 
     async def get_last_episode_uid(self) -> str:
         """Get the UID of the most recently created episode."""
@@ -687,80 +663,12 @@ class MemoryGraph:
             record = await result.single()
             return str(record["uid"]) if record and record.get("uid") else ""
 
-    async def link_beliefs(
-        self,
-        topic_a: str,
-        topic_b: str,
-        correlation_type: EdgeType,
-        strength: float,
-        reasoning: str,
-    ) -> None:
-        """Create or update a correlation edge between two belief topics.
-
-        Used during reflection cycles to record LLM-discovered causal relationships,
-        co-occurrences, or anti-correlations between topics.
-        """
-        topic_a = topic_a.strip().lower()
-        topic_b = topic_b.strip().lower()
-        if topic_a == topic_b:
-            return
+    async def get_episode_count(self) -> int:
+        """Get the total count of episodes in the graph."""
         async with self._driver.session(database=_DB) as session:
-            await session.run(
-                f"""
-                MERGE (a:Topic {{name: $topic_a}})
-                MERGE (b:Topic {{name: $topic_b}})
-                MERGE (a)-[r:{correlation_type}]->(b)
-                SET r.strength = $strength, r.reasoning = $reasoning, r.updated_at = datetime()
-                """,
-                topic_a=topic_a,
-                topic_b=topic_b,
-                strength=max(-1.0, min(1.0, strength)),
-                reasoning=reasoning[:500],
-            )
-        log.debug(
-            "Linked beliefs: %s -[%s]-> %s (strength=%.2f)",
-            topic_a,
-            correlation_type,
-            topic_b,
-            strength,
-        )
-
-    async def get_belief_correlations(self, topic: str) -> list[BeliefCorrelation]:
-        """Return all correlation edges for a given topic.
-
-        Includes both outgoing and incoming correlation edges.
-        """
-        topic = topic.strip().lower()
-        correlations: list[BeliefCorrelation] = []
-        async with self._driver.session(database=_DB) as session:
-            result = await session.run(
-                """
-                MATCH (a:Topic {name: $topic})-[r]->(b:Topic)
-                WHERE type(r) IN ['CORRELATES_WITH', 'ANTI_CORRELATES_WITH', 'CAUSALLY_LINKED']
-                RETURN a.name AS source, b.name AS target, type(r) AS rel_type,
-                       r.strength AS strength, r.reasoning AS reasoning
-                UNION
-                MATCH (a:Topic)-[r]->(b:Topic {name: $topic})
-                WHERE type(r) IN ['CORRELATES_WITH', 'ANTI_CORRELATES_WITH', 'CAUSALLY_LINKED']
-                RETURN a.name AS source, b.name AS target, type(r) AS rel_type,
-                       r.strength AS strength, r.reasoning AS reasoning
-                """,
-                topic=topic,
-            )
-            async for record in result:
-                try:
-                    correlations.append(
-                        BeliefCorrelation(
-                            source_topic=str(record["source"]),
-                            target_topic=str(record["target"]),
-                            correlation_type=EdgeType(record["rel_type"]),
-                            strength=float(record.get("strength") or 0.0),
-                            reasoning=str(record.get("reasoning") or ""),
-                        )
-                    )
-                except (ValueError, KeyError):
-                    continue
-        return correlations
+            result = await session.run("MATCH (e:Episode) RETURN count(e) AS cnt")
+            record = await result.single()
+            return int(record["cnt"]) if record else 0
 
     async def get_latest_segment_counter(self) -> int:
         """Get the max numeric suffix from `segment_<n>` identifiers."""
@@ -783,157 +691,23 @@ class MemoryGraph:
                     continue
             return max(counters, default=0)
 
-    # --- Graph Data Science algorithms ---
 
-    async def compute_episode_importance(self) -> int:
-        """Compute PageRank importance scores for all episodes.
-
-        PageRank models "importance" as: an episode is important if it's
-        connected to other important episodes/topics/beliefs. Replaces
-        heuristic utility_score with principled graph-based importance.
-        """
-        async with self._driver.session(database=_DB) as session:
-            with contextlib.suppress(Exception):
-                await session.run("CALL gds.graph.drop('episode_importance', false)")
-            await session.run("""
-                CALL gds.graph.project(
-                    'episode_importance',
-                    ['Episode', 'Topic', 'Belief'],
-                    {
-                        DISCUSSES: {orientation: 'UNDIRECTED'},
-                        SUPPORTS_BELIEF: {orientation: 'UNDIRECTED'},
-                        CONTRADICTS_BELIEF: {orientation: 'UNDIRECTED'},
-                        TEMPORAL_NEXT: {orientation: 'NATURAL'}
-                    }
-                )
-            """)
-            result = await session.run("""
-                CALL gds.pageRank.write('episode_importance', {
-                    writeProperty: 'importance_score',
-                    dampingFactor: 0.85,
-                    maxIterations: 20,
-                    tolerance: 0.0001
-                })
-                YIELD nodePropertiesWritten
-                RETURN nodePropertiesWritten
-            """)
-            record = await result.single()
-            updated = int(record["nodePropertiesWritten"]) if record else 0
-            await session.run("CALL gds.graph.drop('episode_importance', false)")
-            log.info("PageRank updated %d nodes", updated)
-            return updated
-
-    async def detect_topic_communities(self) -> int:
-        """Detect topic communities using Louvain algorithm.
-
-        Groups densely connected topics for better retrieval context.
-        Returns number of communities detected.
-        """
-        async with self._driver.session(database=_DB) as session:
-            result = await session.run("""
-                MATCH ()-[r:CORRELATES_WITH]->() RETURN count(r) AS cnt
-            """)
-            record = await result.single()
-            if not record or record["cnt"] == 0:
-                log.debug("No CORRELATES_WITH edges; skipping community detection")
-                return 0
-            with contextlib.suppress(Exception):
-                await session.run("CALL gds.graph.drop('topic_communities', false)")
-            await session.run("""
-                CALL gds.graph.project(
-                    'topic_communities',
-                    'Topic',
-                    {CORRELATES_WITH: {orientation: 'UNDIRECTED', properties: 'strength'}}
-                )
-            """)
-            result = await session.run("""
-                CALL gds.louvain.write('topic_communities', {
-                    writeProperty: 'community_id',
-                    relationshipWeightProperty: 'strength',
-                    includeIntermediateCommunities: false
-                })
-                YIELD communityCount
-                RETURN communityCount
-            """)
-            record = await result.single()
-            communities = int(record["communityCount"]) if record else 0
-            await session.run("CALL gds.graph.drop('topic_communities', false)")
-            log.info("Louvain detected %d topic communities", communities)
-            return communities
-
-    async def find_similar_episodes(
-        self,
-        episode_uid: str,
-        top_k: int = 5,
-        min_similarity: float = 0.3,
-    ) -> list[tuple[str, float]]:
-        """Find structurally similar episodes using Node Similarity.
-
-        Compares episodes based on shared neighbors (topics, beliefs) using
-        Jaccard coefficient. Complements embedding-based similarity with graph structure.
-        """
-        async with self._driver.session(database=_DB) as session:
-            with contextlib.suppress(Exception):
-                await session.run("CALL gds.graph.drop('episode_similarity', false)")
-            await session.run("""
-                CALL gds.graph.project(
-                    'episode_similarity',
-                    ['Episode', 'Topic'],
-                    {DISCUSSES: {orientation: 'UNDIRECTED'}}
-                )
-            """)
-            result = await session.run(
-                """
-                CALL gds.nodeSimilarity.stream('episode_similarity', {
-                    topK: $top_k,
-                    similarityCutoff: $min_sim
-                })
-                YIELD node1, node2, similarity
-                WITH gds.util.asNode(node1) AS e1, gds.util.asNode(node2) AS e2, similarity
-                WHERE e1.uid = $uid AND e2:Episode
-                RETURN e2.uid AS similar_uid, similarity
-                ORDER BY similarity DESC
-            """,
-                uid=episode_uid,
-                top_k=top_k,
-                min_sim=min_similarity,
-            )
-            records = [r async for r in result]
-            await session.run("CALL gds.graph.drop('episode_similarity', false)")
-            return [(str(r["similar_uid"]), float(r["similarity"])) for r in records]
-
-    async def get_episodes_by_importance(
-        self, limit: int = 20, min_importance: float = 0.0
-    ) -> list[EpisodeNode]:
-        """Get most important episodes by PageRank score."""
-        async with self._driver.session(database=_DB) as session:
-            result = await session.run(
-                """
-                MATCH (e:Episode)
-                WHERE NOT e.archived AND coalesce(e.importance_score, 0) >= $min_imp
-                RETURN e
-                ORDER BY e.importance_score DESC
-                LIMIT $limit
-            """,
-                min_imp=min_importance,
-                limit=limit,
-            )
-            return [_record_to_episode(r["e"]) async for r in result]
-
-    async def get_topic_community(self, topic: str) -> list[str]:
-        """Get all topics in the same community as the given topic."""
-        async with self._driver.session(database=_DB) as session:
-            result = await session.run(
-                """
-                MATCH (t1:Topic {name: $topic})
-                MATCH (t2:Topic)
-                WHERE t2.community_id = t1.community_id AND t2.name <> $topic
-                RETURN t2.name AS topic
-                ORDER BY t2.episode_count DESC
-            """,
-                topic=topic.strip().lower(),
-            )
-            return [str(r["topic"]) async for r in result]
+def _record_to_belief(node: Mapping[str, object]) -> BeliefNode:
+    """Convert a Neo4j Belief node to a BeliefNode dataclass."""
+    props = dict(node)
+    valence_raw = props.get("valence", 0.0) or 0.0
+    confidence_raw = props.get("confidence", 0.5) or 0.5
+    uncertainty_raw = props.get("uncertainty", 0.5) or 0.5
+    evidence_raw = props.get("evidence_count", 0) or 0
+    return BeliefNode(
+        topic=str(props.get("topic", "")),
+        valence=float(valence_raw) if isinstance(valence_raw, (int, float, str)) else 0.0,
+        confidence=float(confidence_raw) if isinstance(confidence_raw, (int, float, str)) else 0.5,
+        uncertainty=float(uncertainty_raw) if isinstance(uncertainty_raw, (int, float, str)) else 0.5,
+        evidence_count=int(evidence_raw) if isinstance(evidence_raw, (int, str)) else 0,
+        belief_text=str(props.get("belief_text", "") or ""),
+        provenance=str(props.get("provenance", "") or ""),
+    )
 
 
 def _record_to_episode(node: Mapping[str, object]) -> EpisodeNode:
