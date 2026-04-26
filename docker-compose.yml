@@ -75,19 +75,21 @@ services:
       - "8001:8000"
     volumes:
       - speaches_cache:/home/ubuntu/.cache/huggingface/hub
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        uvicorn --factory speaches.main:create_app --host 0.0.0.0 --port 8000 &
+        until curl -sf http://localhost:8000/health; do sleep 1; done
+        curl -X POST http://localhost:8000/v1/models/Systran/faster-distil-whisper-large-v3
+        curl -X POST http://localhost:8000/v1/models/speaches-ai/Kokoro-82M-v1.0-ONNX
+        wait
     environment:
-      # Prevent ONNX from attempting CUDA (eliminates noisy fallback errors)
       CUDA_VISIBLE_DEVICES: ""
-      # Logging
       LOG_LEVEL: info
-      # Model persistence (never unload)
       STT_MODEL_TTL: -1
       TTS_MODEL_TTL: -1
-      # STT configuration (CPU optimized)
       WHISPER__INFERENCE_DEVICE: cpu
       WHISPER__COMPUTE_TYPE: int8
-      # Preload STT and TTS models on startup
-      PRELOAD_MODELS: '["Systran/faster-distil-whisper-large-v3", "speaches-ai/Kokoro-82M-v1.0-ONNX"]'
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
