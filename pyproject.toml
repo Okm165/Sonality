@@ -1,7 +1,7 @@
 [project]
 name = "sonality"
 version = "0.1.0"
-description = "LLM agent with a self-evolving personality via the Sponge architecture"
+description = "Stateless LLM agent with self-evolving personality backed by Neo4j and Qdrant"
 readme = "README.md"
 requires-python = ">=3.12,<3.14"
 dependencies = [
@@ -41,7 +41,7 @@ build-backend = "hatchling.build"
 
 [project.scripts]
 sonality = "sonality.cli:main"
-sonality-server = "sonality.server:main"
+sonality-server = "sonality.api:serve"
 sonality-chat = "chat.terminal:main"
 sonality-telegram = "chat.telegram:main"
 

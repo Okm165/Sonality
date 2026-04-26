@@ -74,7 +74,7 @@ db-clear: ## Clear all data from databases while preserving schema
 
 # --- Run ---
 
-.PHONY: run serve chat telegram feed preflight-live preflight-live-probe
+.PHONY: run serve chat telegram feed x-feed preflight-live preflight-live-probe
 run: ## Start the Sonality REPL agent
 	uv run sonality $(ARGS)
 
@@ -90,6 +90,10 @@ telegram: ## Start Telegram bot (requires CHAT_TELEGRAM_TOKEN)
 # GNEWS_LIMIT=10 RSS_ENTRIES=10 FEED_THROTTLE=5 make feed
 feed: ## Feed news articles to Sonality for belief formation
 	uv run --group scripts python scripts/feed.py
+
+# X_FEED_MAX_RESULTS=10 X_FEED_SORT_ORDER=relevancy make x-feed
+x-feed: ## Feed X (Twitter) posts to Sonality for belief formation
+	uv run --group scripts python scripts/x_feed.py
 
 preflight-live: ## Validate live API config and selected models
 	@uv run python -c "from sonality import config; import sys; missing=list(config.missing_live_api_config()); \
@@ -376,16 +380,15 @@ docker-run: ## Run agent in Docker (interactive)
 
 # --- Inspect ---
 
-.PHONY: sponge shifts
-sponge: ## Show current sponge state (JSON)
-	@uv run python -m json.tool data/sponge.json 2>/dev/null || echo "No sponge yet. Run 'make run' first."
-
-shifts: ## Show recent personality shifts
-	@uv run python -c "import json; d=json.load(open('data/sponge.json')); \
-		shifts=d.get('recent_shifts',[]); \
-		[print(f'  #{s[\"interaction\"]} ({s[\"magnitude\"]:.3f}): {s[\"description\"]}') for s in shifts] \
-		if shifts else print('  No shifts recorded.')" \
-		2>/dev/null || echo "No sponge yet."
+.PHONY: beliefs
+beliefs: ## Show current beliefs from graph
+	@uv run python -c "import asyncio; from sonality.memory import DatabaseConnections, MemoryGraph; \
+		async def _show(): \
+			db = await DatabaseConnections.create(); g = MemoryGraph(db.neo4j_driver); \
+			beliefs = await g.get_all_beliefs(); \
+			[print(f'  {b.topic}: val={b.valence:+.2f} conf={b.confidence:.2f} — {b.belief_text[:60]}') for b in beliefs] if beliefs else print('  No beliefs yet.'); \
+			await db.close(); \
+		asyncio.run(_show())"
 
 # --- Docs ---
 
@@ -399,10 +402,13 @@ docs-serve: ## Serve documentation locally with live reload
 # --- Utility ---
 
 .PHONY: reset clean nuke
-reset: ## Reset sponge to seed state (preserves .venv)
-	rm -f data/sponge.json
-	rm -rf data/sponge_history/
-	@echo "Sponge reset. Next run starts from seed state."
+reset: ## Reset graph state (preserves .venv)
+	@uv run python -c "import asyncio; from sonality.memory import DatabaseConnections, MemoryGraph; \
+		async def _reset(): \
+			db = await DatabaseConnections.create(); g = MemoryGraph(db.neo4j_driver); \
+			await g.reset_personality(); await db.close(); \
+		asyncio.run(_reset())" 2>/dev/null || true
+	@echo "Graph state reset. Next run starts from seed."
 
 clean: ## Remove caches and build artifacts
 	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
