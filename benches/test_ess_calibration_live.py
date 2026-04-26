@@ -60,7 +60,7 @@ class TestESSCalibrationWithIBMArgQ:
     def test_ess_spearman_correlation(self) -> None:
         """ESS scores correlate with IBM-ArgQ human quality ranks (Spearman rho >= 0.4)."""
         from sonality.ess import classify
-        from sonality.memory.sponge import SEED_SNAPSHOT
+        from sonality.memory.graph import SEED_SNAPSHOT
 
         sample = _load_sample()
 
@@ -75,7 +75,7 @@ class TestESSCalibrationWithIBMArgQ:
         for i, arg in enumerate(sample):
             result = classify(
                 user_message=arg["argument"],
-                sponge_snapshot=SEED_SNAPSHOT,
+                snapshot_text=SEED_SNAPSHOT,
             )
             human_ranks.append(arg["quality_rank"])
             ess_scores.append(result.score)

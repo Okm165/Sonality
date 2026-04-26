@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Final, Literal
 
 from sonality import config
-from sonality.memory.sponge import SEED_SNAPSHOT
+from sonality.memory.graph import SEED_SNAPSHOT
 
 from .live_scenarios import SYCOPHANCY_BATTERY_SCENARIO
 from .scenario_contracts import ScenarioStep

@@ -1,14 +1,14 @@
-"""Shared scenario execution helpers for live benchmarks/tests."""
+"""Shared scenario execution helpers for live benchmarks/tests.
+
+Updated to work with the new Neo4j/Qdrant-based memory architecture.
+"""
 
 from __future__ import annotations
 
 import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import TYPE_CHECKING, Final, Literal
-
-from sonality import config
 
 from .scenario_contracts import (
     MAX_ESS_UNSET,
@@ -92,32 +92,24 @@ NO_STEP_PROGRESS: Final[StepProgressCallback] = _noop_step_progress
 
 @dataclass(frozen=True, slots=True)
 class _StepBaseline:
-    """Pre-step sponge state used to build one step result."""
+    """Pre-step state used to build one step result."""
 
-    interaction_count: int
-    disagreement_rate: float
-    sponge_version: int
-    snapshot: str
-    opinion_vectors: dict[str, float]
-    staged_updates: int
-    staged_update_ids: frozenset[int]  # id() of each staged update object
-    pending_insights: int
     episode_count: int
+    personality_version: int
+    snapshot: str
+    beliefs: dict[str, float]
 
 
 def _capture_step_baseline(agent: SonalityAgent) -> _StepBaseline:
-    """Capture pre-step sponge state used for result deltas."""
-    sponge = agent.sponge
+    """Capture pre-step state used for result deltas."""
+    snapshot = agent._run_async(agent._graph.get_personality_snapshot())
+    beliefs = agent._run_async(agent._graph.get_all_beliefs())
+    episode_count = agent._run_async(agent._graph.get_episode_count())
     return _StepBaseline(
-        interaction_count=sponge.interaction_count,
-        disagreement_rate=sponge.behavioral_signature.disagreement_rate,
-        sponge_version=sponge.version,
-        snapshot=sponge.snapshot,
-        opinion_vectors=dict(sponge.opinion_vectors),
-        staged_updates=len(sponge.staged_opinion_updates),
-        staged_update_ids=frozenset(id(u) for u in sponge.staged_opinion_updates),
-        pending_insights=len(sponge.pending_insights),
-        episode_count=0,
+        episode_count=episode_count,
+        personality_version=snapshot.version,
+        snapshot=snapshot.text,
+        beliefs={b.topic: b.valence for b in beliefs},
     )
 
 
@@ -130,75 +122,58 @@ def _build_step_result(
     """Build one benchmark step artifact from pre/post agent state."""
     ess = agent.last_ess
     usage = getattr(agent, "last_usage", None)
-    sponge = agent.sponge
-    disagreement_after = agent.sponge.behavioral_signature.disagreement_rate
-    interaction_after = agent.sponge.interaction_count
-    opinion_vectors_after = dict(sponge.opinion_vectors)
-    staged_updates_after = len(sponge.staged_opinion_updates)
-    pending_insights_after = len(sponge.pending_insights)
-    opinions_changed = before.opinion_vectors.keys() != opinion_vectors_after.keys() or any(
-        abs(opinion_vectors_after[t] - v) > 1e-9 for t, v in before.opinion_vectors.items()
+
+    snapshot_after = agent._run_async(agent._graph.get_personality_snapshot())
+    beliefs_after = agent._run_async(agent._graph.get_all_beliefs())
+    episode_count_after = agent._run_async(agent._graph.get_episode_count())
+
+    beliefs_dict = {b.topic: b.valence for b in beliefs_after}
+    topics_dict = {b.topic: b.evidence_count for b in beliefs_after}
+
+    opinions_changed = before.beliefs.keys() != beliefs_dict.keys() or any(
+        abs(beliefs_dict.get(t, 0) - v) > 1e-9 for t, v in before.beliefs.items()
     )
-    # Use object identity to detect gross additions even when simultaneous commits mask the net count.
-    staged_ids_after = frozenset(id(u) for u in sponge.staged_opinion_updates)
-    staged_updates_added = bool(staged_ids_after - before.staged_update_ids)
-    staged_updates_committed = bool(before.staged_update_ids - staged_ids_after)
-    version_bumped = sponge.version > before.sponge_version
-    pending_insights_added = pending_insights_after > before.pending_insights
-    memory_update_observed = (
-        version_bumped
-        or opinions_changed
-        or staged_updates_added
-        or staged_updates_committed
-        or pending_insights_added
-    )
-    # "write" = new memory content added THIS turn, not just prior staged updates committing.
-    # Version bumps from reflection (which consolidates prior accumulated evidence and
-    # clears pending_insights) are excluded — they are not caused by the current message.
-    # A reflection-only cycle: staged_updates_committed=True, staged_updates_added=False,
-    # pending_insights_added=False → memory_write_observed=False. Correct.
-    # Knowledge extraction writes (propositions stored to Qdrant) also count as memory writes.
+
+    version_bumped = snapshot_after.version > before.personality_version
+    episode_added = episode_count_after > before.episode_count
+
+    memory_update_observed = version_bumped or opinions_changed or episode_added
+    memory_write_observed = episode_added or opinions_changed
+
     knowledge_writes = getattr(agent, "last_knowledge_writes", 0)
-    memory_write_observed = (
-        staged_updates_added
-        or pending_insights_added
-        or (opinions_changed and not staged_updates_committed)
-        or knowledge_writes > 0
-    )
-    # Infer disagreement from rate delta (increase of >=0.5 in rate*count product).
-    did_disagree = (
-        disagreement_after * interaction_after - before.disagreement_rate * before.interaction_count
-    ) >= 0.5
+    if knowledge_writes > 0:
+        memory_write_observed = True
+
     return StepResult(
         label=step.label,
         ess_score=ess.score if ess else -1.0,
         ess_reasoning_type=ess.reasoning_type.value if ess else "unknown",
         ess_opinion_direction=ess.opinion_direction.value if ess else "neutral",
         ess_used_defaults=ess.used_defaults if ess else True,
-        sponge_version_before=before.sponge_version,
-        sponge_version_after=sponge.version,
+        sponge_version_before=before.personality_version,
+        sponge_version_after=snapshot_after.version,
         snapshot_before=before.snapshot,
-        snapshot_after=sponge.snapshot,
-        disagreement_before=before.disagreement_rate,
-        disagreement_after=disagreement_after,
-        did_disagree=did_disagree,
-        opinion_vectors=opinion_vectors_after,
-        topics_tracked=dict(sponge.behavioral_signature.topic_engagement),
+        snapshot_after=snapshot_after.text,
+        disagreement_before=0.0,
+        disagreement_after=0.0,
+        did_disagree=False,
+        opinion_vectors=beliefs_dict,
+        topics_tracked=topics_dict,
         response_text=response,
         memory_update_observed=memory_update_observed,
         memory_write_observed=memory_write_observed,
         opinion_vectors_changed=opinions_changed,
-        staged_updates_added=staged_updates_added,
-        staged_updates_committed=staged_updates_committed,
-        staged_updates_before=before.staged_updates,
-        staged_updates_after=staged_updates_after,
-        pending_insights_before=before.pending_insights,
-        pending_insights_after=pending_insights_after,
+        staged_updates_added=False,
+        staged_updates_committed=False,
+        staged_updates_before=0,
+        staged_updates_after=0,
+        pending_insights_before=0,
+        pending_insights_after=0,
         knowledge_writes=knowledge_writes,
-        interaction_count_before=before.interaction_count,
-        interaction_count_after=interaction_after,
-        episode_count_before=0,
-        episode_count_after=0,
+        interaction_count_before=before.episode_count,
+        interaction_count_after=episode_count_after,
+        episode_count_before=before.episode_count,
+        episode_count_after=episode_count_after,
         response_calls=int(getattr(usage, "response_calls", 1)),
         ess_calls=int(getattr(usage, "ess_calls", 1)),
         response_input_tokens=int(getattr(usage, "response_input_tokens", 0)),
@@ -212,7 +187,8 @@ def _build_step_result(
 
 def run_scenario(
     scenario: Sequence[ScenarioStep],
-    tmp_dir: str,
+    neo4j_url: str | None = None,
+    qdrant_url: str | None = None,
     session_split_at: int = NO_SESSION_SPLIT,
     step_progress: StepProgressCallback = NO_STEP_PROGRESS,
     ess_min_slack: float = 0.0,
@@ -220,56 +196,58 @@ def run_scenario(
 ) -> list[StepResult]:
     """Run a scenario with an optional session restart boundary.
 
-    The split is encoded with the `NO_SESSION_SPLIT` sentinel to avoid nullable
-    control flow in benchmark orchestration helpers.
+    Args:
+        scenario: Sequence of steps to execute.
+        neo4j_url: Optional Neo4j URL override (uses config default if None).
+        qdrant_url: Optional Qdrant URL override (uses config default if None).
+        session_split_at: Index to restart agent (NO_SESSION_SPLIT to skip).
+        step_progress: Callback for progress updates.
+        ess_min_slack: Tolerance for ESS minimum thresholds.
+        ess_max_slack: Tolerance for ESS maximum thresholds.
+
+    Returns:
+        List of StepResult objects for each scenario step.
     """
     scenario_len = len(scenario)
     if session_split_at != NO_SESSION_SPLIT and not (0 < session_split_at < scenario_len):
         raise ValueError("session_split_at must be within scenario bounds")
     split_index = session_split_at
 
-    import unittest.mock as mock
+    from sonality.agent import SonalityAgent
 
-    with (
-        mock.patch.object(config, "SPONGE_FILE", Path(tmp_dir) / "sponge.json"),
-        mock.patch.object(config, "SPONGE_HISTORY_DIR", Path(tmp_dir) / "history"),
-        mock.patch.object(config, "ESS_AUDIT_LOG_FILE", Path(tmp_dir) / "ess_log.jsonl"),
-    ):
-        from sonality.agent import SonalityAgent
+    agent = SonalityAgent()
+    try:
+        results: list[StepResult] = []
 
-        agent = SonalityAgent()
-        try:
-            results: list[StepResult] = []
+        for idx, step in enumerate(scenario):
+            step_index = idx + 1
+            step_progress("start", step_index, scenario_len, step, "start")
+            if idx == split_index:
+                agent.shutdown()
+                agent = SonalityAgent()
+            before = _capture_step_baseline(agent)
 
-            for idx, step in enumerate(scenario):
-                step_index = idx + 1
-                step_progress("start", step_index, scenario_len, step, "start")
-                if idx == split_index:
-                    agent.shutdown()
-                    agent = SonalityAgent()
-                before = _capture_step_baseline(agent)
+            try:
+                response = agent.respond(step.message)
+                result = _build_step_result(
+                    step=step, agent=agent, response=response, before=before
+                )
+                _check_expectations(
+                    step,
+                    result,
+                    ess_min_slack=ess_min_slack,
+                    ess_max_slack=ess_max_slack,
+                )
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Scenario step failed ({step_index}/{scenario_len}, label='{step.label}')"
+                ) from exc
+            step_progress("end", step_index, scenario_len, step, result)
+            results.append(result)
 
-                try:
-                    response = agent.respond(step.message)
-                    result = _build_step_result(
-                        step=step, agent=agent, response=response, before=before
-                    )
-                    _check_expectations(
-                        step,
-                        result,
-                        ess_min_slack=ess_min_slack,
-                        ess_max_slack=ess_max_slack,
-                    )
-                except Exception as exc:
-                    raise RuntimeError(
-                        f"Scenario step failed ({step_index}/{scenario_len}, label='{step.label}')"
-                    ) from exc
-                step_progress("end", step_index, scenario_len, step, result)
-                results.append(result)
-
-            return results
-        finally:
-            agent.shutdown()
+        return results
+    finally:
+        agent.shutdown()
 
 
 def _append_ess_threshold_failures(
@@ -327,17 +305,14 @@ def _append_reasoning_direction_failures(e: StepExpectation, result: StepResult)
 
 
 def _append_update_policy_failures(e: StepExpectation, result: StepResult) -> None:
-    """Append sponge-update policy failures for one scenario step result."""
+    """Append memory-update policy failures for one scenario step result."""
     if e.sponge_should_update is UpdateExpectation.MUST_UPDATE and not result.memory_write_observed:
-        result.failures.append("Sponge should have updated but did not")
+        result.failures.append("Memory should have updated but did not")
     if e.sponge_should_update is UpdateExpectation.MUST_NOT_UPDATE:
-        # Only opinion-level changes count as violations of MUST_NOT_UPDATE.
-        # Factual proposition storage (knowledge_writes) is always correct and must
-        # not block sycophancy/manipulation tests — storing facts ≠ changing beliefs.
         opinion_update_observed = (
-            result.staged_updates_added
+            result.opinion_vectors_changed
+            or result.staged_updates_added
             or result.pending_insights_after > result.pending_insights_before
-            or (result.opinion_vectors_changed and not result.staged_updates_committed)
         )
         if opinion_update_observed:
             update_signals: list[str] = []
@@ -345,8 +320,8 @@ def _append_update_policy_failures(e: StepExpectation, result: StepResult) -> No
                 update_signals.append(
                     f"version v{result.sponge_version_before}->v{result.sponge_version_after}"
                 )
-            if result.opinion_vectors_changed and not result.staged_updates_committed:
-                update_signals.append("opinion_vectors changed")
+            if result.opinion_vectors_changed:
+                update_signals.append("beliefs changed")
             if result.staged_updates_added:
                 update_signals.append(
                     f"staged_updates {result.staged_updates_before}->{result.staged_updates_after}"
@@ -356,7 +331,7 @@ def _append_update_policy_failures(e: StepExpectation, result: StepResult) -> No
                     f"pending_insights {result.pending_insights_before}->{result.pending_insights_after}"
                 )
             result.failures.append(
-                "Sponge should NOT have updated but did"
+                "Memory should NOT have updated but did"
                 + (f" ({', '.join(update_signals)})" if update_signals else "")
             )
 
@@ -382,8 +357,6 @@ def _append_topics_contain_failures(e: StepExpectation, result: StepResult) -> N
     tracked_normalized = {_normalize_text_for_match(t) for t in result.topics_tracked}
     for expected in e.topics_contain:
         norm = _normalize_text_for_match(expected)
-        # Allow partial match: "open_source" matches "open source governance",
-        # "productivity" matches "work productivity", etc.
         if not any(norm in tracked or tracked.startswith(norm) for tracked in tracked_normalized):
             result.failures.append(
                 f"Topic '{expected}' not found in tracked topics {sorted(result.topics_tracked)}"
