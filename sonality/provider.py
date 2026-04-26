@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import http.client
 import json
 import logging
@@ -9,6 +10,7 @@ import threading
 import time
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
+from typing import NamedTuple
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
@@ -27,6 +29,13 @@ _THINK_CODE_BLOCK_RE = re.compile(r"```(?:thinking|thought|reasoning)[\s\S]*?```
 _ASTERISK_THOUGHT_RE = re.compile(r"^\s*\*[^*\n]+\*?\s*$", re.MULTILINE)
 # Leaked context markers from retrieval system
 _SEMANTIC_MARKER_RE = re.compile(r"\[semantic/[^\]]*\][^\n]*\n?", re.IGNORECASE)
+
+
+class StreamChunk(NamedTuple):
+    """A single streaming chunk with content and reasoning deltas."""
+
+    content: str
+    reasoning: str
 
 
 def _normalize_schema_notation(text: str) -> str:
@@ -298,8 +307,8 @@ class LLMProvider:
         max_tokens: int,
         temperature: float = -1.0,
         enable_thinking: bool = False,
-    ) -> Iterator[tuple[str, str]]:
-        """Stream chat completion, yielding (content_delta, reasoning_delta) tuples."""
+    ) -> Iterator[StreamChunk]:
+        """Stream chat completion, yielding content and reasoning deltas."""
         payload: dict[str, object] = {
             "model": model,
             "messages": [dict(m) for m in messages],
@@ -357,7 +366,7 @@ class LLMProvider:
                                 delta.get("reasoning_content") or "",
                             )
                             if content or reasoning:
-                                yield content, reasoning
+                                yield StreamChunk(content, reasoning)
             finally:
                 conn.close()
 
@@ -375,54 +384,52 @@ default_provider: LLMProvider = LLMProvider(
     config.BASE_URL, config.API_KEY, config.LLM_REQUEST_TIMEOUT
 )
 
-# Embedding provider (different endpoint, no semaphore needed — fast)
-embedding_provider: LLMProvider = LLMProvider(
-    config.EMBEDDING_BASE_URL or config.BASE_URL,
-    config.EMBEDDING_API_KEY or config.API_KEY,
-    config.LLM_REQUEST_TIMEOUT,
-)
+_interaction_event = threading.Event()
 
-# Sonality-specific: interaction_active event for background worker coordination
-interaction_active: threading.Event = threading.Event()
+interaction_in_progress = _interaction_event.is_set
+
+
+@contextlib.contextmanager
+def interaction_active() -> Iterator[None]:
+    _interaction_event.set()
+    try:
+        yield
+    finally:
+        _interaction_event.clear()
 
 
 def llm_semaphore_idle() -> bool:
     """Return True if the default LLM semaphore is free AND no interaction is active."""
-    return not interaction_active.is_set() and default_provider.semaphore_idle()
+    return not interaction_in_progress() and default_provider.semaphore_idle()
 
 
-def embed(*, model: str, texts: list[str], dimensions: int = 0) -> list[list[float]]:
-    """Embed texts using embedding endpoint."""
-    payload: dict[str, object] = {"model": model, "input": texts}
-    if dimensions > 0 and config.EMBEDDING_SEND_DIMENSIONS:
-        payload["dimensions"] = dimensions
-    raw = embedding_provider._post_json("/embeddings", payload)
-    data = raw.get("data")
-    if not isinstance(data, list):
-        raise RuntimeError("Embedding response is missing `data` array")
-    sorted_rows = sorted(
-        (row for row in data if isinstance(row, dict)), key=lambda row: int(row.get("index", 0))
-    )
-    return [
-        [float(v) for v in row["embedding"]]
-        for row in sorted_rows
-        if isinstance(row.get("embedding"), list)
-    ]
+def decode_llm_json(text: str) -> dict[str, object] | list[object]:
+    """Extract JSON (object or array) from LLM response text.
 
-
-def parse_json_object(text: str) -> dict[str, object]:
-    """Extract a JSON object from LLM response text."""
-    stripped = text.strip()
-    if not stripped:
-        return {}
+    Strips markdown fences, attempts whole-text parse first (preserving bare
+    arrays), then falls back to extract_last_json_object for messy output.
+    Raises ValueError if no JSON can be extracted.
+    """
+    cleaned = text.strip().replace("```json", "").replace("```", "").strip()
+    if not cleaned:
+        raise ValueError("Empty LLM response")
     try:
-        parsed = json.loads(stripped)
-        if isinstance(parsed, dict):
+        parsed = json.loads(cleaned)
+        if isinstance(parsed, (dict, list)):
             return parsed
     except json.JSONDecodeError:
         pass
+    obj = extract_last_json_object(cleaned)
+    if obj is not None:
+        return obj
+    raise ValueError(f"No valid JSON in LLM response: {text[:120]!r}")
+
+
+def parse_json_object(text: str) -> dict[str, object]:
+    """Extract a JSON object from LLM response text; returns {} on failure."""
     try:
-        return extract_last_json_object(stripped) or {}
+        result = decode_llm_json(text)
+        return result if isinstance(result, dict) else {}
     except ValueError:
         return {}
 
