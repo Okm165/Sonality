@@ -1,253 +1,307 @@
 #!/usr/bin/env python3
-"""Feed news articles to Sonality for belief formation."""
+"""Feed news articles to Sonality — fetch one, ingest one, repeat.
+
+Sources: topic-organized RSS feeds + GNews, mirroring x_feed's topic tags.
+"""
 
 from __future__ import annotations
 
 import os
+import re
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections.abc import Iterator
+from dataclasses import dataclass
+from typing import Final
 
-import feedparser
+import feedparser  # type: ignore[import-untyped]
 import httpx
 from dotenv import load_dotenv
-from gnews import GNews
+from gnews import GNews  # type: ignore[import-untyped]
 from rich.console import Console
-from rich.table import Table
+from rich.markup import escape
+from rich.panel import Panel
 
-# Comprehensive global RSS feeds organized by category (58 feeds, ~40 typically work)
-RSS_FEEDS = {
-    # === Wire Services ===
-    "BBC World": "http://feeds.bbci.co.uk/news/world/rss.xml",
-    "France24": "https://www.france24.com/en/rss",
-    "DW World": "https://rss.dw.com/rdf/rss-en-all",
-    "VOA News": "https://www.voanews.com/api/zq_opetivm",
-    "NPR World": "https://feeds.npr.org/1004/rss.xml",
-    # === Middle East ===
-    "Al Jazeera": "https://www.aljazeera.com/xml/rss/all.xml",
-    "Al-Monitor": "https://www.al-monitor.com/rss",
-    "Jerusalem Post": "http://www.jpost.com/RSS/RssFeedsHeadlines.aspx",
-    "Middle East Eye": "https://www.middleeasteye.net/rss",
-    "Times of Israel": "https://www.timesofisrael.com/feed/",
-    "Haaretz": "https://www.haaretz.com/srv/haaretz-latest-headlines",
-    # === Asia ===
-    "SCMP Asia": "https://www.scmp.com/rss/91/feed",
-    "Japan Times": "https://www.japantimes.co.jp/feed/",
-    "Nikkei Asia": "https://asia.nikkei.com/rss/feed/nar",
-    "Bangkok Post": "https://www.bangkokpost.com/rss/data/topstories.xml",
-    "Straits Times": "https://www.straitstimes.com/news/world/rss.xml",
-    "The Hindu World": "https://www.thehindu.com/news/international/feeder/default.rss",
-    "NDTV World": "https://feeds.feedburner.com/ndtvnews-world-news",
-    "Xinhua": "http://www.news.cn/english/rss/worldrss.xml",
-    "CGTN": "https://www.cgtn.com/subscribe/rss/section/world.xml",
-    "Channel News Asia": "https://www.channelnewsasia.com/rssfeeds/8395986",
-    # === Europe ===
-    "POLITICO EU": "https://www.politico.eu/feed/",
-    "DW Europe": "https://rss.dw.com/rdf/rss-en-eu",
-    "Guardian World": "https://www.theguardian.com/world/rss",
-    "The Local EU": "https://www.thelocal.com/feeds/rss.php",
-    "EUobserver": "https://euobserver.com/rss.xml",
-    "Baltic Times": "https://www.baltictimes.com/rss/",
-    # === Russia/Eurasia ===
-    "RT News": "https://www.rt.com/rss/news/",
-    "Moscow Times": "https://www.themoscowtimes.com/rss/news",
-    "Kyiv Independent": "https://kyivindependent.com/feed/",
-    "Meduza": "https://meduza.io/rss/en/all",
-    # === Africa ===
-    "Africanews": "https://www.africanews.com/feed/",
-    "Daily Maverick": "https://www.dailymaverick.co.za/dmrss/",
-    "Punch Nigeria": "https://punchng.com/feed/",
-    "News24 SA": "https://feeds.news24.com/articles/news24/TopStories/rss",
-    "Ghana Web": "https://www.ghanaweb.com/GhanaHomePage/rss/",
-    # === Latin America ===
-    "MercoPress": "https://en.mercopress.com/rss",
-    "Buenos Aires Times": "https://www.batimes.com.ar/feed",
-    "Mexico News Daily": "https://mexiconewsdaily.com/feed/",
-    "Rio Times": "https://riotimesonline.com/feed/",
-    "Tico Times": "https://ticotimes.net/feed",
-    # === Think Tanks & Analysis ===
-    "RAND": "https://www.rand.org/news/rss.xml",
-    "Crisis Group": "https://www.crisisgroup.org/rss.xml",
-    "Atlantic Council": "https://www.atlanticcouncil.org/feed/",
-    "Stimson Center": "https://www.stimson.org/feed/",
-    "Wilson Center": "https://www.wilsoncenter.org/rss.xml",
-    # === OSINT & Investigative ===
-    "Bellingcat": "https://www.bellingcat.com/feed/",
-    "The Intercept": "https://theintercept.com/feed/?rss",
-    "ProPublica": "https://www.propublica.org/feeds/propublica/main",
-    "OCCRP": "https://www.occrp.org/en/component/ocrss/?format=feed",
-    # === Defense & Security ===
-    "Defense One": "https://www.defenseone.com/rss/all/",
-    "War on the Rocks": "https://warontherocks.com/feed/",
-    "Breaking Defense": "https://breakingdefense.com/feed/",
-    "The War Zone": "https://www.thedrive.com/the-war-zone/feed",
-    # === Official Sources ===
-    "UN News": "https://news.un.org/feed/subscribe/en/news/all/rss.xml",
-    "WHO News": "https://www.who.int/rss-feeds/news-english.xml",
-    "World Bank": "https://blogs.worldbank.org/feed",
-    # === Energy & Economics ===
-    "OilPrice": "https://oilprice.com/rss/main",
-    "FT World": "https://www.ft.com/world?format=rss",
+# tag → tuple of (source_name, url) — mirrors x_feed's tag → (query, topic_override)
+FEEDS: Final[dict[str, tuple[tuple[str, str], ...]]] = {
+    "geopolitics": (
+        ("BBC World", "http://feeds.bbci.co.uk/news/world/rss.xml"),
+        ("France24", "https://www.france24.com/en/rss"),
+        ("DW World", "https://rss.dw.com/rdf/rss-en-all"),
+        ("VOA News", "https://www.voanews.com/api/zq_opetivm"),
+        ("NPR World", "https://feeds.npr.org/1004/rss.xml"),
+        ("Al Jazeera", "https://www.aljazeera.com/xml/rss/all.xml"),
+        ("Guardian World", "https://www.theguardian.com/world/rss"),
+        ("UN News", "https://news.un.org/feed/subscribe/en/news/all/rss.xml"),
+        ("Al-Monitor", "https://www.al-monitor.com/rss"),
+        ("Middle East Eye", "https://www.middleeasteye.net/rss"),
+        ("Times of Israel", "https://www.timesofisrael.com/feed/"),
+        ("SCMP Asia", "https://www.scmp.com/rss/91/feed"),
+        ("Straits Times", "https://www.straitstimes.com/news/world/rss.xml"),
+        ("Africanews", "https://www.africanews.com/feed/"),
+        ("MercoPress", "https://en.mercopress.com/rss"),
+    ),
+    "conflict": (
+        ("Defense One", "https://www.defenseone.com/rss/all/"),
+        ("War on the Rocks", "https://warontherocks.com/feed/"),
+        ("Breaking Defense", "https://breakingdefense.com/feed/"),
+        ("The War Zone", "https://www.thedrive.com/the-war-zone/feed"),
+        ("Bellingcat", "https://www.bellingcat.com/feed/"),
+        ("Kyiv Independent", "https://kyivindependent.com/feed/"),
+        ("Crisis Group", "https://www.crisisgroup.org/rss.xml"),
+    ),
+    "ai_tech": (
+        ("MIT Tech Review", "https://www.technologyreview.com/feed/"),
+        ("Ars Technica", "https://feeds.arstechnica.com/arstechnica/index"),
+        ("Wired", "https://www.wired.com/feed/rss"),
+        ("TechCrunch AI", "https://techcrunch.com/category/artificial-intelligence/feed/"),
+    ),
+    "crypto": (
+        ("CoinDesk", "https://www.coindesk.com/arc/outboundfeeds/rss/"),
+        ("CoinTelegraph", "https://cointelegraph.com/rss"),
+        ("Decrypt", "https://decrypt.co/feed"),
+        ("The Block", "https://www.theblock.co/rss.xml"),
+    ),
+    "markets": (
+        ("CNBC Markets", "https://www.cnbc.com/id/100003114/device/rss/rss.html"),
+        ("MarketWatch", "https://feeds.marketwatch.com/marketwatch/topstories/"),
+        ("FT World", "https://www.ft.com/world?format=rss"),
+        ("Nikkei Asia", "https://asia.nikkei.com/rss/feed/nar"),
+    ),
+    "economics": (
+        ("OilPrice", "https://oilprice.com/rss/main"),
+        ("World Bank", "https://blogs.worldbank.org/feed"),
+        ("RAND", "https://www.rand.org/news/rss.xml"),
+        ("Atlantic Council", "https://www.atlanticcouncil.org/feed/"),
+    ),
+    "science": (
+        ("Nature", "https://www.nature.com/nature.rss"),
+        ("Science Daily", "https://www.sciencedaily.com/rss/all.xml"),
+        ("Phys.org", "https://phys.org/rss-feed/"),
+        ("WHO News", "https://www.who.int/rss-feeds/news-english.xml"),
+    ),
+    "politics": (
+        ("POLITICO EU", "https://www.politico.eu/feed/"),
+        ("The Intercept", "https://theintercept.com/feed/?rss"),
+        ("ProPublica", "https://www.propublica.org/feeds/propublica/main"),
+        ("OCCRP", "https://www.occrp.org/en/component/ocrss/?format=feed"),
+        ("DW Europe", "https://rss.dw.com/rdf/rss-en-eu"),
+    ),
 }
 
-GNEWS_TOPICS = ["WORLD", "NATION", "BUSINESS", "TECHNOLOGY", "SCIENCE", "HEALTH"]
-GNEWS_COUNTRIES = ["US", "GB", "IN", "AU", "CA"]
+# Same topic_override values as x_feed's QUERIES
+TOPIC_OVERRIDES: Final[dict[str, str]] = {
+    "geopolitics": "geopolitics",
+    "conflict": "military_conflict",
+    "ai_tech": "artificial_intelligence",
+    "crypto": "cryptocurrency",
+    "markets": "financial_markets",
+    "economics": "economics",
+    "science": "",
+    "politics": "politics",
+}
+
+# GNews topic → topic_override (same mapping)
+GNEWS_MAP: Final[dict[str, str]] = {
+    "WORLD": "geopolitics",
+    "NATION": "politics",
+    "BUSINESS": "financial_markets",
+    "TECHNOLOGY": "artificial_intelligence",
+    "SCIENCE": "",
+    "HEALTH": "",
+}
+GNEWS_COUNTRIES: Final = ("US", "GB", "IN", "AU", "CA")
+
+MIN_DESC_LEN: Final = 40
 
 console = Console()
 
 
-def fetch_rss_feed(source: str, url: str, max_entries: int = 10) -> list[dict[str, str]]:
-    """Fetch articles from a single RSS feed."""
-    articles = []
+@dataclass(frozen=True, slots=True)
+class Article:
+    title: str
+    description: str
+    source: str
+    link: str
+    topic: str
+
+
+# ---------------------------------------------------------------------------
+# Source generators
+# ---------------------------------------------------------------------------
+
+
+def _rss(source: str, url: str, topic: str, limit: int) -> Iterator[Article]:
+    """Yield articles from a single RSS feed."""
     try:
         feed = feedparser.parse(url)
-        for entry in feed.entries[:max_entries]:
-            articles.append({
-                "title": entry.get("title", ""),
-                "description": entry.get("summary", entry.get("description", "")),
-                "source": source,
-                "link": entry.get("link", ""),
-            })
-    except Exception as e:
-        console.print(f"[dim yellow]RSS {source}: {e}[/dim yellow]")
-    return articles
+        for entry in feed.entries[:limit]:
+            yield Article(
+                title=entry.get("title", ""),
+                description=entry.get("summary", entry.get("description", "")),
+                source=source,
+                link=entry.get("link", ""),
+                topic=topic,
+            )
+    except Exception as exc:
+        console.print(f"  [dim yellow]{source}: {exc}[/dim yellow]")
 
 
-def fetch_gnews(limit: int = 10) -> list[dict[str, str]]:
-    """Fetch articles from GNews across multiple topics and countries."""
-    articles = []
-    for country in GNEWS_COUNTRIES:
-        try:
-            gn = GNews(language="en", country=country, max_results=limit)
-            for topic in GNEWS_TOPICS:
-                for item in gn.get_news_by_topic(topic) or []:
-                    articles.append({
-                        "title": item.get("title", ""),
-                        "description": item.get("description", ""),
-                        "source": f"GNews/{country}/{topic}",
-                        "link": item.get("url", ""),
-                    })
-        except Exception as e:
-            console.print(f"[dim yellow]GNews {country}: {e}[/dim yellow]")
-    return articles
+def _gnews(country: str, gnews_topic: str, topic: str, limit: int) -> Iterator[Article]:
+    """Yield articles from GNews for one country+topic pair."""
+    try:
+        gn = GNews(language="en", country=country, max_results=limit)
+        for item in gn.get_news_by_topic(gnews_topic) or []:
+            yield Article(
+                title=item.get("title", ""),
+                description=item.get("description", ""),
+                source=f"GNews/{country}/{gnews_topic}",
+                link=item.get("url", ""),
+                topic=topic,
+            )
+    except Exception as exc:
+        console.print(f"  [dim yellow]GNews {country}/{gnews_topic}: {exc}[/dim yellow]")
 
 
-def fetch_all_articles(gnews_limit: int = 5, rss_entries: int = 5) -> list[dict[str, str]]:
-    """Fetch articles from all sources with parallel RSS fetching."""
-    articles: list[dict[str, str]] = []
-    seen: set[str] = set()
-
-    def add_unique(items: list[dict[str, str]]) -> int:
-        added = 0
-        for item in items:
-            key = item.get("link") or item.get("title", "")
-            if key and key not in seen:
-                seen.add(key)
-                articles.append(item)
-                added += 1
-        return added
-
-    # Fetch GNews
-    console.print("[dim]Fetching GNews...[/dim]")
-    gnews_articles = fetch_gnews(gnews_limit)
-    gnews_count = add_unique(gnews_articles)
-    console.print(f"[dim]  GNews: {gnews_count} articles[/dim]")
-
-    # Fetch RSS feeds in parallel
-    console.print(f"[dim]Fetching {len(RSS_FEEDS)} RSS feeds...[/dim]")
-    rss_count = 0
-    with ThreadPoolExecutor(max_workers=20) as executor:
-        futures = {
-            executor.submit(fetch_rss_feed, source, url, rss_entries): source
-            for source, url in RSS_FEEDS.items()
-        }
-        for future in as_completed(futures):
-            source = futures[future]
-            try:
-                feed_articles = future.result()
-                count = add_unique(feed_articles)
-                rss_count += count
-                if count > 0:
-                    console.print(f"[dim]  {source}: {count}[/dim]")
-            except Exception as e:
-                console.print(f"[dim yellow]  {source}: {e}[/dim yellow]")
-
-    console.print(f"[dim]  RSS total: {rss_count} articles[/dim]")
-    return articles
+# ---------------------------------------------------------------------------
+# Formatting
+# ---------------------------------------------------------------------------
 
 
-def display_beliefs(beliefs: list[dict[str, object]]) -> None:
-    """Display beliefs in a table."""
-    if not beliefs:
-        console.print("[yellow]No beliefs yet.[/yellow]")
-        return
+def _panel(article: Article) -> Panel:
+    body = escape(article.description[:300])
+    if len(article.description) > 300:
+        body += "…"
+    content = (
+        f"[bold]{escape(article.title)}[/bold]\n\n{body}"
+        f"\n\n[dim]{article.source} · {article.link}[/dim]"
+    )
+    return Panel(content, border_style="green", padding=(0, 1))
 
-    table = Table(title="Beliefs", header_style="bold magenta")
-    table.add_column("Topic", style="cyan")
-    table.add_column("Position", justify="right", style="green")
-    table.add_column("Confidence", justify="right", style="yellow")
 
-    for b in beliefs[:10]:
-        pos = b.get("position", 0)
-        conf = b.get("confidence", 0)
-        table.add_row(
-            str(b.get("topic", "")),
-            f"{pos:+.2f}" if isinstance(pos, (int, float)) else str(pos),
-            f"{conf:.2f}" if isinstance(conf, (int, float)) else str(conf),
+_HTML_TAG = re.compile(r"<[^>]+>")
+
+
+def _enrich(article: Article) -> str:
+    """Enriched text with source credibility marker for ESS classification."""
+    desc = _HTML_TAG.sub("", article.description).strip()
+    return (
+        f"[News/{article.source}]\n\n"
+        f"{article.title}\n\n"
+        f"{desc}\n\n"
+        f"Source: {article.link}"
+    )
+
+
+from _helpers import print_error, print_result, show_beliefs
+
+
+def _ingest_one(
+    client: httpx.Client,
+    base: str,
+    article: Article,
+    topic: str,
+    seen: set[str],
+    ok: int,
+    total: int,
+    throttle: float,
+) -> tuple[int, int]:
+    """Filter, display, and ingest a single article. Returns updated (ok, total)."""
+    key = article.link or article.title
+    if not key or key in seen:
+        return ok, total
+    if not article.title or len(article.description) < MIN_DESC_LEN:
+        return ok, total
+    seen.add(key)
+
+    total += 1
+    console.print(_panel(article))
+
+    try:
+        r = client.post(
+            f"{base}/ingest",
+            json={"text": _enrich(article), "topic_override": topic},
         )
-    console.print(table)
+        r.raise_for_status()
+        ok += 1
+        print_result(r.json())
+    except httpx.HTTPStatusError as exc:
+        print_error(exc)
+    except Exception as exc:
+        console.print(f"  [red]✗ {exc}[/red]")
+
+    if throttle > 0:
+        time.sleep(throttle)
+
+    return ok, total
+
+
+
+
+# ---------------------------------------------------------------------------
+# Entry
+# ---------------------------------------------------------------------------
 
 
 def main() -> None:
     load_dotenv()
-    base_url = os.getenv("SONALITY_URL", "http://localhost:8000")
+    base = os.getenv("SONALITY_URL", "http://localhost:8000")
     throttle = float(os.getenv("FEED_THROTTLE", "5"))
     gnews_limit = int(os.getenv("GNEWS_LIMIT", "5"))
     rss_entries = int(os.getenv("RSS_ENTRIES", "5"))
+    tag_filter = os.getenv("FEED_TAGS", "")
 
-    console.print(f"[bold blue]News Feed[/bold blue] → {base_url}")
-    console.print(f"[dim]Config: throttle={throttle}s, gnews_limit={gnews_limit}, rss_entries={rss_entries}[/dim]\n")
+    feeds = dict(FEEDS)
+    if tag_filter:
+        wanted = {t.strip() for t in tag_filter.split(",") if t.strip()}
+        feeds = {k: v for k, v in feeds.items() if k in wanted}
+        if not feeds:
+            console.print(f"[red]No matching tags: {tag_filter}[/red]")
+            return
 
-    articles = fetch_all_articles(gnews_limit, rss_entries)
-    console.print(f"\n[green]Found {len(articles)} unique articles[/green]\n")
-
-    if not articles:
-        console.print("[red]No articles fetched. Check network/feeds.[/red]")
-        return
+    n_sources = sum(len(sources) for sources in feeds.values())
+    console.print(f"[bold blue]News Feed[/bold blue] → {base}")
+    console.print(
+        f"[dim]{len(feeds)} tags · {n_sources} RSS + GNews "
+        f"({len(GNEWS_COUNTRIES)}×{len(GNEWS_MAP)}) · throttle {throttle}s[/dim]\n"
+    )
 
     with httpx.Client(timeout=300.0) as client:
         try:
-            client.get(f"{base_url}/health").raise_for_status()
-            console.print("[green]✓ Connected to Sonality[/green]\n")
-        except Exception as e:
-            console.print(f"[red]✗ Cannot connect: {e}[/red]")
+            client.get(f"{base}/health").raise_for_status()
+        except Exception as exc:
+            console.print(f"[red]✗ Sonality unreachable: {exc}[/red]")
             return
+        console.print("[green]✓ Connected[/green]\n")
 
-        ok = 0
-        for i, art in enumerate(articles, 1):
-            title = art["title"][:50] if art["title"] else "(no title)"
-            text = f"{art['title']}\n\n{art['description']}\n\nSource: {art['source']}"
+        seen: set[str] = set()
+        ok = total = 0
 
-            try:
-                r = client.post(f"{base_url}/ingest", json={"text": text})
-                r.raise_for_status()
-                data = r.json()
-                score = data.get("score", 0)
-                topics = ", ".join(data.get("topics", [])[:2]) or "-"
-                console.print(f"  [green]✓[/green] {i}/{len(articles)} {title}... (ESS={score:.2f} {topics})")
-                ok += 1
-            except Exception as e:
-                console.print(f"  [red]✗[/red] {i}/{len(articles)} {title}... ({e})")
+        # Phase 1: RSS feeds by topic tag (mirrors x_feed's query loop)
+        for tag, sources in feeds.items():
+            topic = TOPIC_OVERRIDES.get(tag, "")
+            console.print(f"[bold cyan]{tag}[/bold cyan]")
 
-            if i < len(articles) and throttle > 0:
-                time.sleep(throttle)
+            for name, url in sources:
+                for article in _rss(name, url, topic, rss_entries):
+                    ok, total = _ingest_one(client, base, article, topic, seen, ok, total, throttle)
 
-        console.print(f"\n[bold]Ingested {ok}/{len(articles)}[/bold]\n")
+        # Phase 2: GNews (same topics, mapped to same overrides)
+        for gnews_topic, topic in GNEWS_MAP.items():
+            for country in GNEWS_COUNTRIES:
+                console.print(f"[bold cyan]GNews/{country}/{gnews_topic}[/bold cyan]")
+
+                for article in _gnews(country, gnews_topic, topic, gnews_limit):
+                    ok, total = _ingest_one(client, base, article, topic, seen, ok, total, throttle)
+
+        console.print(f"\n[bold]Done — {ok}/{total} ingested[/bold]\n")
 
         try:
-            beliefs = client.get(f"{base_url}/beliefs").json()
-            display_beliefs(beliefs if isinstance(beliefs, list) else beliefs.get("beliefs", []))
-        except Exception as e:
-            console.print(f"[yellow]Could not fetch beliefs: {e}[/yellow]")
+            r = client.get(f"{base}/beliefs")
+            r.raise_for_status()
+            beliefs = r.json()
+            show_beliefs(beliefs if isinstance(beliefs, list) else beliefs.get("beliefs", []))
+        except Exception as exc:
+            console.print(f"[yellow]Could not fetch beliefs: {exc}[/yellow]")
 
 
 if __name__ == "__main__":
