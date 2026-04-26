@@ -4,10 +4,10 @@ from collections.abc import Callable
 
 from sonality.memory.retrieval.router import (
     QueryCategory,
-    QueryRouter,
     RetrievalDepth,
     SemanticMemoryDecision,
     TemporalExpansionDecision,
+    route_query,
 )
 
 
@@ -25,7 +25,7 @@ def test_router_uses_canned_llm_decision(
             }
         }
     )
-    decision = QueryRouter().route("What changed over time?")
+    decision = route_query("What changed over time?")
     assert decision.category is QueryCategory.TEMPORAL
     assert decision.depth is RetrievalDepth.DEEP
     assert decision.temporal_expansion is TemporalExpansionDecision.EXPAND

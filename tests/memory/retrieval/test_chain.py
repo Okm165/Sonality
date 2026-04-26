@@ -5,14 +5,14 @@ from collections.abc import Callable
 from typing import cast
 from unittest.mock import AsyncMock
 
-from sonality.memory.dual_store import DualEpisodeStore
+from sonality.memory.dual_store import DualEpisodeStore, SearchHit
 from sonality.memory.graph import EpisodeNode, MemoryGraph
-from sonality.memory.retrieval.chain import ChainOfQueryAgent
+from sonality.memory.retrieval.chain import chain_retrieve
 
 
 def _store_mock() -> DualEpisodeStore:
     store = AsyncMock(spec=DualEpisodeStore)
-    store.vector_search = AsyncMock(return_value=[("d1", "ep-1", 0.1)])
+    store.vector_search = AsyncMock(return_value=[SearchHit("d1", "ep-1", 0.1)])
     return cast(DualEpisodeStore, store)
 
 
@@ -47,13 +47,7 @@ def test_chain_stops_when_sufficient(
             }
         }
     )
-    result = asyncio.run(
-        ChainOfQueryAgent(
-            _store_mock(),
-            _graph_mock(),
-        ).retrieve("query", base_n=3)
+    episodes = asyncio.run(
+        chain_retrieve(_store_mock(), _graph_mock(), "query", base_n=3)
     )
-    assert not result.exhausted
-    assert result.iterations_used == 1
-    assert result.confidence >= 0.9
-    assert len(result.episodes) == 1
+    assert len(episodes) == 1

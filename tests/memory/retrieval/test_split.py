@@ -5,17 +5,17 @@ from collections.abc import Callable
 from typing import cast
 from unittest.mock import AsyncMock
 
-from sonality.memory.dual_store import DualEpisodeStore
+from sonality.memory.dual_store import DualEpisodeStore, SearchHit
 from sonality.memory.graph import EpisodeNode, MemoryGraph
-from sonality.memory.retrieval.split import AggregationStrategy, SplitQueryAgent, SplitResult
+from sonality.memory.retrieval.split import split_retrieve
 
 
 def _store_mock() -> DualEpisodeStore:
     store = AsyncMock(spec=DualEpisodeStore)
 
-    async def _vector_search(query: str, top_k: int = 10) -> list[tuple[str, str, float]]:
+    async def _vector_search(query: str, top_k: int = 10) -> list[SearchHit]:
         _ = top_k
-        return [("d1", f"{query}-ep", 0.1)]
+        return [SearchHit("d1", f"{query}-ep", 0.1)]
 
     store.vector_search = AsyncMock(side_effect=_vector_search)
     return cast(DualEpisodeStore, store)
@@ -44,15 +44,6 @@ def _graph_mock() -> MemoryGraph:
     return cast(MemoryGraph, graph)
 
 
-def _retrieve(query: str) -> SplitResult:
-    return asyncio.run(
-        SplitQueryAgent(
-            _store_mock(),
-            _graph_mock(),
-        ).retrieve(query)
-    )
-
-
 def test_split_query_parallel_subqueries(
     mock_llm_call: Callable[[dict[str, dict[str, object]]], None],
 ) -> None:
@@ -64,10 +55,8 @@ def test_split_query_parallel_subqueries(
             }
         }
     )
-    result = _retrieve("compare A vs B")
-    assert result.sub_query_count == 2
-    assert len(result.episodes) == 2
-    assert result.aggregation_strategy is AggregationStrategy.COMPARE
+    episodes = asyncio.run(split_retrieve(_store_mock(), _graph_mock(), "compare A vs B"))
+    assert len(episodes) == 2
 
 
 def test_split_query_timeline_strategy_orders_by_created_at(
@@ -81,6 +70,5 @@ def test_split_query_timeline_strategy_orders_by_created_at(
             }
         }
     )
-    result = _retrieve("timeline request")
-    assert [episode.uid for episode in result.episodes] == ["earlier-ep", "later-ep"]
-    assert result.aggregation_strategy is AggregationStrategy.TIMELINE
+    episodes = asyncio.run(split_retrieve(_store_mock(), _graph_mock(), "timeline request"))
+    assert [ep.uid for ep in episodes] == ["earlier-ep", "later-ep"]

@@ -18,8 +18,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 
 from sonality.schema import (
-    NEO4J_IMAGE,
     NEO4J_SCHEMA_STATEMENTS,
+    Collection,
     init_qdrant_collections,
 )
 
@@ -114,7 +114,7 @@ def neo4j_container() -> Generator[tuple[str, str, str], None, None]:
     from testcontainers.neo4j import Neo4jContainer
 
     log.info("Starting Neo4j container...")
-    container = Neo4jContainer(image=NEO4J_IMAGE)
+    container = Neo4jContainer(image="neo4j:5")
     with container:
         url = container.get_connection_url()
         user = "neo4j"
@@ -156,7 +156,7 @@ async def clear_databases(qdrant_url: str, neo4j_url: str, neo4j_auth: tuple[str
     from qdrant_client import AsyncQdrantClient
 
     client = AsyncQdrantClient(url=qdrant_url)
-    for collection in ["derivatives", "semantic_features"]:
+    for collection in Collection:
         if await client.collection_exists(collection):
             await client.delete_collection(collection)
     await init_qdrant_collections(client)

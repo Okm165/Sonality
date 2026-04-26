@@ -1,10 +1,5 @@
 """Pytest configuration and fixtures for Sonality tests.
 
-Container fixtures:
-- `db_containers` — Session-scoped, shared across all tests (efficient)
-- `isolated_qdrant` — Function-scoped Qdrant (fresh per test)
-- `isolated_neo4j` — Function-scoped Neo4j (fresh per test)
-
 Enable containers with: pytest --use-containers
 """
 
@@ -13,15 +8,12 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Callable, Generator
-from typing import TYPE_CHECKING, Final
+from typing import Final
 
 import pytest
 from pydantic import BaseModel
 
 from sonality.llm.caller import LLMCallResult
-
-if TYPE_CHECKING:
-    from tests.containers import ContainerConfig
 
 log = logging.getLogger(__name__)
 NO_DB_CONTAINERS: Final[dict[str, str]] = {}
@@ -75,44 +67,6 @@ def clear_db_between_tests(db_containers: dict[str, str]) -> Generator[None, Non
         )
 
 
-@pytest.fixture(scope="function")
-def isolated_qdrant() -> Generator[str, None, None]:
-    """Function-scoped Qdrant container for complete isolation.
-
-    Use this when a test requires a completely fresh database with no
-    state from other tests. More expensive than session-scoped fixtures.
-    """
-    from tests.containers import qdrant_container
-
-    with qdrant_container() as url:
-        yield url
-
-
-@pytest.fixture(scope="function")
-def isolated_neo4j() -> Generator[tuple[str, str, str], None, None]:
-    """Function-scoped Neo4j container for complete isolation.
-
-    Returns (url, user, password). Use when a test requires a completely
-    fresh graph database with no state from other tests.
-    """
-    from tests.containers import neo4j_container
-
-    with neo4j_container() as info:
-        yield info
-
-
-@pytest.fixture(scope="function")
-def isolated_both() -> Generator[ContainerConfig, None, None]:
-    """Function-scoped both containers for complete test isolation.
-
-    Use for tests that need fresh instances of both databases.
-    """
-    from tests.containers import both_containers
-
-    with both_containers() as config:
-        yield config
-
-
 @pytest.fixture
 def mock_llm_call(
     monkeypatch: pytest.MonkeyPatch,
@@ -157,7 +111,6 @@ def mock_llm_call(
         "sonality.agent.llm_call",
         "sonality.memory.belief_provenance.llm_call",
         "sonality.memory.forgetting.llm_call",
-        "sonality.memory.updater.llm_call",
         "sonality.memory.knowledge_extract.llm_call",
     )
     for target in targets:
