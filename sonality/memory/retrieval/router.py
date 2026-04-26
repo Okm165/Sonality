@@ -14,7 +14,7 @@ from pydantic import BaseModel
 
 from ... import config
 from ...llm.caller import llm_call
-from ...llm.prompts import QUERY_ROUTING_PROMPT
+from ...prompts import QUERY_ROUTING_PROMPT
 
 log = logging.getLogger(__name__)
 
@@ -51,7 +51,7 @@ DEPTH_TO_COUNT: dict[RetrievalDepth, int] = {
 }
 
 
-class RoutingResponse(BaseModel):
+class _RoutingResponse(BaseModel):
     category: QueryCategory = QueryCategory.SIMPLE
     depth: RetrievalDepth = RetrievalDepth.MODERATE
     temporal_expansion: TemporalExpansionDecision = TemporalExpansionDecision.NO_EXPAND
@@ -66,66 +66,37 @@ class RoutingDecision:
     n_results: int
     temporal_expansion: TemporalExpansionDecision
     semantic_memory: SemanticMemoryDecision
-    reasoning: str
 
 
-class QueryRouter:
-    """LLM-first query router. No heuristic bypass."""
+_FALLBACK = RoutingDecision(
+    category=QueryCategory.SIMPLE,
+    depth=RetrievalDepth.MODERATE,
+    n_results=DEPTH_TO_COUNT[RetrievalDepth.MODERATE],
+    temporal_expansion=TemporalExpansionDecision.NO_EXPAND,
+    semantic_memory=SemanticMemoryDecision.SKIP,
+)
 
-    def route(self, query: str, context: str = "") -> RoutingDecision:
-        """Classify a query and determine retrieval strategy."""
-        prompt = QUERY_ROUTING_PROMPT.format(
-            query=query,
-            context=context or "No recent context",
-        )
-        result = llm_call(
-            prompt=prompt,
-            response_model=RoutingResponse,
-            fallback=RoutingResponse(),
-            max_tokens=config.LLM_TOKENS_ROUTING,
-            assistant_prefix='{"category": "',
-        )
 
-        if result.success:
-            response = result.value
-            category = response.category
-            depth = response.depth
+def route_query(query: str) -> RoutingDecision:
+    """Classify a query and determine retrieval strategy."""
+    result = llm_call(
+        prompt=QUERY_ROUTING_PROMPT.format(query=query),
+        response_model=_RoutingResponse,
+        fallback=_RoutingResponse(),
+        max_tokens=config.LLM_MAX_TOKENS,
+        assistant_prefix='{"category": "',
+    )
 
-            # BELIEF_QUERY always requires semantic search — override LLM decision.
-            # Belief retrieval depends on vector similarity; graph-only lookup misses cross-topic matches.
-            semantic_memory = (
-                SemanticMemoryDecision.SEARCH
-                if category == QueryCategory.BELIEF_QUERY
-                else response.semantic_memory
-            )
+    if not result.success:
+        log.warning("Query routing fallback: error=%s", result.error)
+        return _FALLBACK
 
-            decision = RoutingDecision(
-                category=category,
-                depth=depth,
-                n_results=DEPTH_TO_COUNT[depth],
-                temporal_expansion=response.temporal_expansion,
-                semantic_memory=semantic_memory,
-                reasoning=response.reasoning,
-            )
-            log.info(
-                "Query routed: category=%s depth=%s n=%d temporal=%s semantic=%s | %s",
-                decision.category,
-                decision.depth,
-                decision.n_results,
-                decision.temporal_expansion,
-                decision.semantic_memory,
-                response.reasoning[:100] if response.reasoning else "no reasoning",
-            )
-            return decision
-
-        log.warning(
-            "Query routing fallback: result.success=%s error=%s", result.success, result.error
-        )
-        return RoutingDecision(
-            category=QueryCategory.SIMPLE,
-            depth=RetrievalDepth.MODERATE,
-            n_results=DEPTH_TO_COUNT[RetrievalDepth.MODERATE],
-            temporal_expansion=TemporalExpansionDecision.NO_EXPAND,
-            semantic_memory=SemanticMemoryDecision.SKIP,
-            reasoning="Fallback routing",
-        )
+    r = result.value
+    decision = RoutingDecision(
+        category=r.category, depth=r.depth, n_results=DEPTH_TO_COUNT[r.depth],
+        temporal_expansion=r.temporal_expansion, semantic_memory=r.semantic_memory,
+    )
+    log.info("Query routed: category=%s depth=%s n=%d temporal=%s semantic=%s reason=%.200s",
+             decision.category, decision.depth, decision.n_results,
+             decision.temporal_expansion, decision.semantic_memory, r.reasoning)
+    return decision

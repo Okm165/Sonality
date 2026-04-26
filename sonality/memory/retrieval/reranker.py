@@ -12,15 +12,14 @@ from pydantic import BaseModel
 
 from ... import config
 from ...llm.caller import llm_call
-from ...llm.prompts import RERANK_PROMPT
+from ...prompts import RERANK_PROMPT
 from ..graph import EpisodeNode
 
 log = logging.getLogger(__name__)
 
 
-class RerankResponse(BaseModel):
+class _RerankResponse(BaseModel):
     ranking: list[int]
-    reasoning: str = ""
 
 
 def rerank_episodes(
@@ -63,21 +62,16 @@ def rerank_episodes(
     prompt = RERANK_PROMPT.format(query=query, numbered_candidates=numbered)
     result = llm_call(
         prompt=prompt,
-        response_model=RerankResponse,
-        fallback=RerankResponse(ranking=list(range(1, len(to_rank) + 1))),
-        max_tokens=config.LLM_TOKENS_RERANK,
+        response_model=_RerankResponse,
+        fallback=_RerankResponse(ranking=list(range(1, len(to_rank) + 1))),
+        max_tokens=config.LLM_MAX_TOKENS,
         assistant_prefix='{"ranking": [',
     )
 
     if result.success:
         ranking = result.value.ranking
-        log.info(
-            "Reranked %d→%d candidates. Top=%s | %s",
-            len(to_rank),
-            top_k or len(to_rank),
-            ranking[:5],
-            result.value.reasoning[:80] if result.value.reasoning else "no reasoning",
-        )
+        log.info("Reranked %d→%d candidates. Top=%s",
+                 len(to_rank), top_k or len(to_rank), ranking[:5])
 
         # Map 1-indexed ranking to 0-indexed episodes
         reranked: list[EpisodeNode] = []
