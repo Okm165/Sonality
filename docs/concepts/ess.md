@@ -16,8 +16,8 @@ The classifier returns structured metadata via the LLM's tool-use API (`classify
 | Field | Type | Description |
 |-------|------|--------------|
 | `score` | float (0.0–1.0) | Overall argument strength |
-| `reasoning_type` | enum | One of 7 types: `logical_argument`, `empirical_data`, `expert_opinion`, `anecdotal`, `social_pressure`, `emotional_appeal`, `no_argument` |
-| `source_reliability` | enum | One of 6 levels: `peer_reviewed`, `established_expert`, `informed_opinion`, `casual_observation`, `unverified_claim`, `not_applicable` |
+| `reasoning_type` | enum | `logical_argument`, `empirical_data`, `expert_opinion`, `anecdotal`, `social_pressure`, `emotional_appeal`, `no_argument`, `news_report`, `aggregated_sentiment`, `debunked_claim` |
+| `source_reliability` | enum | `peer_reviewed`, `established_expert`, `informed_opinion`, `casual_observation`, `unverified_claim`, `not_applicable` |
 | `internal_consistency` | enum | `CONSISTENT` or `INCONSISTENT` |
 | `novelty` | float (0.0–1.0) | How new this is relative to the agent's existing views |
 | `topics` | list[str] | 1–3 topic labels |
@@ -68,7 +68,7 @@ When the LLM returns incomplete tool output (missing required fields), Sonality 
 - The `used_defaults` flag is set on `ESSResult` for audit logging
 - Defaults are treated as unreliable classifier output and block personality updates
 
-This prevents a single malformed LLM response from corrupting the sponge.
+This prevents a single malformed LLM response from corrupting beliefs.
 
 ## How ESS Connects to Opinion Updates
 
@@ -103,7 +103,7 @@ Kahneman's dual-process theory distinguishes System 1 (fast, intuitive) from Sys
 
 ---
 
-**Next:** [Opinion Dynamics](opinion-dynamics.md) — how ESS-derived magnitudes translate into belief updates. [Anti-Sycophancy](anti-sycophancy.md) — why ESS decoupling is layer 2 of the eight-layer defense.
+**See Also:** [Opinion Dynamics](opinion-dynamics.md) — how ESS affects belief updates | [Anti-Sycophancy](anti-sycophancy.md) — why ESS decoupling prevents self-judge bias
 
 [^1]: Hegselmann-Krause (2002). Bounded confidence model.
 [^2]: SYConBench (EMNLP 2025, arXiv:2505.23840).

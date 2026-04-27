@@ -1,6 +1,6 @@
 # Reflection
 
-Reflection is the mechanism that transforms raw accumulated experience into coherent personality. Park et al. (2023) ablation showed it is the **most critical component** — without it, agents accumulate raw memories but cannot form coherent beliefs and behave less believably over time despite having more data. This is analogous to human memory consolidation during sleep: raw hippocampal memories are replayed and consolidated into neocortical long-term storage.
+Reflection is the mechanism that transforms raw accumulated experience into coherent personality. Park et al. (2023) ablation showed it is the **most critical component** — without it, agents accumulate raw memories but cannot form coherent beliefs and behave less believably over time despite having more data.
 
 ## Why Reflection Exists
 
@@ -14,101 +14,180 @@ The Stanford Generative Agents paper (Park et al., UIST 2023) ran controlled abl
 
 Without reflection, agents accumulated raw memories but could not form coherent higher-level beliefs. Reflection is the bottleneck that converts experience into identity.
 
-## Trigger Conditions
+## Two-Tier Reflection Architecture
 
-Reflection fires under two conditions (dual trigger):
-
-1. **Periodic**: `interaction_count - last_reflection_at >= REFLECTION_EVERY` (default: 20)
-2. **Event-driven**: positive recent shift activity with pending insights or staged updates
-
-!!! warning "Cooldown"
-    Reflection will **not** fire if fewer than `REFLECTION_EVERY // 2` interactions have occurred since the last reflection. At the default `REFLECTION_EVERY=20`, this means a minimum 10-interaction cooldown. The cooldown is checked *first* — neither periodic nor event-driven triggers can override it. This prevents thrashing when a burst of high-ESS interactions occurs in quick succession.
-
-## The Reflection Pipeline
+Sonality uses an LLM-driven two-tier reflection system that evaluates each interaction:
 
 ```mermaid
 flowchart TD
-    Trigger[Reflection Triggered] --> Decay[1. Decay Unreinforced Beliefs]
-    Decay --> Retrieve[2. Retrieve Recent Episodes]
-    Retrieve --> Prepare[3. Assemble Context]
-    Prepare --> LLM[4. LLM Consolidation]
-    LLM --> Validate{5. Validate Snapshot}
-    Validate -->|Pass| Update[Update Snapshot]
-    Validate -->|Fail| Reject[Reject, Keep Old]
-    Update --> Health[6. Health Check]
-    Health --> Clear[7. Clear Pending Insights]
-    Clear --> Log[Log Reflection Event]
+    Interaction[New Interaction] --> Triage[Tier 1: Triage]
+    Triage -->|should_reflect=false| Skip[Skip Reflection]
+    Triage -->|should_reflect=true| Deep[Tier 2: Deep Reflection]
+    
+    Deep --> Apply[Apply Reflection]
+    Apply --> UpdateBeliefs[Update/Create Beliefs]
+    Apply --> UpdateSnapshot[Update Personality Snapshot]
+    Apply --> Forgetting[Trigger Forgetting Cycle]
 ```
 
-### Step 1: Decay Beliefs
+### Tier 1: Triage
 
-Before consolidation, stale beliefs are evaluated by `BELIEF_DECAY_PROMPT` and marked as `RETAIN`, `DECAY`, or `FORGET` with conservative fallback behavior.
+Every conversation triggers a lightweight LLM triage that decides whether deeper reflection is warranted.
 
-See [Opinion Dynamics](opinion-dynamics.md) for the full decay formula.
+**Triage Input:**
+- Current top beliefs (topic, valence, confidence)
+- User message and agent response
+- ESS classification (score, reasoning type, topics)
 
-### Step 2: Retrieve Episodes
+**Triage Decision Criteria:**
+1. Does this contain evidence that changes existing beliefs?
+2. Does it introduce a genuinely new topic requiring a stance?
+3. Does it represent a shift in how the agent reasons?
 
-Recent non-archived episodes are loaded from Neo4j graph context (`list_recent_episode_context`), capped at `min(REFLECTION_EVERY, 10)` results.
+**Output:** `{"should_reflect": true/false, "reason": "..."}`
 
-### Step 3: Assemble Context
+```python
+class _TriageResponse(BaseModel):
+    should_reflect: bool = False
+    reason: str = ""
+```
 
-The reflection prompt receives:
+### Tier 2: Deep Reflection
 
+When triage returns `should_reflect=true`, the agent performs deep reflection with full context.
+
+**Deep Reflection Input:**
 - Current personality snapshot
-- Structured traits (opinions, topics, disagreement rate)
-- Current beliefs with confidence, evidence count, last reinforced
-- Pending insights (accumulated since last reflection)
-- Recent episode summaries
-- Recent personality shifts
+- Current beliefs with valence/confidence
+- Recent episodes (up to 10)
+- The triggering interaction
 
-### Step 4: LLM Consolidation
+**Deep Reflection Tasks:**
+1. **EVALUATE** — Which beliefs should change based on new evidence?
+2. **RECONCILE** — Check for tensions between beliefs, acknowledge/resolve conflicts
+3. **SYNTHESIZE** — What meta-patterns emerge? Should the personality snapshot evolve?
 
-The `REFLECTION_PROMPT` tasks are ordered deliberately:
+**Output:**
 
-1. **PRESERVE** — all existing personality traits unless directly contradicted by new evidence; removing a trait is losing identity
-2. **INTEGRATE** — pending insights naturally into the narrative
-3. **SYNTHESIZE** — higher-order patterns (e.g., "I notice I tend to value X")
-4. **Inject specificity** — if the personality has become generic, add detail from strongest recent insights
+```python
+class _BeliefPatch(BaseModel):
+    topic: str = ""
+    valence: float = 0.0        # -1 to +1
+    confidence: float = 0.5     # 0 to 1
+    belief_text: str = ""       # natural language belief
+    reasoning: str = ""         # why this update
 
-This PRESERVE-first ordering is inspired by Open Character Training (2025) — personality changes must be robust. Persona Vectors research (2025): losing a specific trait means losing neural activation patterns.
+class _DeepReflectionResponse(BaseModel):
+    belief_updates: list[_BeliefPatch] = []
+    new_beliefs: list[_BeliefPatch] = []
+    snapshot_revision: str = ""
+    snapshot_changed: bool = False
+```
 
-### Step 5: Validate Output
+## Applying Reflection
 
-Before committing the new snapshot:
+After deep reflection produces a response, the agent applies changes:
 
-- **Minimum length**: ≥ 30 characters
-- **Retention ratio**: `len(new) / len(old) ≥ 0.6` (60%)
+```mermaid
+flowchart LR
+    subgraph changes["Reflection Output"]
+        Updates[belief_updates]
+        NewBeliefs[new_beliefs]
+        Snapshot[snapshot_revision]
+    end
+    
+    subgraph storage["Neo4j Storage"]
+        BeliefNodes[BeliefNode]
+        SnapshotNode[PersonalitySnapshot]
+    end
+    
+    Updates -->|upsert_belief| BeliefNodes
+    NewBeliefs -->|upsert_belief| BeliefNodes
+    Snapshot -->|upsert_personality_snapshot| SnapshotNode
+```
 
-Catches catastrophic content loss from LLM rewrites. Without validation, a single bad reflection could destroy interactions worth of personality development.
+### Belief Updates
 
-### Step 6: Health Check
+Each belief patch creates or updates a `BeliefNode` in Neo4j:
 
-After a successful update, vocabulary diversity is checked:
+```python
+for patch, provenance in all_updates:
+    await graph.upsert_belief(
+        patch.topic,
+        valence=patch.valence,
+        confidence=patch.confidence,
+        belief_text=patch.belief_text,
+        provenance=provenance,  # "reflection:{episode_uid}" or "new_belief:{episode_uid}"
+    )
+```
 
-- `unique_ratio = len(set(words)) / len(words)`
-- If `unique_ratio < 0.4`: log warning — possible personality collapse (repetitive, generic text)
+### Snapshot Updates
 
-### Step 7: Clear and Update
+If `snapshot_changed=true`, the personality snapshot is updated:
 
-- `pending_insights` cleared
-- `last_reflection_at = interaction_count`
+```python
+if reflection.snapshot_changed and reflection.snapshot_revision:
+    text = reflection.snapshot_revision[:2000]  # truncate safety
+    await graph.upsert_personality_snapshot(text)
+```
 
-## Accumulate-Then-Consolidate Pattern
+## Integration with Forgetting
 
-Sonality deliberately avoids per-interaction snapshot rewrites:
+After applying reflection, the agent triggers a forgetting cycle on candidate episodes:
 
-| Per Interaction | During Reflection |
-|-----------------|-------------------|
-| Extract one-sentence insight | Consolidate all pending insights |
-| Append to `pending_insights` | Rewrite snapshot narrative |
-| Update opinion vectors (math only) | Validate and commit |
+```python
+candidates = await graph.get_forgetting_candidates(limit=10)
+if candidates:
+    snapshot = await graph.get_personality_snapshot()
+    await assess_and_forget(
+        candidates, graph, dual_store,
+        snapshot_excerpt=snapshot.text[:500],
+    )
+```
 
-!!! info "Why Not Per-Interaction Rewrites?"
-    ABBEL (2025) demonstrated that "belief bottlenecks" — forcing information through a compressed state — *outperform* full conversation history. But frequent rewrites introduce the **Broken Telephone** effect:
+This ensures that:
+1. New beliefs are formed from important interactions
+2. Redundant or outdated episodes are archived/forgotten
+3. The memory system stays coherent with current beliefs
 
-    $$P(\text{survive}, N) = p^N$$
+## Why Per-Interaction Triage?
 
-    At p = 0.95 per rewrite, after 40 rewrites only 12.9% of initial distinctive traits survive. By accumulating insights and consolidating periodically, the number of rewrites drops from ~40 per 100 interactions to ~5, dramatically improving trait survival.
+Unlike periodic reflection approaches, Sonality evaluates every interaction:
+
+| Approach | Pros | Cons |
+|----------|------|------|
+| **Periodic** (every N interactions) | Lower compute | May miss important moments |
+| **Threshold** (ESS score trigger) | Captures high-quality info | May over-trigger on noise |
+| **LLM Triage** (current) | Context-aware decisions | Higher compute per interaction |
+
+The triage approach allows the LLM to consider:
+- Whether information is genuinely novel vs redundant
+- Whether it contradicts or reinforces existing beliefs
+- Whether the agent's identity should evolve
+
+Most interactions return `should_reflect=false` quickly, keeping compute reasonable.
+
+## Background Worker Integration
+
+Reflection runs in a background worker thread to avoid blocking responses:
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Agent
+    participant Worker
+    participant Neo4j
+    
+    User->>Agent: Message
+    Agent->>User: Response (immediate)
+    Agent->>Worker: Queue reflection task
+    Worker->>Worker: Triage check
+    alt should_reflect=true
+        Worker->>Worker: Deep reflection
+        Worker->>Neo4j: Update beliefs
+        Worker->>Neo4j: Update snapshot
+    end
+```
 
 ## Research Grounding
 
@@ -117,16 +196,16 @@ Sonality deliberately avoids per-interaction snapshot rewrites:
 | **Park et al. (2023)** | Reflection ablation: most critical component for believable agents |
 | **Sleep-time Compute (arXiv:2504.13171)** | +13–18% accuracy with background consolidation, 5× compute savings |
 | **SAGE (arXiv:2409.00872)** | Ebbinghaus-based memory management: 2.26× improvement |
-| **EvolveR (arXiv:2510.16079)** | Experience lifecycle closure enables learning from experience |
-| **ABBEL (2025)** | Belief bottleneck: compact state outperforms full context; frequent rewrites lose minority opinions |
-| **IROTE (2025)** | Experience-based reflection can amplify errors — validation layers mitigate |
+| **ABBEL (2025)** | Belief bottleneck: compact state outperforms full context |
 
-## Known Risks
+## Known Considerations
 
-**Reflection is the highest-variance component.** When it works, it produces coherent higher-level beliefs from raw experience. When it fails, it can destroy personality through a single bad rewrite. The validation layer mitigates catastrophic failure, but subtle information loss still accumulates.
+1. **Triage Accuracy** — The LLM may occasionally skip important interactions or trigger on noise. The conservative fallback is `should_reflect=false`.
 
-**Wholesale rewrite vs. targeted edit.** The current implementation does a full snapshot rewrite. Broken Telephone research shows wholesale regeneration loses more information than targeted editing. A future improvement: structured opinion slots that the LLM cannot delete during reflection.
+2. **Belief Coherence** — Multiple rapid reflections could create inconsistent beliefs. The dual-tier system helps by requiring both triage approval and deep analysis.
+
+3. **Snapshot Drift** — Frequent snapshot updates could lead to personality drift. The `snapshot_changed` flag must be explicitly set by deep reflection.
 
 ---
 
-**Next:** [Anti-Sycophancy](anti-sycophancy.md) — how reflection interacts with the eight defensive layers. [Personality Development](../personality-development.md) — the teaching methodology and expected reflection outputs at each interaction milestone.
+**See Also:** [Memory Lifecycle](../architecture/memory-lifecycle.md) — forgetting integration | [Belief System](belief-system.md) — belief storage model
