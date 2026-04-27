@@ -31,15 +31,15 @@ See [Training Guide](training-guide.md) for deep methodology and curricula.
 
 After each turn, inspect:
 
-- ESS score and topics (`/health`, status line output).
-- Staged updates (`/staged`) rather than immediate opinion flips.
-- Topic engagement growth (`/topics`).
+- ESS score and topics (shown after each response in REPL status line).
+- Belief states (`/beliefs`) to track opinion changes.
+- Personality snapshot (`/snapshot`) for identity coherence.
 
 Expected behavior:
 
-- Low-ESS chat should not alter opinions.
-- High-ESS evidence should stage topic-specific deltas.
-- Reflection should consolidate insights periodically without erasing identity.
+- Low-ESS chat should not alter beliefs.
+- High-ESS evidence may trigger reflection and belief updates.
+- Reflection consolidates insights without erasing identity.
 
 ## 4) Validate personality integrity
 
@@ -50,7 +50,7 @@ Use this monitoring checklist:
 - **Stability:** major shifts require repeated high-quality evidence.
 - **Specificity:** reflection output stays concrete (not generic assistant drift).
 
-Use `/diff`, `/shifts`, `/health`, and historical sponge versions in `data/sponge_history/`.
+Use `/snapshot`, `/beliefs`, and historical snapshots in Neo4j `PersonalitySnapshot` nodes.
 
 ## 5) Run non-live quality gates
 
