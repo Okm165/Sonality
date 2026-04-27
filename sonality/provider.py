@@ -192,7 +192,7 @@ class LLMProvider:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.timeout = timeout
-        self._semaphore = threading.Semaphore(1)
+        self._semaphore = threading.Semaphore(config.LLM_CONCURRENCY)
 
     def _post_json(self, path: str, payload: Mapping[str, object]) -> dict[str, object]:
         """POST JSON to the provider with retries."""
@@ -277,11 +277,7 @@ class LLMProvider:
                     first.get("finish_reason", "unknown"),
                 )
                 text = strip_thinking_trace(raw_content)
-                if (
-                    not text
-                    and isinstance(raw_reasoning, str)
-                    and raw_reasoning
-                ):
+                if not text and isinstance(raw_reasoning, str) and raw_reasoning:
                     log.debug("LLM_RAW extracting from reasoning_content (content was empty)")
                     text = _extract_answer_from_reasoning(raw_reasoning)
 
@@ -403,14 +399,31 @@ def llm_semaphore_idle() -> bool:
     return not interaction_in_progress() and default_provider.semaphore_idle()
 
 
+def strip_analysis_block(text: str) -> str:
+    """Strip <analysis>...</analysis> scratchpad blocks from LLM output.
+
+    The analysis block is a chain-of-thought drafting area that improves output
+    quality but should not be parsed as part of the structured response.
+    """
+    import re
+
+    # Strip complete <analysis>...</analysis> blocks
+    text = re.sub(r"<analysis>[\s\S]*?</analysis>", "", text, flags=re.IGNORECASE)
+    # Strip unclosed <analysis> blocks (model cut off mid-thought)
+    text = re.sub(r"<analysis>[\s\S]*$", "", text, flags=re.IGNORECASE)
+    return text.strip()
+
+
 def decode_llm_json(text: str) -> dict[str, object] | list[object]:
     """Extract JSON (object or array) from LLM response text.
 
-    Strips markdown fences, attempts whole-text parse first (preserving bare
-    arrays), then falls back to extract_last_json_object for messy output.
-    Raises ValueError if no JSON can be extracted.
+    Strips markdown fences and <analysis> blocks, attempts whole-text parse
+    first (preserving bare arrays), then falls back to extract_last_json_object
+    for messy output. Raises ValueError if no JSON can be extracted.
     """
-    cleaned = text.strip().replace("```json", "").replace("```", "").strip()
+    # Strip analysis scratchpad blocks before JSON extraction
+    cleaned = strip_analysis_block(text)
+    cleaned = cleaned.replace("```json", "").replace("```", "").strip()
     if not cleaned:
         raise ValueError("Empty LLM response")
     try:

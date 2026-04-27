@@ -15,12 +15,11 @@ from ..schema import ChatRole
 
 log = logging.getLogger(__name__)
 
-_MAX_RETRIES: Final = 3
-_BACKOFF_BASE: Final = 2.0
 _JSON_SYSTEM_PROMPT: Final = (
     "Output ONLY valid JSON (object or array). "
     "Do not include any explanation, preamble, markdown fences, or reasoning before or after the JSON. "
     "Do NOT use pipe characters (|), schema type annotations, or placeholder text as values — fill in actual values only. "
+    "Prefer compact numeric literals (e.g. 0.6 not 0.600000); at most 4 decimal places for floats. "
     "Your entire response must be the JSON and nothing else."
 )
 _JSON_REPAIR_PROMPT: Final = (
@@ -85,7 +84,7 @@ def llm_call[T: BaseModel](
     model: str = config.FAST_LLM_MODEL,
     max_tokens: int = config.LLM_MAX_TOKENS,
     system: str = _JSON_SYSTEM_PROMPT,
-    max_retries: int = _MAX_RETRIES,
+    max_retries: int = config.LLM_MAX_RETRIES,
     assistant_prefix: str = "",
 ) -> LLMCallResult[T]:
     """Execute a structured LLM call with retry, repair, and fallback.
@@ -202,7 +201,7 @@ def llm_call[T: BaseModel](
                 or "transport error" in error_str
             )
             if attempt < max_retries and not is_exhausted:
-                wait = _BACKOFF_BASE**attempt
+                wait = config.LLM_BACKOFF_BASE**attempt
                 log.warning(
                     "LLM provider error on attempt %d/%d schema=%s: %s; retrying in %.1fs",
                     attempt,
