@@ -1,84 +1,65 @@
-# Testing and Evaluation
-
-This page is an operator playbook for validating Sonality:
-
-- what runs without API keys,
-- what runs with API keys,
-- which commands to run in order,
-- and which artifacts matter for release decisions.
+# Testing
 
 ## Test Layers
 
-| Layer | API Key | Command | Purpose |
-|---|---|---|---|
-| L0 Format/Lint/Type | No | `make check-ci` | Fast CI-parity quality gate |
-| L1 Runtime correctness | No | `uv run pytest -q tests` | Deterministic runtime behavior and invariants (101 tests, incl. 28 API endpoint tests) |
-| L2 Non-live benchmark contracts | No | `uv run pytest benches -m "bench and not live" -q` | Harness contract and release-gating logic |
-| L3 Live benchmark slices | Yes | `make bench-memory` / `make bench-personality` | API-backed behavioral validation |
-| L4 Full teaching benchmark | Yes | `make bench-teaching` | End-to-end release evidence pack |
+| Layer | API Key | Command |
+|-------|---------|---------|
+| L0 Lint/Type | No | `make check-ci` |
+| L1 Unit Tests | No | `pytest tests/` |
+| L2 Benchmark Contracts | No | `pytest benches -m "bench and not live"` |
+| L3 Live Benchmarks | Yes | `make bench-memory` / `make bench-personality` |
+| L4 Full Teaching | Yes | `make bench-teaching` |
 
-## Recommended Execution Order
-
-Run in this order from fastest to most expensive:
-
-1. `make check-ci`
-2. `uv run pytest benches -m "bench and not live" -q`
-3. `make preflight-live`
-4. `make bench-memory` or `make bench-personality`
-5. `make bench-teaching` (release candidate evaluation)
-
-## Live Run Preconditions
-
-Before any live benchmark:
+## Running Tests
 
 ```bash
-SONALITY_BASE_URL=http://localhost:11434/v1   # example: Ollama OpenAI-compatible endpoint
-SONALITY_API_KEY=...
-SONALITY_MODEL=qwen2.5:14b-instruct
-SONALITY_ESS_MODEL=qwen2.5:14b-instruct
+pytest tests/                     # Unit (local DBs)
+pytest tests/ --use-containers    # With testcontainers
+pytest benches/ -v                # Benchmarks (mocked)
+pytest benches/ --live -v         # Benchmarks (live LLM)
 ```
 
-Validate config:
+## Key Fixtures
+
+### `mock_llm_call`
+
+```python
+def test_router(mock_llm_call):
+    mock_llm_call({"Classify": {"category": "SIMPLE"}})
+    assert route_query("...").category == QueryCategory.SIMPLE
+```
+
+### `db_containers`
+
+Session-scoped Neo4j + Qdrant via testcontainers.
+
+## Test Categories
+
+| Category | Location | Purpose |
+|----------|----------|---------|
+| Unit | `tests/` | ESS, chunking, boundaries |
+| Integration | `tests/memory/` | Router, retrieval, forgetting |
+| Live | `tests/test_live_graduated.py` | Full agent |
+| Benchmarks | `benches/` | Multi-dimensional evaluation |
+
+## Live Preconditions
 
 ```bash
+SONALITY_BASE_URL=http://localhost:11434/v1
+SONALITY_MODEL=qwen2.5:14b-instruct
 make preflight-live
 ```
 
-If `SONALITY_BASE_URL` is missing, runtime should be treated as misconfigured.
+## Benchmark Artifacts
 
-## What the Non-Live Suite Must Guarantee
+Output in `data/teaching_bench/`:
+- `summary.json` — Top-level outcome
+- `release_readiness.json` — Gate decisions
+- `observer_verdict_trace.jsonl` — Per-step verdicts
 
-Non-live checks should protect these invariants:
+## Triage
 
-- ESS parsing/coercion fallback remains safe.
-- Memory admission/reranking behavior stays deterministic.
-- Belief update/decay math preserves expected bounds.
-- Scenario contract checks catch release policy regressions.
-- Release-readiness aggregation still blocks unsafe candidates.
-
-## Core Artifacts in Live Runs
-
-Teaching benchmarks write structured artifacts under `data/teaching_bench/`.
-Prioritize these when triaging:
-
-- `summary.json` — top-level outcome and key rates.
-- `release_readiness.json` — release gate view and blockers.
-- `risk_tier_dashboard.json` — hard-gate evidence sufficiency by tier.
-- `health_summary.json` — stability and behavioral health rollups.
-- `observer_verdict_trace.jsonl` — per-step contract observer verdicts.
-- `risk_event_trace.jsonl` — risk events, severity tags, and evidence context.
-
-## Fast Failure Triage
-
-Use this checklist:
-
-1. Read `release_readiness.json`.
-2. If blocked, inspect hard-gate failures first.
-3. If not blocked but unstable, inspect `health_summary.json`.
-4. If evidence is insufficient, inspect `risk_tier_dashboard.json`.
-5. For step-level root cause, inspect `observer_verdict_trace.jsonl`.
-
-## Keep Tests Lean
-
-Prefer tests that validate behavior, contracts, or safety boundaries.
-Avoid adding tests that only re-check trivial helper mechanics with no release impact.
+1. Read `release_readiness.json`
+2. If blocked → inspect hard-gate failures
+3. If unstable → inspect `health_summary.json`
+4. For step-level → `observer_verdict_trace.jsonl`
