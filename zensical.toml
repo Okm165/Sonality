@@ -5,8 +5,6 @@ site_author = "Sonality"
 site_url = "https://okm165.github.io/Sonality/"
 copyright = "&copy; 2025–2026 Sonality contributors"
 
-extra_css = ["stylesheets/extra.css"]
-
 extra_javascript = [
     "https://unpkg.com/mathjax@3/es5/tex-mml-chtml.js",
 ]
@@ -14,84 +12,34 @@ extra_javascript = [
 nav = [
     { "Home" = "index.md" },
     { "Getting Started" = "getting-started.md" },
-    { "Project Structure" = "project-structure.md" },
-    { "Usage and Teaching Plan" = "usage-and-teaching-plan.md" },
+    { "Configuration" = "configuration.md" },
+    { "API Reference" = "api-reference.md" },
     { "Architecture" = [
-        { "System Architecture" = "architecture/system-architecture.md" },
-        { "System Integration Map" = "architecture/system-integration-map.md" },
-        { "Verified Data Flow" = "architecture/verified-data-flow.md" },
-        { "Module Inventory" = "architecture/module-inventory.md" },
-        { "System Overview" = "architecture/overview.md" },
-        { "Configuration & Schema" = "architecture/configuration-schema.md" },
-        { "Agent Core" = "architecture/agent-core.md" },
-        { "CLI Interface" = "architecture/cli-interface.md" },
-        { "Agent Pipeline" = "architecture/agent-pipeline.md" },
-        { "Memory Subsystem" = "architecture/memory-subsystem.md" },
-        { "Memory Model" = "architecture/memory-model.md" },
-        { "Dual Store Operations" = "architecture/dual-store-operations.md" },
-        { "Graph Operations" = "architecture/graph-operations.md" },
-        { "Database Schema" = "architecture/database-schema.md" },
+        { "Overview" = "architecture/overview.md" },
         { "Data Flow" = "architecture/data-flow.md" },
+        { "Memory System" = "architecture/memory.md" },
         { "Retrieval Pipeline" = "architecture/retrieval-pipeline.md" },
-        { "Advanced Retrieval" = "architecture/advanced-retrieval.md" },
         { "Knowledge Extraction" = "architecture/knowledge-extraction.md" },
-        { "Segmentation" = "architecture/segmentation.md" },
-        { "ESS Classifier" = "architecture/ess-classifier.md" },
-        { "Belief Provenance" = "architecture/belief-provenance.md" },
-        { "Semantic Features Worker" = "architecture/semantic-features-worker.md" },
         { "Forgetting System" = "architecture/forgetting-system.md" },
-        { "Memory Lifecycle" = "architecture/memory-lifecycle.md" },
-        { "Chunking & Derivatives" = "architecture/chunking-derivatives.md" },
-        { "Embedder & Consolidation" = "architecture/embedder-consolidation.md" },
-        { "Database Connections" = "architecture/database-connections.md" },
-        { "API Layer" = "architecture/api-layer.md" },
-        { "Prompt System" = "architecture/prompt-system.md" },
-        { "Prompts Reference" = "architecture/prompts-reference.md" },
-        { "LLM Caller" = "architecture/llm-caller.md" },
-        { "LLM Provider" = "architecture/llm-provider.md" },
-        { "Data Pipeline Trace" = "architecture/data-pipeline-trace.md" },
-        { "Feed Scripts" = "architecture/feed-scripts.md" },
-        { "Feed Ingestion" = "architecture/feed-ingestion.md" },
-        { "Chat System" = "architecture/chat-system.md" },
+        { "Semantic Features" = "architecture/semantic-features-worker.md" },
         { "Chat Clients" = "architecture/chat-clients.md" },
         { "Infrastructure" = "architecture/infrastructure.md" },
-        { "Research Upgrade Plan" = "architecture/research-upgrade-plan.md" },
-        { "Architecture Assessment" = "architecture-assessment.md" },
+        { "Prompts Reference" = "architecture/prompts-reference.md" },
     ] },
-    { "Core Concepts" = [
-        { "Evidence Strength Score" = "concepts/ess.md" },
-        { "ESS Deep Dive" = "concepts/ess-deep-dive.md" },
-        { "Belief System" = "concepts/belief-system.md" },
-        { "Opinion Dynamics" = "concepts/opinion-dynamics.md" },
+    { "Concepts" = [
+        { "ESS" = "concepts/ess.md" },
+        { "Beliefs" = "concepts/beliefs.md" },
         { "Reflection" = "concepts/reflection.md" },
         { "Anti-Sycophancy" = "concepts/anti-sycophancy.md" },
     ] },
-    { "Design Decisions" = "design-decisions.md" },
-    { "Research" = [
-        { "Background" = "research/background.md" },
-        { "References" = "research/references.md" },
-        { "Web Research Synthesis 2026" = "research/web-research-synthesis-2026.md" },
-    ] },
-    { "Personality Development" = "personality-development.md" },
-    { "Training Guide" = "training-guide.md" },
-    { "Testing & Evaluation" = [
+    { "Testing" = [
         { "Overview" = "testing.md" },
-        { "Testing Framework" = "testing/testing-framework.md" },
-        { "Testing Infrastructure" = "testing/testing-infrastructure.md" },
-        { "Scenario Runner" = "testing/scenario-runner.md" },
-        { "Benchmarks" = "testing/benchmarks.md" },
-        { "Benchmark System" = "testing/benchmark-system.md" },
-        { "Composed Scenarios" = "testing/composed-scenarios.md" },
-        { "Live Scenarios" = "testing/live-scenarios.md" },
-        { "Knowledge Accumulation" = "testing/knowledge-accumulation.md" },
-        { "Test Suite Patterns" = "testing/test-suite-patterns.md" },
+        { "Benchmarks" = "testing/benchmark-system.md" },
     ] },
-    { "Operations" = [
-        { "Memory Diagnostics" = "operations/memory-diagnostics.md" },
+    { "Reference" = [
+        { "Project Structure" = "project-structure.md" },
+        { "Usage Guide" = "usage-and-teaching-plan.md" },
     ] },
-    { "Model Considerations" = "model-considerations.md" },
-    { "Configuration" = "configuration.md" },
-    { "API Reference" = "api-reference.md" },
 ]
 
 [project.theme]
