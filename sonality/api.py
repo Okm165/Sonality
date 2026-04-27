@@ -14,14 +14,17 @@ import time
 import uuid
 from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from functools import partial
 from typing import Final
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
+from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Field
+from starlette.middleware.base import BaseHTTPMiddleware
 
-from . import __version__
+from . import __version__, config
 from .agent import SonalityAgent
 from .ess import ReasoningType, UrgencyLevel
 from .memory.graph import BeliefNode
@@ -29,10 +32,46 @@ from .schema import ChatRole
 
 MODEL_ID: Final = "sonality"
 
+# Request ID for distributed tracing and debugging
+_request_id_ctx: ContextVar[str] = ContextVar("request_id", default="")
+
 log = logging.getLogger(__name__)
 
 _agent_store: dict[str, SonalityAgent] = {}
 _agent_lock: asyncio.Lock | None = None
+_startup_time: float = 0.0
+
+# Optional API key authentication
+_api_key_header = APIKeyHeader(name="Authorization", auto_error=False)
+
+
+class RequestIDMiddleware(BaseHTTPMiddleware):
+    """Add request ID to each request for tracing."""
+
+    async def dispatch(self, request: Request, call_next):  # type: ignore[no-untyped-def]
+        request_id = request.headers.get("X-Request-ID") or uuid.uuid4().hex[:16]
+        _request_id_ctx.set(request_id)
+        response = await call_next(request)
+        response.headers["X-Request-ID"] = request_id
+        return response
+
+
+def get_request_id() -> str:
+    """Get current request ID for logging context."""
+    return _request_id_ctx.get()
+
+
+async def verify_api_key(request: Request, api_key: str | None = Depends(_api_key_header)) -> None:
+    """Verify API key if SONALITY_HTTP_API_KEY is set. Skip auth for health endpoints."""
+    if config.HTTP_API_KEY is None:
+        return
+    if request.url.path in ("/health", "/v1/health"):
+        return
+    if not api_key:
+        raise HTTPException(status_code=401, detail="Missing API key")
+    expected = f"Bearer {config.HTTP_API_KEY}"
+    if api_key != expected:
+        raise HTTPException(status_code=401, detail="Invalid API key")
 
 
 def _get_lock() -> asyncio.Lock:
@@ -51,6 +90,8 @@ def _get_agent() -> SonalityAgent:
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
+    global _startup_time
+    _startup_time = time.time()
     log.info("Initializing Sonality agent for API server")
     _agent_store["agent"] = SonalityAgent()
     yield
@@ -65,7 +106,9 @@ app = FastAPI(
     description="World-understanding intelligence layer with OpenAI-compatible chat interface",
     version=__version__,
     lifespan=lifespan,
+    dependencies=[Depends(verify_api_key)],
 )
+app.add_middleware(RequestIDMiddleware)
 
 
 # --- OpenAI-Compatible Chat Completions API ---
@@ -122,13 +165,16 @@ async def chat_completions(
     request: ChatCompletionRequest,
 ) -> ChatCompletionResponse | StreamingResponse:
     """OpenAI-compatible chat completions. Passes full messages[] to the agent."""
-    log.info("HTTP /v1/chat/completions stream=%s messages=%d", request.stream, len(request.messages))
+    log.info(
+        "HTTP /v1/chat/completions stream=%s messages=%d", request.stream, len(request.messages)
+    )
     agent = _get_agent()
     user_messages = [m for m in request.messages if m.role is ChatRole.USER]
     if not user_messages:
         raise HTTPException(status_code=400, detail="No user message provided")
 
     messages = [{"role": m.role, "content": m.content} for m in request.messages]
+    eff_max = max(1, min(request.max_tokens, config.LLM_MAX_TOKENS))
 
     if request.stream:
         chunk_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
@@ -140,7 +186,15 @@ async def chat_completions(
         async def generate() -> AsyncIterator[str]:
             async with _get_lock():
                 loop = asyncio.get_event_loop()
-                stream_iter = await loop.run_in_executor(None, agent.respond_stream, messages)
+                stream_iter = await loop.run_in_executor(
+                    None,
+                    partial(
+                        agent.respond_stream,
+                        messages,
+                        max_tokens=eff_max,
+                        temperature=request.temperature,
+                    ),
+                )
                 for content, reasoning in stream_iter:
                     delta = {
                         k: v
@@ -155,7 +209,14 @@ async def chat_completions(
         return StreamingResponse(generate(), media_type="text/event-stream")
 
     async with _get_lock():
-        response_text = await asyncio.to_thread(agent.respond, messages)
+        response_text = await asyncio.to_thread(
+            partial(
+                agent.respond,
+                messages,
+                max_tokens=eff_max,
+                temperature=request.temperature,
+            )
+        )
 
     prompt_tokens = sum(len(m.content.split()) for m in request.messages) * 4 // 3
     completion_tokens = len(response_text.split()) * 4 // 3
@@ -198,7 +259,9 @@ async def get_model(model_id: str) -> ModelInfo:
 
 class SimpleChatRequest(BaseModel):
     message: str = Field(..., description="User message")
-    context: list[ChatMessage] = Field(default_factory=list, description="Optional conversation history")
+    context: list[ChatMessage] = Field(
+        default_factory=list, description="Optional conversation history"
+    )
 
 
 class SimpleChatResponse(BaseModel):
@@ -255,8 +318,11 @@ class BeliefResponse(BaseModel):
     @classmethod
     def from_node(cls, b: BeliefNode) -> BeliefResponse:
         return cls(
-            topic=b.topic, valence=b.valence, confidence=b.confidence,
-            evidence_count=b.evidence_count, uncertainty=b.uncertainty,
+            topic=b.topic,
+            valence=b.valence,
+            confidence=b.confidence,
+            evidence_count=b.evidence_count,
+            uncertainty=b.uncertainty,
             belief_text=b.belief_text,
         )
 
@@ -264,6 +330,8 @@ class BeliefResponse(BaseModel):
 class HealthResponse(BaseModel):
     belief_count: int
     snapshot_version: int
+    uptime_seconds: float = 0.0
+    version: str = ""
 
 
 @app.post("/ingest", response_model=IngestResponse)
@@ -275,9 +343,13 @@ async def ingest(request: IngestRequest) -> IngestResponse:
             partial(agent.ingest, request.text, topic_override=request.topic_override)
         )
     return IngestResponse(
-        success=True, score=ess.score, reasoning_type=ess.reasoning_type,
+        success=True,
+        score=ess.score,
+        reasoning_type=ess.reasoning_type,
         belief_update_recommended=ess.belief_update_recommended,
-        urgency=ess.urgency, topics=list(ess.topics), summary=ess.summary,
+        urgency=ess.urgency,
+        topics=list(ess.topics),
+        summary=ess.summary,
     )
 
 
@@ -303,7 +375,13 @@ async def get_belief_endpoint(topic: str) -> BeliefResponse:
 async def health() -> HealthResponse:
     agent = _get_agent()
     belief_count, snapshot_version = await asyncio.to_thread(agent.get_health)
-    return HealthResponse(belief_count=belief_count, snapshot_version=snapshot_version)
+    uptime = time.time() - _startup_time if _startup_time > 0 else 0.0
+    return HealthResponse(
+        belief_count=belief_count,
+        snapshot_version=snapshot_version,
+        uptime_seconds=round(uptime, 2),
+        version=__version__,
+    )
 
 
 def serve() -> None:
@@ -325,6 +403,9 @@ def serve() -> None:
         format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
     )
     uvicorn.run(
-        "sonality.api:app", host=args.host, port=args.port,
-        reload=args.reload, log_level=log_level.lower(),
+        "sonality.api:app",
+        host=args.host,
+        port=args.port,
+        reload=args.reload,
+        log_level=log_level.lower(),
     )
