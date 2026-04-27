@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Final
@@ -22,7 +22,11 @@ log = logging.getLogger(__name__)
 
 
 def format_episode_line(
-    *, created_at: str, summary: str, content: str, content_limit: int = 300,
+    *,
+    created_at: str,
+    summary: str,
+    content: str,
+    content_limit: int = 300,
 ) -> str:
     """Render one compact context line for retrieval/reflection."""
     date_text = created_at[:10] if created_at else "?"
@@ -30,7 +34,10 @@ def format_episode_line(
 
 
 def format_episode_block(
-    *, created_at: str, content: str, content_limit: int = 500,
+    *,
+    created_at: str,
+    content: str,
+    content_limit: int = 500,
 ) -> str:
     """Render one dated episode content block for summarization prompts."""
     date_text = created_at[:10] if created_at else "?"
@@ -63,6 +70,20 @@ class BeliefNode:
     evidence_count: int = 0
     belief_text: str = ""
     provenance: str = ""
+
+
+def format_beliefs_for_prompt_from_nodes(beliefs: Sequence[BeliefNode]) -> str:
+    """Build belief summary lines for prompts (matches ``format_beliefs_for_prompt`` layout)."""
+    if not beliefs:
+        return "No beliefs formed yet."
+    lines: list[str] = []
+    for b in beliefs:
+        sign = "+" if b.valence >= 0 else ""
+        entry = f"{b.topic}: {sign}{b.valence:.2f} (confidence: {b.confidence:.2f})"
+        if b.evidence_count > 0:
+            entry += f", evidence: {b.evidence_count}"
+        lines.append(entry)
+    return "\n".join(lines)
 
 
 @dataclass(frozen=True, slots=True)
@@ -173,13 +194,21 @@ class MemoryGraph:
                 agent_response: $agent_response
             })
             """,
-            uid=episode.uid, content=episode.content, summary=episode.summary,
-            topics=episode.topics, ess_score=episode.ess_score,
-            created_at=episode.created_at, valid_at=episode.valid_at,
-            expired_at=episode.expired_at, utility_score=episode.utility_score,
-            access_count=episode.access_count, last_accessed=episode.last_accessed,
-            segment_id=episode.segment_id, consolidation_level=episode.consolidation_level,
-            archived=episode.archived, user_message=episode.user_message,
+            uid=episode.uid,
+            content=episode.content,
+            summary=episode.summary,
+            topics=episode.topics,
+            ess_score=episode.ess_score,
+            created_at=episode.created_at,
+            valid_at=episode.valid_at,
+            expired_at=episode.expired_at,
+            utility_score=episode.utility_score,
+            access_count=episode.access_count,
+            last_accessed=episode.last_accessed,
+            segment_id=episode.segment_id,
+            consolidation_level=episode.consolidation_level,
+            archived=episode.archived,
+            user_message=episode.user_message,
             agent_response=episode.agent_response,
         )
         if prev_uid:
@@ -187,7 +216,8 @@ class MemoryGraph:
                 "MATCH (prev:Episode {uid: $prev_uid}) "
                 "MATCH (curr:Episode {uid: $curr_uid}) "
                 f"CREATE (prev)-[:{EdgeType.TEMPORAL_NEXT}]->(curr)",
-                prev_uid=prev_uid, curr_uid=episode.uid,
+                prev_uid=prev_uid,
+                curr_uid=episode.uid,
             )
         if derivatives:
             await MemoryGraph._create_derivatives_tx(tx, derivatives, episode.uid)
@@ -195,7 +225,10 @@ class MemoryGraph:
             await MemoryGraph._link_topic_tx(tx, episode.uid, topic)
         if segment_id:
             await MemoryGraph._link_segment_tx(
-                tx, episode.uid, segment_id, segment_label,
+                tx,
+                episode.uid,
+                segment_id,
+                segment_label,
             )
 
     @staticmethod
@@ -330,7 +363,9 @@ class MemoryGraph:
             records = [record async for record in result]
             return [_record_to_episode(r["e"]) for r in records]
 
-    async def _keyword_episode_search(self, cypher: str, query: str, limit: int) -> list[EpisodeNode]:
+    async def _keyword_episode_search(
+        self, cypher: str, query: str, limit: int
+    ) -> list[EpisodeNode]:
         keywords = [t for t in re.split(r"[^a-z0-9]+", query.lower()) if len(t) > 2]
         if not keywords:
             return []
@@ -338,23 +373,35 @@ class MemoryGraph:
             result = await session.run(cypher, keywords=keywords[:8], limit=limit)
             return [_record_to_episode(r["e"]) async for r in result]
 
-    async def find_belief_related_episodes(self, query: str, *, limit: int = 20) -> list[EpisodeNode]:
+    async def find_belief_related_episodes(
+        self, query: str, *, limit: int = 20
+    ) -> list[EpisodeNode]:
         """Retrieve episodes attached to belief edges matching query keywords."""
-        return await self._keyword_episode_search(f"""
+        return await self._keyword_episode_search(
+            f"""
             MATCH (e:Episode)-[:{EdgeType.SUPPORTS_BELIEF}|{EdgeType.CONTRADICTS_BELIEF}]->(b:Belief)
             WHERE NOT e.archived
               AND ANY(keyword IN $keywords WHERE toLower(b.topic) CONTAINS keyword)
             RETURN DISTINCT e ORDER BY e.utility_score DESC, e.created_at DESC LIMIT $limit
-        """, query, limit)
+        """,
+            query,
+            limit,
+        )
 
-    async def find_topic_related_episodes(self, query: str, *, limit: int = 20) -> list[EpisodeNode]:
+    async def find_topic_related_episodes(
+        self, query: str, *, limit: int = 20
+    ) -> list[EpisodeNode]:
         """Retrieve episodes by traversing Topic nodes relevant to query keywords."""
-        return await self._keyword_episode_search(f"""
+        return await self._keyword_episode_search(
+            f"""
             MATCH (e:Episode)-[:{EdgeType.DISCUSSES}]->(t:Topic)
             WHERE NOT e.archived
               AND ANY(keyword IN $keywords WHERE toLower(t.name) CONTAINS keyword)
             RETURN DISTINCT e ORDER BY e.utility_score DESC, e.created_at DESC LIMIT $limit
-        """, query, limit)
+        """,
+            query,
+            limit,
+        )
 
     async def traverse_temporal_context(
         self,
@@ -459,7 +506,7 @@ class MemoryGraph:
                 created_at=str(record["created_at"]) if record["created_at"] else "",
                 summary=str(record["summary"]) if record["summary"] else "",
                 content=str(record["content"]) if record["content"] else "",
-                content_limit=300,
+                content_limit=config.EPISODE_CONTENT_LIMIT,
             )
             for record in records
         ]
@@ -643,16 +690,7 @@ class MemoryGraph:
     async def format_beliefs_for_prompt(self, n: int = BELIEF_PROMPT_WINDOW) -> str:
         """Build a formatted belief summary for the system prompt."""
         beliefs = await self.get_top_beliefs(n)
-        if not beliefs:
-            return "No beliefs formed yet."
-        lines: list[str] = []
-        for b in beliefs:
-            sign = "+" if b.valence >= 0 else ""
-            entry = f"{b.topic}: {sign}{b.valence:.2f} (confidence: {b.confidence:.2f})"
-            if b.evidence_count > 0:
-                entry += f", evidence: {b.evidence_count}"
-            lines.append(entry)
-        return "\n".join(lines)
+        return format_beliefs_for_prompt_from_nodes(beliefs)
 
     async def get_last_episode_uid(self) -> str:
         """Get the UID of the most recently created episode."""
@@ -703,7 +741,9 @@ def _record_to_belief(node: Mapping[str, object]) -> BeliefNode:
         topic=str(props.get("topic", "")),
         valence=float(valence_raw) if isinstance(valence_raw, (int, float, str)) else 0.0,
         confidence=float(confidence_raw) if isinstance(confidence_raw, (int, float, str)) else 0.5,
-        uncertainty=float(uncertainty_raw) if isinstance(uncertainty_raw, (int, float, str)) else 0.5,
+        uncertainty=float(uncertainty_raw)
+        if isinstance(uncertainty_raw, (int, float, str))
+        else 0.5,
         evidence_count=int(evidence_raw) if isinstance(evidence_raw, (int, str)) else 0,
         belief_text=str(props.get("belief_text", "") or ""),
         provenance=str(props.get("provenance", "") or ""),
