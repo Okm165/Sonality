@@ -491,52 +491,64 @@ Scenario design is grounded in peer-reviewed work from misinformation correction
 ```
 sonality/
 ├── sonality/                   Python package
-│   ├── agent.py                Core loop: context → LLM → post-process
-│   ├── cli.py                  Terminal REPL
+│   ├── agent.py                Core SonalityAgent: context → LLM → post-process
+│   ├── api.py                  FastAPI server with OpenAI-compatible endpoints
+│   ├── cli.py                  Terminal REPL with introspection commands
 │   ├── config.py               Environment + compile-time constants
 │   ├── ess.py                  Evidence Strength Score classifier
-│   ├── prompts.py              Agent-level LLM prompt templates
-│   ├── provider.py             HTTP LLM/embedding provider + JSON normalization
+│   ├── prompts.py              LLM prompt templates (system, reflection, ESS)
+│   ├── provider.py             HTTP LLM provider + JSON normalization
+│   ├── schema.py               Database schema definitions (Neo4j + Qdrant)
 │   ├── llm/
-│   │   ├── caller.py           Universal structured LLM call wrapper (retry, repair, fallback)
-│   │   └── prompts.py          Memory-subsystem LLM prompt templates
+│   │   └── caller.py           Structured LLM call wrapper (retry, repair, fallback)
 │   └── memory/
-│       ├── sponge.py           SpongeState model, staged updates, persistence
+│       ├── graph.py            Neo4j MemoryGraph: episodes, beliefs, snapshots
 │       ├── dual_store.py       Episode storage coordinator (Neo4j + Qdrant)
-│       ├── graph.py            Neo4j graph traversal, provenance edges, belief nodes
 │       ├── db.py               Database connection pool (Neo4j + Qdrant)
 │       ├── derivatives.py      LLM-based semantic chunking → vector derivatives
-│       ├── embedder.py         Embedding calls (Ollama or any OpenAI-compatible endpoint)
-│       ├── semantic_features.py Async personality feature extraction and consolidation
-│       ├── belief_provenance.py Belief evidence assessment with AGM contraction
-│       ├── segmentation.py     Conversation segment boundary detection
-│       ├── updater.py          Insight extraction and snapshot validation
-│       ├── health.py           Personality health metric computation
-│       ├── consolidation.py    Segment consolidation readiness and summarization
-│       ├── stm_consolidator.py Background short-term memory consolidation worker
+│       ├── embedder.py         FastEmbed embeddings (BAAI/bge-large-en-v1.5)
+│       ├── semantic_features.py Async personality feature extraction worker
+│       ├── belief_provenance.py Belief evidence assessment (SUPPORTS/CONTRADICTS)
+│       ├── knowledge_extract.py SLIDE-inspired proposition extraction
+│       ├── segmentation.py     Conversation boundary detection
+│       ├── consolidation.py    Segment summarization (HEMA principle)
+│       ├── forgetting.py       LLM-based memory archival/deletion
 │       └── retrieval/
-│           ├── router.py       Query intent routing (6 categories, 3 depth levels)
+│           ├── router.py       Query intent routing (category, depth)
 │           ├── chain.py        Iterative sufficiency-checking retrieval
 │           ├── reranker.py     LLM listwise episode reranker
 │           └── split.py        Multi-entity query decomposition
-├── tests/                      Unit + integration tests (non-live by default)
-│   ├── test_api.py             FastAPI endpoint tests (28 tests, mocked agent):
-│   │                           all HTTP routes, error cases, schema validation,
-│   │                           /health, /v1/chat, /v1/embeddings, /beliefs,
-│   │                           /ingest, /probability, /correlations, /chat
-│   ├── test_agent_health.py    Live behavioral health suite (S1–S7, 25 tests):
-│   │                           S1 clean start, S2 episode storage, S3 ESS gating,
-│   │                           S4 memory retrieval, S5 anti-sycophancy, S6 personality
-│   │                           accumulation + belief magnitude bounds, S7 extended
-│   │                           16-interaction evolution: long-range memory recall,
-│   │                           contradiction handling, feature persistence across
-│   │                           topic shifts, no-unjustified-delete guard
-│   └── test_live_graduated.py  Live infrastructure tests (L0–L3x): connectivity, JSON
-│                               parsing per schema, memory primitives, store+recall
-├── benches/                    Evaluation/benchmark suites (pytest, opt-in)
-├── docs/                       Documentation source
+├── tests/                      Unit + integration tests
+│   ├── conftest.py             Pytest fixtures (containers, LLM mocks)
+│   ├── containers.py           Testcontainers orchestration (Neo4j, Qdrant)
+│   ├── test_api.py             FastAPI endpoint tests (mocked agent)
+│   ├── test_ess_parsing.py     ESS classifier parsing tests
+│   ├── test_provider_timeout.py LLM provider timeout tests
+│   ├── test_live_graduated.py  Live infrastructure tests (L0–L3x)
+│   └── memory/                 Memory subsystem tests
+│       ├── test_derivatives.py Chunk/derivative tests
+│       ├── test_forgetting.py  Memory forgetting tests
+│       ├── test_segmentation.py Episode segmentation tests
+│       └── retrieval/          Retrieval pipeline tests
+├── benches/                    Evaluation/benchmark suites
+│   ├── scenario_contracts.py   ScenarioStep, StepExpectation definitions
+│   ├── scenario_runner.py      Benchmark execution engine
+│   ├── live_scenarios.py       ESS calibration, sycophancy resistance
+│   ├── knowledge_accumulation_scenarios.py  Multi-domain teaching
+│   ├── composed_scenarios.py   C1-C6 integration benchmarks
+│   └── integrated_harness.py   Multi-dimensional scoring
+├── chat/                       Chat client implementations
+│   ├── client.py               SonalityClient HTTP/SSE wrapper
+│   ├── terminal.py             Rich-based terminal TUI
+│   ├── telegram.py             Telegram bot with voice support
+│   └── audio.py                STT/TTS processing (Speaches API)
+├── scripts/                    Utility scripts
+│   ├── feed.py                 RSS/GNews feed ingestion
+│   ├── x_feed.py               X (Twitter) feed ingestion
+│   └── memory_diagnostics.py   Database health checks
+├── docs/                       Documentation source (69 files)
 ├── pyproject.toml              Dependencies and tool config
 ├── Makefile                    Dev workflows
 ├── Dockerfile                  Container build
-└── docker-compose.yml          Neo4j + Qdrant orchestration
+└── docker-compose.yml          Neo4j + Qdrant + Speaches orchestration
 ```
