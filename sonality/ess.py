@@ -26,7 +26,6 @@ log = logging.getLogger(__name__)
 
 REQUIRED_FIELDS: Final = frozenset({"score", "reasoning_type", "opinion_direction"})
 MAX_ESS_RETRIES: Final = 2
-ESS_TIMEOUT_SECONDS: Final = 120  # 2 minute timeout for ESS classification
 ENUM_NORMALIZE_RE: Final = re.compile(r"[^a-z0-9_]+")
 RETRY_REQUIRED_FIELD_NOTE: Final = (
     "Repair required fields only: score must be numeric, and reasoning_type and "
@@ -96,34 +95,52 @@ def _build_aliases[E: StrEnum](cls: type[E], extras: dict[str, E] | None = None)
     return aliases
 
 
-REASONING_TYPE_ALIASES: Final = _build_aliases(ReasoningType, {
-    "logical": ReasoningType.LOGICAL_ARGUMENT,
-    "empirical": ReasoningType.EMPIRICAL_DATA,
-    "debunked": ReasoningType.DEBUNKED_CLAIM,
-    "none": ReasoningType.NO_ARGUMENT,
-})
-URGENCY_LEVEL_ALIASES: Final = _build_aliases(UrgencyLevel, {
-    "urgent": UrgencyLevel.IMMEDIATE,
-    "normal": UrgencyLevel.STANDARD,
-})
-OPINION_DIRECTION_ALIASES: Final = _build_aliases(OpinionDirection, {
-    "support": OpinionDirection.SUPPORTS,
-    "oppose": OpinionDirection.OPPOSES,
-    "mixed": OpinionDirection.NEUTRAL,
-})
-SOURCE_RELIABILITY_ALIASES: Final = _build_aliases(SourceReliability, {
-    "na": SourceReliability.NOT_APPLICABLE,
-})
-KNOWLEDGE_DENSITY_ALIASES: Final = _build_aliases(KnowledgeDensity, {
-    "medium": KnowledgeDensity.MODERATE,
-    "na": KnowledgeDensity.NONE,
-})
-INTERNAL_CONSISTENCY_ALIASES: Final = _build_aliases(InternalConsistencyStatus, {
-    "true": InternalConsistencyStatus.CONSISTENT,
-    "false": InternalConsistencyStatus.INCONSISTENT,
-    "yes": InternalConsistencyStatus.CONSISTENT,
-    "no": InternalConsistencyStatus.INCONSISTENT,
-})
+REASONING_TYPE_ALIASES: Final = _build_aliases(
+    ReasoningType,
+    {
+        "logical": ReasoningType.LOGICAL_ARGUMENT,
+        "empirical": ReasoningType.EMPIRICAL_DATA,
+        "debunked": ReasoningType.DEBUNKED_CLAIM,
+        "none": ReasoningType.NO_ARGUMENT,
+    },
+)
+URGENCY_LEVEL_ALIASES: Final = _build_aliases(
+    UrgencyLevel,
+    {
+        "urgent": UrgencyLevel.IMMEDIATE,
+        "normal": UrgencyLevel.STANDARD,
+    },
+)
+OPINION_DIRECTION_ALIASES: Final = _build_aliases(
+    OpinionDirection,
+    {
+        "support": OpinionDirection.SUPPORTS,
+        "oppose": OpinionDirection.OPPOSES,
+        "mixed": OpinionDirection.NEUTRAL,
+    },
+)
+SOURCE_RELIABILITY_ALIASES: Final = _build_aliases(
+    SourceReliability,
+    {
+        "na": SourceReliability.NOT_APPLICABLE,
+    },
+)
+KNOWLEDGE_DENSITY_ALIASES: Final = _build_aliases(
+    KnowledgeDensity,
+    {
+        "medium": KnowledgeDensity.MODERATE,
+        "na": KnowledgeDensity.NONE,
+    },
+)
+INTERNAL_CONSISTENCY_ALIASES: Final = _build_aliases(
+    InternalConsistencyStatus,
+    {
+        "true": InternalConsistencyStatus.CONSISTENT,
+        "false": InternalConsistencyStatus.INCONSISTENT,
+        "yes": InternalConsistencyStatus.CONSISTENT,
+        "no": InternalConsistencyStatus.INCONSISTENT,
+    },
+)
 
 
 def _vals(cls: type[StrEnum]) -> list[str]:
@@ -137,7 +154,9 @@ RETRY_ALLOWED_VALUES_NOTE: Final = (
 )
 PROVIDER_JSON_ONLY_NOTE: Final = (
     "Return ONLY a valid JSON object with keys: score, reasoning_type, source_reliability, "
-    "internal_consistency, novelty, topics, summary, opinion_direction, knowledge_density."
+    "internal_consistency, novelty, topics, summary, opinion_direction, knowledge_density, "
+    "belief_update_recommended, urgency. "
+    "Use compact numeric literals for floats (e.g. 0.55 not 0.5500001); round to at most 4 decimal places."
 )
 
 
@@ -323,14 +342,23 @@ def _to_topics(value: object) -> tuple[tuple[str, ...], bool]:
 def _to_internal_consistency(value: object) -> tuple[InternalConsistencyStatus, bool]:
     """Parse internal-consistency status from untrusted LLM output."""
     if isinstance(value, bool):
-        return (InternalConsistencyStatus.CONSISTENT if value
-                else InternalConsistencyStatus.INCONSISTENT, False)
-    return _parse_enum(InternalConsistencyStatus, str(value) if not isinstance(value, str) else value,
-                       InternalConsistencyStatus.CONSISTENT, INTERNAL_CONSISTENCY_ALIASES)
+        return (
+            InternalConsistencyStatus.CONSISTENT
+            if value
+            else InternalConsistencyStatus.INCONSISTENT,
+            False,
+        )
+    return _parse_enum(
+        InternalConsistencyStatus,
+        str(value) if not isinstance(value, str) else value,
+        InternalConsistencyStatus.CONSISTENT,
+        INTERNAL_CONSISTENCY_ALIASES,
+    )
 
 
 def _run_classification_attempts(
-    prompt: str, model: str,
+    prompt: str,
+    model: str,
 ) -> tuple[dict[str, object], int, int, int]:
     """Run classifier retries. Returns (data, attempts, input_tokens, output_tokens)."""
     data: dict[str, object] = {}
@@ -339,24 +367,37 @@ def _run_classification_attempts(
     total_output_tokens = 0
     for attempt in range(MAX_ESS_RETRIES):
         attempts_executed = attempt + 1
-        full_prompt = (prompt if attempt == 0
-                       else f"{prompt}\n\nPrevious response had bad fields. {RETRY_ALLOWED_VALUES_NOTE}")
+        full_prompt = (
+            prompt
+            if attempt == 0
+            else f"{prompt}\n\nPrevious response had bad fields. {RETRY_ALLOWED_VALUES_NOTE}"
+        )
         completion = default_provider.chat_completion(
             model=model,
-            max_tokens=config.LLM_MAX_TOKENS,
+            max_tokens=config.ESS_MAX_TOKENS,
             temperature=0.0,
-            messages=({"role": ChatRole.USER, "content": f"{full_prompt}\n\n{PROVIDER_JSON_ONLY_NOTE}"},),
+            messages=(
+                {"role": ChatRole.USER, "content": f"{full_prompt}\n\n{PROVIDER_JSON_ONLY_NOTE}"},
+            ),
             tools=(PROVIDER_ESS_TOOL,),
             tool_choice=PROVIDER_ESS_TOOL_CHOICE,
             enable_thinking=False,
         )
         total_input_tokens += completion.input_tokens
         total_output_tokens += completion.output_tokens
-        data = extract_tool_call_arguments(completion.raw, "classify_evidence") or parse_json_object(completion.text) or {}
+        data = (
+            extract_tool_call_arguments(completion.raw, "classify_evidence")
+            or parse_json_object(completion.text)
+            or {}
+        )
         if not (REQUIRED_FIELDS - set(data.keys())):
             break
-        log.warning("ESS attempt %d/%d missing=%s", attempt + 1, MAX_ESS_RETRIES,
-                    REQUIRED_FIELDS - set(data.keys()))
+        log.warning(
+            "ESS attempt %d/%d missing=%s",
+            attempt + 1,
+            MAX_ESS_RETRIES,
+            REQUIRED_FIELDS - set(data.keys()),
+        )
     return data, attempts_executed, total_input_tokens, total_output_tokens
 
 
@@ -396,7 +437,9 @@ def _coerce_enum_field[E: StrEnum](
 
 def _classify_inner(prompt: str, model: str) -> ESSResult:
     """Core classification: LLM call with retries, then coerce into ESSResult."""
-    data, attempts_executed, input_tokens, output_tokens = _run_classification_attempts(prompt, model)
+    data, attempts_executed, input_tokens, output_tokens = _run_classification_attempts(
+        prompt, model
+    )
 
     missing_fields = tuple(sorted(field for field in REQUIRED_FIELDS if field not in data))
     coerced_fields: list[str] = []
@@ -404,18 +447,27 @@ def _classify_inner(prompt: str, model: str) -> ESSResult:
     score = _coerce_float_field(data, "score", 0.0, coerced_fields)
     novelty = _coerce_float_field(data, "novelty", 0.0, coerced_fields)
     direction = _coerce_enum_field(
-        cls=OpinionDirection, data=data, field="opinion_direction",
-        default=OpinionDirection.NEUTRAL, aliases=OPINION_DIRECTION_ALIASES,
+        cls=OpinionDirection,
+        data=data,
+        field="opinion_direction",
+        default=OpinionDirection.NEUTRAL,
+        aliases=OPINION_DIRECTION_ALIASES,
         coerced_fields=coerced_fields,
     )
     reasoning = _coerce_enum_field(
-        cls=ReasoningType, data=data, field="reasoning_type",
-        default=ReasoningType.NO_ARGUMENT, aliases=REASONING_TYPE_ALIASES,
+        cls=ReasoningType,
+        data=data,
+        field="reasoning_type",
+        default=ReasoningType.NO_ARGUMENT,
+        aliases=REASONING_TYPE_ALIASES,
         coerced_fields=coerced_fields,
     )
     reliability = _coerce_enum_field(
-        cls=SourceReliability, data=data, field="source_reliability",
-        default=SourceReliability.NOT_APPLICABLE, aliases=SOURCE_RELIABILITY_ALIASES,
+        cls=SourceReliability,
+        data=data,
+        field="source_reliability",
+        default=SourceReliability.NOT_APPLICABLE,
+        aliases=SOURCE_RELIABILITY_ALIASES,
         coerced_fields=coerced_fields,
     )
     internal_consistency, consistency_defaulted = _to_internal_consistency(
@@ -434,27 +486,38 @@ def _classify_inner(prompt: str, model: str) -> ESSResult:
         coerced_fields.append("summary")
 
     knowledge_density = _coerce_enum_field(
-        cls=KnowledgeDensity, data=data, field="knowledge_density",
-        default=KnowledgeDensity.NONE, aliases=KNOWLEDGE_DENSITY_ALIASES,
+        cls=KnowledgeDensity,
+        data=data,
+        field="knowledge_density",
+        default=KnowledgeDensity.NONE,
+        aliases=KNOWLEDGE_DENSITY_ALIASES,
         coerced_fields=coerced_fields,
     )
 
     belief_update_raw = data.get("belief_update_recommended", False)
     belief_update_recommended = (
-        belief_update_raw if isinstance(belief_update_raw, bool)
+        belief_update_raw
+        if isinstance(belief_update_raw, bool)
         else str(belief_update_raw).lower() in ("true", "yes", "1")
     )
 
     urgency = _coerce_enum_field(
-        cls=UrgencyLevel, data=data, field="urgency",
-        default=UrgencyLevel.STANDARD, aliases=URGENCY_LEVEL_ALIASES,
+        cls=UrgencyLevel,
+        data=data,
+        field="urgency",
+        default=UrgencyLevel.STANDARD,
+        aliases=URGENCY_LEVEL_ALIASES,
         coerced_fields=coerced_fields,
     )
 
-    defaulted_fields = tuple(sorted(
-        {*(f"{MISSING_FIELD_PREFIX}{f}" for f in missing_fields),
-         *(f"{COERCED_FIELD_PREFIX}{f}" for f in coerced_fields)}
-    ))
+    defaulted_fields = tuple(
+        sorted(
+            {
+                *(f"{MISSING_FIELD_PREFIX}{f}" for f in missing_fields),
+                *(f"{COERCED_FIELD_PREFIX}{f}" for f in coerced_fields),
+            }
+        )
+    )
     severity: DefaultSeverity = (
         "missing" if missing_fields else "coercion" if coerced_fields else "none"
     )
@@ -462,16 +525,22 @@ def _classify_inner(prompt: str, model: str) -> ESSResult:
         log.warning("ESS fell back/coerced fields %s", defaulted_fields)
 
     return ESSResult(
-        score=score, novelty=novelty,
-        reasoning_type=reasoning, source_reliability=reliability,
-        internal_consistency=internal_consistency, topics=topics,
-        summary=summary, opinion_direction=direction,
+        score=score,
+        novelty=novelty,
+        reasoning_type=reasoning,
+        source_reliability=reliability,
+        internal_consistency=internal_consistency,
+        topics=topics,
+        summary=summary,
+        opinion_direction=direction,
         knowledge_density=knowledge_density,
         belief_update_recommended=belief_update_recommended,
-        urgency=urgency, defaulted_fields=defaulted_fields,
+        urgency=urgency,
+        defaulted_fields=defaulted_fields,
         default_severity=severity,
         attempt_count=max(attempts_executed, 1),
-        input_tokens=input_tokens, output_tokens=output_tokens,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
     )
 
 
@@ -499,11 +568,11 @@ def classify(
     with ThreadPoolExecutor(max_workers=1) as executor:
         future = executor.submit(_classify_inner, prompt, model)
         try:
-            result = future.result(timeout=ESS_TIMEOUT_SECONDS)
+            result = future.result(timeout=config.ESS_TIMEOUT)
         except FuturesTimeoutError:
             log.warning(
                 "ESS_TIMEOUT: classification exceeded %ds, using fallback",
-                ESS_TIMEOUT_SECONDS,
+                config.ESS_TIMEOUT,
             )
             return classifier_exception_fallback(user_message)
         except Exception:
