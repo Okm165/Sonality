@@ -99,7 +99,10 @@ def seed_graph_state(
 
     asyncio.run(
         _seed_graph_async(
-            url, user, password, database,
+            url,
+            user,
+            password,
+            database,
             snapshot=snapshot,
             beliefs=beliefs or {},
         )

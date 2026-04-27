@@ -123,7 +123,9 @@ async def _main() -> None:
             console.print("[green]Connected to Sonality[/green]")
         except Exception as e:
             console.print(f"[red]Cannot connect to Sonality: {e}[/red]")
-            console.print(f"[yellow]Make sure Sonality is running at {config.SONALITY_URL}[/yellow]")
+            console.print(
+                f"[yellow]Make sure Sonality is running at {config.SONALITY_URL}[/yellow]"
+            )
             sys.exit(1)
 
         console.print()

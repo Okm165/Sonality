@@ -78,7 +78,14 @@ def main() -> None:
         sys.exit(1)
 
     agent = SonalityAgent(model=args.model, ess_model=args.ess_model)
-    print(BANNER.format(version=__version__, base_url=config.BASE_URL, model=agent.model, ess_model=agent.ess_model))
+    print(
+        BANNER.format(
+            version=__version__,
+            base_url=config.BASE_URL,
+            model=agent.model,
+            ess_model=agent.ess_model,
+        )
+    )
 
     conversation: list[dict[str, str]] = []
 
