@@ -169,13 +169,17 @@ class TestChatCompletions:
                     {"role": "user", "content": "First message"},
                     {"role": "assistant", "content": "Some reply"},
                     {"role": "user", "content": "Second message"},
-                ]
+                ],
+                "max_tokens": 2048,
+                "temperature": 0.3,
             },
         )
         mock_agent.respond.assert_called_once()
         passed_messages = mock_agent.respond.call_args[0][0]
         assert len(passed_messages) == 3
         assert passed_messages[-1]["content"] == "Second message"
+        assert mock_agent.respond.call_args.kwargs["max_tokens"] == 2048
+        assert mock_agent.respond.call_args.kwargs["temperature"] == pytest.approx(0.3)
 
     def test_stream_returns_sse(self, client: TestClient, mock_agent: MagicMock) -> None:
         mock_agent.respond_stream.return_value = iter([("Hello", ""), (" world", "")])

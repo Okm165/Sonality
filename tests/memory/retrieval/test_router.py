@@ -16,7 +16,7 @@ def test_router_uses_canned_llm_decision(
 ) -> None:
     mock_llm_call(
         {
-            "Classify this query": {
+            "Classify query for memory retrieval": {
                 "category": "TEMPORAL",
                 "depth": "DEEP",
                 "temporal_expansion": "EXPAND",

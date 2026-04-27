@@ -27,12 +27,14 @@ def _assess(
     store: DualEpisodeStore,
     candidates: list[EpisodeNode],
 ) -> None:
-    asyncio.run(assess_and_forget(
-        candidates,
-        graph=cast(MemoryGraph, graph),
-        store=cast(DualEpisodeStore, store),
-        snapshot_excerpt="snapshot",
-    ))
+    asyncio.run(
+        assess_and_forget(
+            candidates,
+            graph=cast(MemoryGraph, graph),
+            store=cast(DualEpisodeStore, store),
+            snapshot_excerpt="snapshot",
+        )
+    )
 
 
 def _graph_mock() -> MemoryGraph:
@@ -54,7 +56,7 @@ def test_forgetting_uses_full_uid_and_hard_delete_path(
 ) -> None:
     mock_llm_call(
         {
-            "Review these memory candidates for potential archival": {
+            "Review memory candidates for archival/forgetting": {
                 "decisions": [
                     {
                         "uid": "episode-aaa",
@@ -86,7 +88,7 @@ def test_forgetting_does_not_use_foundational_substring_heuristic(
 ) -> None:
     mock_llm_call(
         {
-            "Review these memory candidates for potential archival": {
+            "Review memory candidates for archival/forgetting": {
                 "decisions": [
                     {
                         "uid": "episode-aaa",

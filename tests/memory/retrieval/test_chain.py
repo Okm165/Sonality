@@ -47,7 +47,5 @@ def test_chain_stops_when_sufficient(
             }
         }
     )
-    episodes = asyncio.run(
-        chain_retrieve(_store_mock(), _graph_mock(), "query", base_n=3)
-    )
+    episodes = asyncio.run(chain_retrieve(_store_mock(), _graph_mock(), "query", base_n=3))
     assert len(episodes) == 1

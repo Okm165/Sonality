@@ -23,7 +23,7 @@ def test_reranker_applies_listwise_order(
 ) -> None:
     mock_llm_call(
         {
-            "Rank these candidate episodes": {
+            "Rank candidates by relevance to query": {
                 "ranking": [2, 1, 3],
                 "reasoning": "Second episode is most specific",
             }
