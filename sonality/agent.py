@@ -43,7 +43,13 @@ from .memory import (
 )
 from .memory.consolidation import maybe_consolidate_segment
 from .memory.forgetting import assess_and_forget
-from .memory.graph import BeliefNode, PersonalitySnapshot, format_episode_line
+from .memory.graph import (
+    BELIEF_PROMPT_WINDOW,
+    BeliefNode,
+    PersonalitySnapshot,
+    format_beliefs_for_prompt_from_nodes,
+    format_episode_line,
+)
 from .prompts import (
     REFLECTION_DEEP_PROMPT,
     REFLECTION_TRIAGE_PROMPT,
@@ -56,9 +62,17 @@ from .provider import (
     interaction_active,
     strip_thinking_trace,
 )
+from .request_identity import (
+    IdentityBundle,
+    get_request_identity,
+    reset_request_identity,
+    set_request_identity,
+)
 from .schema import DENSE_VECTOR, ChatRole, Collection, SemanticCategory
+from .token_budget import message_tokens_budget_for_system, trim_chat_messages_for_budget
 
 log = logging.getLogger(__name__)
+
 
 class SonalityAgent:
     """Stateless personality agent backed by Neo4j (graph) and Qdrant (vectors).
@@ -129,41 +143,77 @@ class SonalityAgent:
 
     # --- Public API ---
 
-    def respond(self, messages: list[dict[str, str]]) -> str:
+    def respond(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
+    ) -> str:
         """Generate a response given the full conversation history from the caller."""
         with interaction_active():
-            return self._respond_inner(messages)
+            return self._respond_inner(
+                messages,
+                max_tokens=max_tokens if max_tokens is not None else config.LLM_MAX_TOKENS,
+                temperature=temperature if temperature is not None else config.AGENT_TEMPERATURE,
+            )
 
-    def respond_stream(self, messages: list[dict[str, str]]) -> Iterator[StreamChunk]:
+    def respond_stream(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
+    ) -> Iterator[StreamChunk]:
         """Streaming response variant."""
         with interaction_active():
-            yield from self._respond_stream_inner(messages)
+            yield from self._respond_stream_inner(
+                messages,
+                max_tokens=max_tokens if max_tokens is not None else config.LLM_MAX_TOKENS,
+                temperature=temperature if temperature is not None else config.AGENT_TEMPERATURE,
+            )
 
     def ingest(self, text: str, *, topic_override: str = "") -> ESSResult:
         """Non-conversational data ingestion (news, articles, social media)."""
         _t0 = time.perf_counter()
-        ess = self._classify_ess(text)
-        if topic_override and not ess.topics:
-            ess = dataclasses.replace(ess, topics=(topic_override.strip().lower(),))
-        self.last_ess = ess
+        id_token = None
+        try:
+            bundle = self._run_async(self._fetch_identity_bundle())
+            id_token = set_request_identity(bundle)
+            ess = self._classify_ess(text)
+            if topic_override and not ess.topics:
+                ess = dataclasses.replace(ess, topics=(topic_override.strip().lower(),))
+            self.last_ess = ess
 
-        if not ess.belief_update_recommended:
-            log.info("Ingest: update not recommended (type=%s score=%.3f)", ess.reasoning_type, ess.score)
-            return ess
+            if not ess.belief_update_recommended:
+                log.info(
+                    "Ingest: update not recommended (type=%s score=%.3f)",
+                    ess.reasoning_type,
+                    ess.score,
+                )
+                return ess
 
-        episode_uid = self._store_episode(text, "", ess, "", "")
-        if episode_uid:
-            self._extract_knowledge(text, "", ess, episode_uid)
-            self._assess_provenance(list(ess.topics), episode_uid, text, ess)
-            self._semantic_worker.enqueue(
-                episode_uid,
-                f"Content: {text}\nESS: {ess.score:.2f} ({ess.reasoning_type})",
-                categories=(SemanticCategory.KNOWLEDGE,),
+            episode_uid = self._store_episode(text, "", ess, "", "")
+            if episode_uid:
+                self._extract_knowledge(text, "", ess, episode_uid)
+                self._assess_provenance(list(ess.topics), episode_uid, text, ess)
+                self._semantic_worker.enqueue(
+                    episode_uid,
+                    f"Content: {text}\nESS: {ess.score:.2f} ({ess.reasoning_type})",
+                    categories=(SemanticCategory.KNOWLEDGE,),
+                )
+                self._reflect(text, "", ess, episode_uid)
+
+            log.info(
+                "Ingest completed in %.1fs | ess=%.2f topics=%s",
+                time.perf_counter() - _t0,
+                ess.score,
+                list(ess.topics),
             )
-            self._reflect(text, "", ess, episode_uid)
-
-        log.info("Ingest completed in %.1fs | ess=%.2f topics=%s", time.perf_counter() - _t0, ess.score, list(ess.topics))
-        return ess
+            return ess
+        finally:
+            if id_token is not None:
+                reset_request_identity(id_token)
 
     def get_all_beliefs(self) -> list[BeliefNode]:
         """Return all belief nodes from graph."""
@@ -188,7 +238,11 @@ class SonalityAgent:
     def _build_context(self, messages: list[dict[str, str]]) -> tuple[str, str]:
         """Shared setup for respond paths. Returns (user_message, system_prompt)."""
         user_message = self._last_user_message(messages)
-        snapshot_text, beliefs_text = self._run_async(self._load_identity())
+        bundle = get_request_identity()
+        if bundle is None:
+            bundle = self._run_async(self._fetch_identity_bundle())
+        snapshot_text = bundle.snapshot_text
+        beliefs_text = bundle.beliefs_prompt_text
         try:
             relevant = self._run_async(self._retrieve(user_message))
         except Exception:
@@ -199,72 +253,134 @@ class SonalityAgent:
                 retrieve_relevant_knowledge(user_message, self._db.qdrant, self._embedder)
             )
         except Exception:
-            log.warning("Knowledge retrieval failed; continuing without knowledge context", exc_info=True)
+            log.warning(
+                "Knowledge retrieval failed; continuing without knowledge context", exc_info=True
+            )
             knowledge = []
-        log.info("Context: snapshot_chars=%d belief_lines=%d episodes=%d knowledge=%d",
-                 len(snapshot_text), len(beliefs_text.splitlines()), len(relevant), len(knowledge))
+        log.info(
+            "Context: snapshot_chars=%d belief_lines=%d episodes=%d knowledge=%d",
+            len(snapshot_text),
+            len(beliefs_text.splitlines()),
+            len(relevant),
+            len(knowledge),
+        )
         system_prompt = build_system_prompt(
-            snapshot_text=snapshot_text, beliefs_text=beliefs_text,
-            relevant_episodes=relevant, knowledge_context=knowledge,
+            snapshot_text=snapshot_text,
+            beliefs_text=beliefs_text,
+            relevant_episodes=relevant,
+            knowledge_context=knowledge,
         )
         return user_message, system_prompt
 
-    def _respond_inner(self, messages: list[dict[str, str]]) -> str:
+    def _respond_inner(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        max_tokens: int,
+        temperature: float,
+    ) -> str:
         _t0 = time.perf_counter()
-        user_message, system_prompt = self._build_context(messages)
-        log.info("User: %.120s", user_message)
+        id_token = None
+        try:
+            bundle = self._run_async(self._fetch_identity_bundle())
+            id_token = set_request_identity(bundle)
+            user_message, system_prompt = self._build_context(messages)
+            log.info("User: %.120s", user_message)
+            conv = trim_chat_messages_for_budget(
+                list(messages),
+                max_message_tokens=message_tokens_budget_for_system(
+                    total_budget=config.CHAT_INPUT_TOKEN_BUDGET,
+                    system_prompt=system_prompt,
+                    reserve_completion=max_tokens,
+                ),
+            )
 
-        for attempt in range(1, 4):
-            try:
-                completion = default_provider.chat_completion(
-                    model=self.model,
-                    max_tokens=config.LLM_MAX_TOKENS,
-                    temperature=config.AGENT_TEMPERATURE,
-                    messages=({"role": ChatRole.SYSTEM, "content": system_prompt}, *messages),
-                    enable_thinking=False,
-                )
-                break
-            except RuntimeError as exc:
-                if attempt < 3:
-                    log.warning("LLM failed (attempt %d/3): %s", attempt, exc)
-                    continue
-                log.error("LLM failed after 3 attempts: %s", exc)
-                completion = ChatResult(text="", input_tokens=0, output_tokens=0, raw={})
-                break
+            for attempt in range(1, 4):
+                try:
+                    completion = default_provider.chat_completion(
+                        model=self.model,
+                        max_tokens=max_tokens,
+                        temperature=temperature,
+                        messages=({"role": ChatRole.SYSTEM, "content": system_prompt}, *conv),
+                        enable_thinking=False,
+                    )
+                    break
+                except RuntimeError as exc:
+                    if attempt < 3:
+                        log.warning("LLM failed (attempt %d/3): %s", attempt, exc)
+                        continue
+                    log.error("LLM failed after 3 attempts: %s", exc)
+                    completion = ChatResult(text="", input_tokens=0, output_tokens=0, raw={})
+                    break
 
-        assistant_msg = completion.text
-        log.info("Agent: %.200s", assistant_msg)
-        self._post_process(user_message, assistant_msg)
-        log.info("Total: %.1fs", time.perf_counter() - _t0)
-        return assistant_msg
+            assistant_msg = completion.text
+            log.info("Agent: %.200s", assistant_msg)
+            log.info(
+                "LLM tokens: input=%d output=%d",
+                completion.input_tokens,
+                completion.output_tokens,
+            )
+            self._post_process(user_message, assistant_msg)
+            log.info("Total: %.1fs", time.perf_counter() - _t0)
+            return assistant_msg
+        finally:
+            if id_token is not None:
+                reset_request_identity(id_token)
 
-    def _respond_stream_inner(self, messages: list[dict[str, str]]) -> Iterator[StreamChunk]:
-        user_message, system_prompt = self._build_context(messages)
-        log.info("User (stream): %.120s", user_message)
+    def _respond_stream_inner(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        max_tokens: int,
+        temperature: float,
+    ) -> Iterator[StreamChunk]:
+        id_token = None
+        try:
+            bundle = self._run_async(self._fetch_identity_bundle())
+            id_token = set_request_identity(bundle)
+            user_message, system_prompt = self._build_context(messages)
+            log.info("User (stream): %.120s", user_message)
+            conv = trim_chat_messages_for_budget(
+                list(messages),
+                max_message_tokens=message_tokens_budget_for_system(
+                    total_budget=config.CHAT_INPUT_TOKEN_BUDGET,
+                    system_prompt=system_prompt,
+                    reserve_completion=max_tokens,
+                ),
+            )
 
-        chunks: list[str] = []
-        for content, reasoning in default_provider.chat_completion_stream(
-            model=self.model,
-            max_tokens=config.LLM_MAX_TOKENS,
-            temperature=config.AGENT_TEMPERATURE,
-            messages=({"role": ChatRole.SYSTEM, "content": system_prompt}, *messages),
-            enable_thinking=False,
-        ):
-            if content:
-                chunks.append(content)
-            yield StreamChunk(content, reasoning)
+            chunks: list[str] = []
+            for content, reasoning in default_provider.chat_completion_stream(
+                model=self.model,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                messages=({"role": ChatRole.SYSTEM, "content": system_prompt}, *conv),
+                enable_thinking=False,
+            ):
+                if content:
+                    chunks.append(content)
+                yield StreamChunk(content, reasoning)
 
-        assistant_msg = strip_thinking_trace("".join(chunks))
-        log.info("Agent: %.200s", assistant_msg)
-        self._post_process(user_message, assistant_msg)
+            assistant_msg = strip_thinking_trace("".join(chunks))
+            log.info("Agent: %.200s", assistant_msg)
+            self._post_process(user_message, assistant_msg)
+        finally:
+            if id_token is not None:
+                reset_request_identity(id_token)
 
     # --- Identity loading ---
 
-    async def _load_identity(self) -> tuple[str, str]:
-        """Load personality snapshot and formatted beliefs from graph."""
+    async def _fetch_identity_bundle(self) -> IdentityBundle:
+        """Load snapshot and beliefs once (sorted by |valence|, same window as prompt formatting)."""
         snapshot = await self._graph.get_personality_snapshot()
-        beliefs_text = await self._graph.format_beliefs_for_prompt()
-        return snapshot.text, beliefs_text
+        all_beliefs = await self._graph.get_all_beliefs()
+        window = all_beliefs[:BELIEF_PROMPT_WINDOW]
+        beliefs_text = format_beliefs_for_prompt_from_nodes(window)
+        return IdentityBundle(
+            snapshot_text=snapshot.text,
+            beliefs_prompt_text=beliefs_text,
+            all_beliefs=tuple(all_beliefs),
+        )
 
     # --- Retrieval ---
 
@@ -279,13 +395,31 @@ class SonalityAgent:
             return []
 
         if decision.category == QueryCategory.MULTI_ENTITY:
-            episodes = await split_retrieve(self._dual_store, self._graph, user_message, n_per_sub=decision.n_results)
+            word_count = len(user_message.split())
+            if word_count < config.RETRIEVAL_DECOMPOSE_MIN_WORDS:
+                over_fetch = decision.n_results * config.RETRIEVAL_OVER_FETCH_FACTOR
+                results = await self._dual_store.vector_search(user_message, top_k=over_fetch)
+                episode_uids = list({h.episode_uid for h in results})
+                topic_hits = await self._graph.find_topic_related_episodes(
+                    user_message, limit=max(2, over_fetch // 2)
+                )
+                episodes = topic_hits + await self._graph.get_episodes(episode_uids)
+            else:
+                episodes = await split_retrieve(
+                    self._dual_store, self._graph, user_message, n_per_sub=decision.n_results
+                )
         elif decision.category in (QueryCategory.TEMPORAL, QueryCategory.AGGREGATION):
-            episodes = await chain_retrieve(self._dual_store, self._graph, user_message, base_n=decision.n_results)
+            episodes = await chain_retrieve(
+                self._dual_store, self._graph, user_message, base_n=decision.n_results
+            )
         elif decision.category == QueryCategory.BELIEF_QUERY:
             over_fetch = decision.n_results * config.RETRIEVAL_OVER_FETCH_FACTOR
-            belief_hits = await self._graph.find_belief_related_episodes(user_message, limit=over_fetch)
-            topic_hits = await self._graph.find_topic_related_episodes(user_message, limit=max(2, over_fetch // 2))
+            belief_hits = await self._graph.find_belief_related_episodes(
+                user_message, limit=over_fetch
+            )
+            topic_hits = await self._graph.find_topic_related_episodes(
+                user_message, limit=max(2, over_fetch // 2)
+            )
             vector_hits = await self._dual_store.vector_search(user_message, top_k=over_fetch)
             vector_uids = list({h.episode_uid for h in vector_hits})
             episodes = belief_hits + topic_hits + await self._graph.get_episodes(vector_uids)
@@ -293,7 +427,9 @@ class SonalityAgent:
             over_fetch = decision.n_results * config.RETRIEVAL_OVER_FETCH_FACTOR
             results = await self._dual_store.vector_search(user_message, top_k=over_fetch)
             episode_uids = list({h.episode_uid for h in results})
-            topic_hits = await self._graph.find_topic_related_episodes(user_message, limit=max(2, over_fetch // 2))
+            topic_hits = await self._graph.find_topic_related_episodes(
+                user_message, limit=max(2, over_fetch // 2)
+            )
             episodes = topic_hits + await self._graph.get_episodes(episode_uids)
 
         episodes = list({ep.uid: ep for ep in episodes}.values())
@@ -307,10 +443,11 @@ class SonalityAgent:
             if new_uids:
                 episodes.extend(await self._graph.get_episodes(new_uids))
 
-        if len(episodes) > 1:
+        need_rerank = len(episodes) > 1 and len(episodes) > decision.n_results
+        if need_rerank:
             episodes = await asyncio.to_thread(rerank_episodes, user_message, episodes)
 
-        selected = episodes[:decision.n_results]
+        selected = episodes[: decision.n_results]
         semantic_context: list[str] = []
         if decision.semantic_memory is SemanticMemoryDecision.SEARCH:
             semantic_context = await self._search_semantic_features(
@@ -318,12 +455,22 @@ class SonalityAgent:
             )
 
         episode_context = [
-            format_episode_line(created_at=ep.created_at, summary=ep.summary, content=ep.content, content_limit=300)
+            format_episode_line(
+                created_at=ep.created_at,
+                summary=ep.summary,
+                content=ep.content,
+                content_limit=config.EPISODE_CONTENT_LIMIT,
+            )
             for ep in selected
         ]
-        log.info("Retrieval: category=%s episodes=%d semantic=%d (deduped=%d reranked=%d)",
-                 decision.category, len(selected), len(semantic_context),
-                 len(episodes), len(episodes) > 1)
+        log.info(
+            "Retrieval: category=%s episodes=%d semantic=%d (deduped=%d reranked=%d)",
+            decision.category,
+            len(selected),
+            len(semantic_context),
+            len(episodes),
+            need_rerank,
+        )
         return [*episode_context, *semantic_context]
 
     async def _search_semantic_features(self, query: str, *, top_k: int) -> list[str]:
@@ -402,15 +549,22 @@ class SonalityAgent:
         )
 
     def _store_episode(
-        self, user_msg: str, agent_resp: str, ess: ESSResult,
-        segment_id: str, segment_label: str,
+        self,
+        user_msg: str,
+        agent_resp: str,
+        ess: ESSResult,
+        segment_id: str,
+        segment_label: str,
     ) -> str:
         try:
             stored: StoredEpisode = self._run_async(
                 self._dual_store.store(
-                    user_message=user_msg, agent_response=agent_resp,
-                    summary=ess.summary[:300], topics=list(ess.topics),
-                    ess_score=ess.score, segment_id=segment_id,
+                    user_message=user_msg,
+                    agent_response=agent_resp,
+                    summary=ess.summary[:300],
+                    topics=list(ess.topics),
+                    ess_score=ess.score,
+                    segment_id=segment_id,
                     segment_label=segment_label,
                 )
             )
@@ -419,15 +573,19 @@ class SonalityAgent:
             log.exception("Episode storage failed")
             return ""
 
-    def _extract_knowledge(self, user_msg: str, agent_resp: str, ess: ESSResult, episode_uid: str) -> None:
+    def _extract_knowledge(
+        self, user_msg: str, agent_resp: str, ess: ESSResult, episode_uid: str
+    ) -> None:
         if ess.knowledge_density == KnowledgeDensity.NONE:
             return
         text = f"User: {user_msg}\nAssistant: {agent_resp}" if agent_resp else user_msg
         try:
             stored = self._run_async(
                 extract_and_store_knowledge(
-                    text=text, episode_uid=episode_uid,
-                    qdrant=self._db.qdrant, embedder=self._embedder,
+                    text=text,
+                    episode_uid=episode_uid,
+                    qdrant=self._db.qdrant,
+                    embedder=self._embedder,
                 )
             )
             if stored:
@@ -436,20 +594,32 @@ class SonalityAgent:
             log.exception("Knowledge extraction failed")
 
     def _assess_provenance(
-        self, topics: list[str], episode_uid: str, content: str, ess: ESSResult,
+        self,
+        topics: list[str],
+        episode_uid: str,
+        content: str,
+        ess: ESSResult,
     ) -> None:
         """Create provenance edges (SUPPORTS/CONTRADICTS) for relevant beliefs."""
         if not topics:
             return
-        all_beliefs = self._run_async(self._graph.get_all_beliefs())
-        beliefs_dict = {b.topic: b for b in all_beliefs}
+        bundle = get_request_identity()
+        if bundle is not None:
+            beliefs_dict = {b.topic: b for b in bundle.all_beliefs}
+        else:
+            all_beliefs = self._run_async(self._graph.get_all_beliefs())
+            beliefs_dict = {b.topic: b for b in all_beliefs}
         try:
             self._run_async(
                 assess_belief_evidence_batch(
-                    topics=topics, episode_uid=episode_uid, episode_content=content,
-                    ess_score=ess.score, reasoning_type=ess.reasoning_type,
+                    topics=topics,
+                    episode_uid=episode_uid,
+                    episode_content=content,
+                    ess_score=ess.score,
+                    reasoning_type=ess.reasoning_type,
                     source_reliability=ess.source_reliability,
-                    beliefs=beliefs_dict, graph=self._graph,
+                    beliefs=beliefs_dict,
+                    graph=self._graph,
                 )
             )
         except Exception:
@@ -459,17 +629,29 @@ class SonalityAgent:
 
     def _reflect(self, user_msg: str, agent_resp: str, ess: ESSResult, episode_uid: str) -> None:
         """Tier 1: triage (should we reflect?). Tier 2: deep reflection if yes."""
-        snapshot = self._run_async(self._graph.get_personality_snapshot())
-        beliefs = self._run_async(self._graph.get_top_beliefs())
-        beliefs_text = "\n".join(
-            f"{b.topic}: valence={b.valence:+.2f}, confidence={b.confidence:.2f}"
-            for b in beliefs
-        ) or "(no beliefs yet)"
+        bundle = get_request_identity()
+        if bundle is not None:
+            snapshot_text = bundle.snapshot_text
+            belief_nodes = list(bundle.all_beliefs[:BELIEF_PROMPT_WINDOW])
+        else:
+            snapshot_text = self._run_async(self._graph.get_personality_snapshot()).text
+            belief_nodes = self._run_async(self._graph.get_top_beliefs())
+        beliefs_text = (
+            "\n".join(
+                f"{b.topic}: valence={b.valence:+.2f}, confidence={b.confidence:.2f}"
+                for b in belief_nodes
+            )
+            or "(no beliefs yet)"
+        )
 
         triage_prompt = REFLECTION_TRIAGE_PROMPT.format(
             beliefs=beliefs_text,
-            user_message=user_msg[:500],
-            agent_response=(agent_resp[:500] if agent_resp else "(ingest, no response)"),
+            user_message=user_msg[: config.REFLECTION_USER_SLICE],
+            agent_response=(
+                agent_resp[: config.REFLECTION_USER_SLICE]
+                if agent_resp
+                else "(ingest, no response)"
+            ),
             ess_score=ess.score,
             reasoning_type=ess.reasoning_type,
             topics=list(ess.topics),
@@ -478,28 +660,36 @@ class SonalityAgent:
             prompt=triage_prompt,
             response_model=_TriageResponse,
             fallback=_TriageResponse(should_reflect=False, reason="triage failed"),
+            max_tokens=config.STRUCTURED_JSON_MAX_TOKENS,
             max_retries=1,
         )
         if not triage_result.success or not triage_result.value.should_reflect:
-            log.debug("Reflection triage: skip (%s)", triage_result.value.reason if triage_result.success else "error")
+            log.debug(
+                "Reflection triage: skip (%s)",
+                triage_result.value.reason if triage_result.success else "error",
+            )
             return
 
         log.info("Reflection triage: YES (%s)", triage_result.value.reason)
 
         episodes = self._run_async(self._graph.list_recent_episode_context(10))
         deep_prompt = REFLECTION_DEEP_PROMPT.format(
-            snapshot=snapshot.text,
+            snapshot=snapshot_text,
             beliefs=beliefs_text,
             episode_count=len(episodes),
             episodes="\n".join(episodes) or "(no recent episodes)",
-            user_message=user_msg[:800],
-            agent_response=(agent_resp[:800] if agent_resp else "(ingest, no response)"),
+            user_message=user_msg[: config.REFLECTION_AGENT_SLICE],
+            agent_response=(
+                agent_resp[: config.REFLECTION_AGENT_SLICE]
+                if agent_resp
+                else "(ingest, no response)"
+            ),
         )
         deep_result = llm_call(
             prompt=deep_prompt,
             response_model=_DeepReflectionResponse,
             fallback=_DeepReflectionResponse(),
-            max_tokens=config.LLM_MAX_TOKENS,
+            max_tokens=config.EXTRACTION_MAX_TOKENS,
             max_retries=1,
         )
         if not deep_result.success:
@@ -507,8 +697,12 @@ class SonalityAgent:
             return
 
         reflection = deep_result.value
-        log.info("Reflection deep: updates=%d new_beliefs=%d snapshot_changed=%s",
-                 len(reflection.belief_updates), len(reflection.new_beliefs), reflection.snapshot_changed)
+        log.info(
+            "Reflection deep: updates=%d new_beliefs=%d snapshot_changed=%s",
+            len(reflection.belief_updates),
+            len(reflection.new_beliefs),
+            reflection.snapshot_changed,
+        )
         self._apply_reflection(reflection, episode_uid)
 
     def _apply_reflection(self, reflection: _DeepReflectionResponse, episode_uid: str) -> None:
@@ -530,8 +724,14 @@ class SonalityAgent:
                         provenance=provenance,
                     )
                 )
-                log.info("Belief %s: %s val=%+.2f conf=%.2f reason=%.100s",
-                         provenance.split(":")[0], patch.topic, patch.valence, patch.confidence, patch.reasoning)
+                log.info(
+                    "Belief %s: %s val=%+.2f conf=%.2f reason=%.100s",
+                    provenance.split(":")[0],
+                    patch.topic,
+                    patch.valence,
+                    patch.confidence,
+                    patch.reasoning,
+                )
             except Exception:
                 log.exception("Failed to upsert belief: %s", patch.topic)
 
@@ -544,13 +744,19 @@ class SonalityAgent:
                 log.exception("Failed to update personality snapshot")
 
         try:
-            candidates = self._run_async(self._graph.get_forgetting_candidates(limit=10))
+            candidates = self._run_async(
+                self._graph.get_forgetting_candidates(limit=config.FORGETTING_CANDIDATE_LIMIT)
+            )
             if candidates:
                 snapshot = self._run_async(self._graph.get_personality_snapshot())
-                self._run_async(assess_and_forget(
-                    candidates, self._graph, self._dual_store,
-                    snapshot_excerpt=snapshot.text[:500],
-                ))
+                self._run_async(
+                    assess_and_forget(
+                        candidates,
+                        self._graph,
+                        self._dual_store,
+                        snapshot_excerpt=snapshot.text[:500],
+                    )
+                )
         except Exception:
             log.warning("Forgetting cycle skipped", exc_info=True)
 
