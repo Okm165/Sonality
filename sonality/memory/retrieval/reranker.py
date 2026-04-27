@@ -64,14 +64,16 @@ def rerank_episodes(
         prompt=prompt,
         response_model=_RerankResponse,
         fallback=_RerankResponse(ranking=list(range(1, len(to_rank) + 1))),
-        max_tokens=config.LLM_MAX_TOKENS,
+        max_tokens=config.RERANK_MAX_TOKENS,
+        max_retries=1,
         assistant_prefix='{"ranking": [',
     )
 
     if result.success:
         ranking = result.value.ranking
-        log.info("Reranked %d→%d candidates. Top=%s",
-                 len(to_rank), top_k or len(to_rank), ranking[:5])
+        log.info(
+            "Reranked %d→%d candidates. Top=%s", len(to_rank), top_k or len(to_rank), ranking[:5]
+        )
 
         # Map 1-indexed ranking to 0-indexed episodes
         reranked: list[EpisodeNode] = []

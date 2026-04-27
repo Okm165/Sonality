@@ -44,7 +44,8 @@ def _decompose(query: str) -> _DecompositionResponse:
         prompt=DECOMPOSITION_PROMPT.format(query=query),
         response_model=_DecompositionResponse,
         fallback=_DecompositionResponse(sub_queries=[query]),
-        max_tokens=config.LLM_MAX_TOKENS,
+        max_tokens=config.STRUCTURED_JSON_MAX_TOKENS,
+        max_retries=1,
         assistant_prefix='{"sub_queries": [',
     )
     if not result.success:
@@ -53,8 +54,14 @@ def _decompose(query: str) -> _DecompositionResponse:
     sub_queries = [part.strip() for part in result.value.sub_queries if part.strip()][:4]
     if not sub_queries:
         return _DecompositionResponse(sub_queries=[query])
-    log.info("Query decomposed into %d sub-queries (%s)", len(sub_queries), result.value.aggregation_strategy)
-    return _DecompositionResponse(sub_queries=sub_queries, aggregation_strategy=result.value.aggregation_strategy)
+    log.info(
+        "Query decomposed into %d sub-queries (%s)",
+        len(sub_queries),
+        result.value.aggregation_strategy,
+    )
+    return _DecompositionResponse(
+        sub_queries=sub_queries, aggregation_strategy=result.value.aggregation_strategy
+    )
 
 
 def _dedupe(episodes: list[EpisodeNode]) -> list[EpisodeNode]:
@@ -64,7 +71,9 @@ def _dedupe(episodes: list[EpisodeNode]) -> list[EpisodeNode]:
     return list(seen.values())
 
 
-def _aggregate(sub_results: list[list[EpisodeNode]], strategy: _AggregationStrategy) -> list[EpisodeNode]:
+def _aggregate(
+    sub_results: list[list[EpisodeNode]], strategy: _AggregationStrategy
+) -> list[EpisodeNode]:
     if strategy is _AggregationStrategy.COMPARE:
         interleaved: list[EpisodeNode] = []
         max_len = max((len(batch) for batch in sub_results), default=0)
@@ -74,13 +83,18 @@ def _aggregate(sub_results: list[list[EpisodeNode]], strategy: _AggregationStrat
                     interleaved.append(batch[index])
         return _dedupe(interleaved)
     if strategy is _AggregationStrategy.TIMELINE:
-        return sorted(_dedupe([ep for batch in sub_results for ep in batch]),
-                       key=lambda episode: episode.created_at)
+        return sorted(
+            _dedupe([ep for batch in sub_results for ep in batch]),
+            key=lambda episode: episode.created_at,
+        )
     return _dedupe([ep for batch in sub_results for ep in batch])
 
 
 async def split_retrieve(
-    store: DualEpisodeStore, graph: MemoryGraph, query: str, n_per_sub: int = 10,
+    store: DualEpisodeStore,
+    graph: MemoryGraph,
+    query: str,
+    n_per_sub: int = 10,
 ) -> list[EpisodeNode]:
     """Decompose query, execute sub-queries in parallel, aggregate."""
     decomposition = await asyncio.to_thread(_decompose, query)

@@ -41,7 +41,10 @@ class _SufficiencyResponse(BaseModel):
 
 
 async def chain_retrieve(
-    store: DualEpisodeStore, graph: MemoryGraph, query: str, base_n: int = 10,
+    store: DualEpisodeStore,
+    graph: MemoryGraph,
+    query: str,
+    base_n: int = 10,
 ) -> list[EpisodeNode]:
     """Iteratively search and refine until sufficient results found."""
     all_uids: set[str] = set()
@@ -77,7 +80,8 @@ async def chain_retrieve(
             prompt=SUFFICIENCY_PROMPT.format(query=query, context=context),
             response_model=_SufficiencyResponse,
             fallback=_SufficiencyResponse(),
-            max_tokens=config.LLM_MAX_TOKENS,
+            max_tokens=config.STRUCTURED_JSON_MAX_TOKENS,
+            max_retries=1,
             assistant_prefix='{"sufficiency_decision": "',
         )
         sufficiency = _suf.value
@@ -86,8 +90,11 @@ async def chain_retrieve(
             sufficiency.sufficiency_decision is _SufficiencyDecision.SUFFICIENT
             and sufficiency.confidence >= threshold
         ):
-            log.info("Chain retrieval sufficient after %d iterations (conf=%.2f)",
-                     iteration, sufficiency.confidence)
+            log.info(
+                "Chain retrieval sufficient after %d iterations (conf=%.2f)",
+                iteration,
+                sufficiency.confidence,
+            )
             return all_episodes
 
         if sufficiency.suggested_refinement:

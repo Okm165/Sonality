@@ -83,7 +83,8 @@ def route_query(query: str) -> RoutingDecision:
         prompt=QUERY_ROUTING_PROMPT.format(query=query),
         response_model=_RoutingResponse,
         fallback=_RoutingResponse(),
-        max_tokens=config.LLM_MAX_TOKENS,
+        max_tokens=config.STRUCTURED_JSON_MAX_TOKENS,
+        max_retries=1,
         assistant_prefix='{"category": "',
     )
 
@@ -93,10 +94,19 @@ def route_query(query: str) -> RoutingDecision:
 
     r = result.value
     decision = RoutingDecision(
-        category=r.category, depth=r.depth, n_results=DEPTH_TO_COUNT[r.depth],
-        temporal_expansion=r.temporal_expansion, semantic_memory=r.semantic_memory,
+        category=r.category,
+        depth=r.depth,
+        n_results=DEPTH_TO_COUNT[r.depth],
+        temporal_expansion=r.temporal_expansion,
+        semantic_memory=r.semantic_memory,
     )
-    log.info("Query routed: category=%s depth=%s n=%d temporal=%s semantic=%s reason=%.200s",
-             decision.category, decision.depth, decision.n_results,
-             decision.temporal_expansion, decision.semantic_memory, r.reasoning)
+    log.info(
+        "Query routed: category=%s depth=%s n=%d temporal=%s semantic=%s reason=%.200s",
+        decision.category,
+        decision.depth,
+        decision.n_results,
+        decision.temporal_expansion,
+        decision.semantic_memory,
+        r.reasoning,
+    )
     return decision
