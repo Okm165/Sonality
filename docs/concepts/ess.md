@@ -1,110 +1,77 @@
 # Evidence Strength Score (ESS)
 
-The Evidence Strength Score is the single most important gating mechanism in Sonality. It determines whether an interaction changes the agent's personality or is simply noted and forgotten. Without ESS, the agent would absorb every user assertion as truth — systems that update on every input either converge to consensus or oscillate chaotically (Hegselmann-Krause, 2002).[^1] ESS evaluates **argument quality of the user's message only**, deliberately excluding the agent's response to avoid self-judge bias documented at up to 50 percentage points (SYConBench, EMNLP 2025).[^2]
+> **Module**: `sonality/ess.py`
 
-## What ESS Measures
+LLM-only argument quality evaluation. Gates belief updates. Evaluates **user message only** (agent response excluded to prevent self-judge bias).
 
-ESS evaluates the **user's message only** on a 0.0–1.0 scale for argument quality. It answers: *"Does this message contain genuine reasoning, evidence, or insight that warrants updating the agent's worldview?"*
+## Pipeline
 
-!!! warning "Critical: Agent Response Excluded"
-    The agent's own response is **never** passed to the ESS classifier. Early versions that evaluated both user and agent messages created severe self-judge bias: the same model generates the response *and* evaluates it, inflating scores when the model agreed with the user. SYConBench (EMNLP 2025) quantifies this at up to 50pp attribution shift when the model judges its own output.[^2]
+```mermaid
+flowchart LR
+    Input[User Message] --> Prompt[ESS_CLASSIFICATION_PROMPT]
+    Context[Snapshot + Topics] --> Prompt
+    Prompt --> LLM[Tool Call]
+    LLM --> Coerce[Parse + Defaults]
+    Coerce --> Result[ESSResult]
+```
 
-## The ESS Tool Schema
+## Output
 
-The classifier returns structured metadata via the LLM's tool-use API (`classify_evidence`):
+```python
+@dataclass
+class ESSResult:
+    score: float                    # 0.0-1.0
+    reasoning_type: ReasoningType
+    source_reliability: SourceReliability
+    topics: tuple[str, ...]
+    opinion_direction: OpinionDirection
+    knowledge_density: KnowledgeDensity
+    belief_update_recommended: bool
+```
 
-| Field | Type | Description |
-|-------|------|--------------|
-| `score` | float (0.0–1.0) | Overall argument strength |
-| `reasoning_type` | enum | `logical_argument`, `empirical_data`, `expert_opinion`, `anecdotal`, `social_pressure`, `emotional_appeal`, `no_argument`, `news_report`, `aggregated_sentiment`, `debunked_claim` |
-| `source_reliability` | enum | `peer_reviewed`, `established_expert`, `informed_opinion`, `casual_observation`, `unverified_claim`, `not_applicable` |
-| `internal_consistency` | enum | `CONSISTENT` or `INCONSISTENT` |
-| `novelty` | float (0.0–1.0) | How new this is relative to the agent's existing views |
-| `topics` | list[str] | 1–3 topic labels |
-| `summary` | str | One-sentence interaction summary |
-| `opinion_direction` | enum | `supports`, `opposes`, or `neutral` toward the primary topic |
+## Reasoning Types & Gating
 
-## Third-Person Framing
+| Type | Score Range | Update? |
+|------|-------------|---------|
+| `EMPIRICAL_DATA` | 0.5-0.9 | Yes |
+| `LOGICAL_ARGUMENT` | 0.4-0.7 | Yes |
+| `EXPERT_OPINION` | 0.4-0.6 | Yes |
+| `NEWS_REPORT` | 0.3-0.6 | Yes |
+| `ANECDOTAL` | 0.1-0.3 | Limited |
+| `SOCIAL_PRESSURE` | 0.0-0.1 | **Blocked** |
+| `EMOTIONAL_APPEAL` | 0.1-0.2 | **Blocked** |
+| `DEBUNKED_CLAIM` | 0.0-0.07 | **Blocked** |
+| `NO_ARGUMENT` | 0.0 | No |
 
-The ESS prompt explicitly frames the task as:
+## Calibration Anchors
 
-> *"You are an evidence quality classifier analyzing a third-party conversation. A user sent a message to an AI agent. Rate the strength of arguments or claims in the USER'S message ONLY. Evaluate as a neutral third-party observer — the user's identity and relationship to the agent are irrelevant."*
+| Message Type | Score |
+|--------------|-------|
+| Greeting | 0.02 |
+| Bare assertion | 0.08 |
+| Social pressure | 0.10 |
+| Anecdotal | 0.18 |
+| Structured argument | 0.55 |
+| Rigorous + citations | 0.82 |
 
-This third-person framing reduces attribution bias by up to 63.8% (SYConBench).[^2]
+## Integration
 
-## Calibration Examples
+```mermaid
+flowchart LR
+    ESS --> |topics| Provenance[Belief Provenance]
+    ESS --> |knowledge_density| Extract[Knowledge Extract]
+    ESS --> |belief_update_recommended| Gate[Update Gate]
+    ESS --> |score| Reflect[Reflection Triage]
+```
 
-The ESS prompt includes calibration anchors to ensure consistent scoring. These exact values are embedded in the prompt:
+## Error Handling
 
-| Message | Expected Score | Rationale |
-|---------|----------------|-----------|
-| "Hey, how's it going?" | 0.02 | No argument present |
-| "I think AI is cool" | 0.08 | Bare assertion, no reasoning |
-| "Everyone knows X is true" | 0.10 | Social pressure, not evidence |
-| "I'm upset you disagree" | 0.05 | Emotional appeal, not evidence |
-| "My friend said X works well" | 0.18 | Anecdotal, single data point |
-| "Studies show X because Y, contradicting Z" | 0.55 | Structured, some evidence |
-| "According to [paper], methodology M on dataset D yields R..." | 0.82 | Rigorous, verifiable |
+- Timeout: 120s
+- Retries: 2
+- Exception fallback: `score=0.0, reasoning_type=NO_ARGUMENT, update=false`
 
-Bare assertions ("I think X") and social consensus ("everyone agrees") score below 0.15 regardless of intensity. Only explicit reasoning with supporting evidence scores above 0.5.
+## Design
 
-The calibration is validated against IBM-ArgQ-Rank-30k — 30,000 arguments with expert-annotated quality rankings. The test suite verifies Spearman correlation ≥ 0.4 between ESS scores and human quality rankings.[^3]
-
-## Update Gating
-
-Sonality no longer uses a single global ESS threshold. Updates are gated by:
-
-- classifier reliability (no critical missing/coerced fields),
-- presence of actionable topic/direction signals for belief updates,
-- downstream LLM provenance assessment for magnitude and uncertainty.
-
-Low-quality or malformed classifier payloads still fail closed (safe defaults).
-
-## Retry Logic and Fallbacks
-
-When the LLM returns incomplete tool output (missing required fields), Sonality retries up to `MAX_ESS_RETRIES` (2) times. If fields remain missing after retries:
-
-- **Safe defaults**: `score=0.0`, `reasoning_type=no_argument`, `opinion_direction=neutral`
-- The `used_defaults` flag is set on `ESSResult` for audit logging
-- Defaults are treated as unreliable classifier output and block personality updates
-
-This prevents a single malformed LLM response from corrupting beliefs.
-
-## How ESS Connects to Opinion Updates
-
-When classifier output is reliable and direction is non-neutral, Sonality runs
-LLM provenance assessment to estimate evidence strength and uncertainty, then
-applies bounded staged updates with confidence-aware resistance.
-
-See [Opinion Dynamics](opinion-dynamics.md) for the full pipeline.
-
-## Dual-Process Theory Connection
-
-Kahneman's dual-process theory distinguishes System 1 (fast, intuitive) from System 2 (slow, deliberate, analytical). Nature 2025 confirms LLMs can exhibit both modes depending on prompting. ESS enforces System 2 reasoning for belief updates by requiring explicit evidence and structured argumentation — "I feel this is right" (System 1) produces ESS below 0.15, while "Studies show X because Y, contradicting Z" (System 2) scores above 0.5. The practical effect: belief changes must survive analytical scrutiny, not just intuitive approval.
-
-## Research Grounding
-
-| Source | Key Finding |
-|--------|-------------|
-| **BASIL (2025)** | Bayesian framework distinguishing sycophantic belief shifts from rational belief updating — ESS maps to this distinction |
-| **IBM ArgQ** | Gold-standard argument quality rankings; used for ESS calibration and Spearman validation |
-| **MACI dual-dial** | Separating "what the user said" from "how the agent responded" reduces conflation in evaluation |
-| **Martingale Score (NeurIPS 2025)** | All models show belief entrenchment; quality-gated updates prevent spurious shifts |
-| **SYConBench (EMNLP 2025)** | Third-person perspective reduces sycophancy up to 63.8%; self-judge bias up to 50pp |
-| **Kahneman Dual-Process** | System 2 (deliberate) reasoning prevents impulsive sycophantic updates |
-
-## Known Limitations
-
-**ESS evaluates argument structure, not truth.** A well-structured but factually false argument (citing fabricated studies) will score high. There is no fact-checking layer.
-
-**Verbalized confidence is inherently unreliable.** ConfTuner (arXiv:2508.18847) shows LLM-verbalized confidence needs calibration. PERSIST (2025) demonstrates question reordering alone shifts personality scores by >0.3 on 5-point scales even in 400B+ models.
-
-**Ternary opinion direction loses nuance.** "Partially agrees with caveats" maps to either `supports` or `neutral`, losing the middle ground.
-
----
-
-**See Also:** [Opinion Dynamics](opinion-dynamics.md) — how ESS affects belief updates | [Anti-Sycophancy](anti-sycophancy.md) — why ESS decoupling prevents self-judge bias
-
-[^1]: Hegselmann-Krause (2002). Bounded confidence model.
-[^2]: SYConBench (EMNLP 2025, arXiv:2505.23840).
-[^3]: IBM-ArgQ-Rank-30k dataset.
+- **Third-person framing** — 63.8% sycophancy reduction (SYConBench)
+- **Topic rules** — Derive only from explicit concepts, never meta-labels
+- **Limitation** — Evaluates structure, not factual truth
