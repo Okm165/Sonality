@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import logging
 import sys
+import time
 from io import BytesIO
 
 from aiogram import Bot, Dispatcher, F, Router
@@ -18,6 +19,52 @@ from .client import SonalityClient
 
 log = logging.getLogger(__name__)
 router = Router()
+
+
+class ClientPool:
+    """Per-user SonalityClient pool with automatic cleanup of idle clients.
+
+    Solves the shared history bug where all Telegram users would see each other's
+    conversation context if a single client was shared across users.
+    """
+
+    def __init__(self, idle_timeout: float = 3600.0) -> None:
+        self._clients: dict[int, SonalityClient] = {}
+        self._last_access: dict[int, float] = {}
+        self._idle_timeout = idle_timeout
+        self._lock = asyncio.Lock()
+
+    async def get(self, user_id: int) -> SonalityClient:
+        """Get or create a client for a user."""
+        async with self._lock:
+            now = time.monotonic()
+            if user_id not in self._clients:
+                self._clients[user_id] = SonalityClient()
+                log.debug("Created new client for user_id=%d", user_id)
+            self._last_access[user_id] = now
+            return self._clients[user_id]
+
+    async def cleanup(self) -> int:
+        """Close and remove clients idle longer than idle_timeout. Returns count removed."""
+        async with self._lock:
+            now = time.monotonic()
+            to_remove = [
+                uid for uid, last in self._last_access.items() if now - last > self._idle_timeout
+            ]
+            for uid in to_remove:
+                await self._clients[uid].close()
+                del self._clients[uid]
+                del self._last_access[uid]
+                log.debug("Removed idle client for user_id=%d", uid)
+            return len(to_remove)
+
+    async def close_all(self) -> None:
+        """Close all clients on shutdown."""
+        async with self._lock:
+            for client in self._clients.values():
+                await client.close()
+            self._clients.clear()
+            self._last_access.clear()
 
 
 def _uid(msg: Message) -> int:
@@ -96,40 +143,43 @@ async def cmd_help(msg: Message) -> None:
 
 
 @router.message(Command("beliefs"))
-async def cmd_beliefs(msg: Message, client: SonalityClient) -> None:
+async def cmd_beliefs(msg: Message, pool: ClientPool) -> None:
+    uid = _uid(msg)
     try:
+        client = await pool.get(uid)
         beliefs = await client.beliefs()
         if not beliefs:
             await msg.answer("No beliefs yet.")
             return
-        lines = [
-            f"• <b>{b.topic}</b>: {b.valence:+.2f} ({b.confidence:.0%})" for b in beliefs[:15]
-        ]
+        lines = [f"• <b>{b.topic}</b>: {b.valence:+.2f} ({b.confidence:.0%})" for b in beliefs[:15]]
         await msg.answer("<b>Beliefs:</b>\n" + "\n".join(lines), parse_mode="HTML")
     except Exception as e:
-        log.error("beliefs error uid=%d: %s", _uid(msg), e)
+        log.error("beliefs error uid=%d: %s", uid, e)
         await msg.answer(f"Error: {e}")
 
 
 @router.message(Command("health"))
-async def cmd_health(msg: Message, client: SonalityClient) -> None:
+async def cmd_health(msg: Message, pool: ClientPool) -> None:
+    uid = _uid(msg)
     try:
+        client = await pool.get(uid)
         h = await client.health()
         await msg.answer(
             f"<b>Health:</b> snapshot v{h.snapshot_version} | {h.belief_count} beliefs",
             parse_mode="HTML",
         )
     except Exception as e:
-        log.error("health error uid=%d: %s", _uid(msg), e)
+        log.error("health error uid=%d: %s", uid, e)
         await msg.answer(f"Error: {e}")
 
 
 @router.message(F.text)
-async def handle_text(msg: Message, client: SonalityClient, audio: AudioProcessor) -> None:
+async def handle_text(msg: Message, pool: ClientPool, audio: AudioProcessor) -> None:
     uid = _uid(msg)
     text = msg.text or ""
     log.debug("Text message uid=%d: %d chars", uid, len(text))
     try:
+        client = await pool.get(uid)
         resp = await client.chat(text)
         log.debug("Chat response uid=%d: %d chars ess=%.2f", uid, len(resp.text), resp.ess_score)
         await _send_text_reply(msg, resp.text, audio)
@@ -139,9 +189,7 @@ async def handle_text(msg: Message, client: SonalityClient, audio: AudioProcesso
 
 
 @router.message(F.voice)
-async def handle_voice(
-    msg: Message, bot: Bot, client: SonalityClient, audio: AudioProcessor
-) -> None:
+async def handle_voice(msg: Message, bot: Bot, pool: ClientPool, audio: AudioProcessor) -> None:
     voice = msg.voice
     if not voice:
         return
@@ -176,6 +224,7 @@ async def handle_voice(
         return
 
     try:
+        client = await pool.get(uid)
         resp = await client.chat(text)
         log.debug("Chat response uid=%d: %d chars ess=%.2f", uid, len(resp.text), resp.ess_score)
         await _send_voice_reply(msg, resp.text, audio)
@@ -219,15 +268,21 @@ async def _main() -> None:
     dp = Dispatcher()
     dp.include_router(router)
 
-    async with SonalityClient() as client, AudioProcessor() as audio:
-        try:
-            h = await client.health()
-            log.info("Connected: snapshot_v%d, %d beliefs", h.snapshot_version, h.belief_count)
-        except Exception as e:
-            sys.exit(f"Cannot connect to Sonality: {e}")
+    pool = ClientPool()
+    async with AudioProcessor() as audio:
+        # Verify Sonality API is reachable with a temporary client
+        async with SonalityClient() as test_client:
+            try:
+                h = await test_client.health()
+                log.info("Connected: snapshot_v%d, %d beliefs", h.snapshot_version, h.belief_count)
+            except Exception as e:
+                sys.exit(f"Cannot connect to Sonality: {e}")
 
-        dp["client"], dp["audio"] = client, audio
-        await dp.start_polling(bot)
+        dp["pool"], dp["audio"] = pool, audio
+        try:
+            await dp.start_polling(bot)
+        finally:
+            await pool.close_all()
 
 
 def main() -> None:
