@@ -25,7 +25,7 @@ Use interaction patterns that can legitimately update beliefs:
 - Make topic labels clear and stable across turns.
 - Avoid social-pressure framing ("everyone says", "you should agree").
 
-See [Training Guide](training-guide.md) for deep methodology and curricula.
+Key: provide reasoning chains and verifiable evidence, not social pressure.
 
 ## 3) Observe update gates in real time
 
@@ -75,9 +75,4 @@ regression analysis, not for every local edit.
 
 ---
 
-**Related**
-
-- [Getting Started](getting-started.md) — installation and first run
-- [Training Guide](training-guide.md) — detailed teaching methodology
-- [Testing & Evaluation](testing.md) — validation layers and benchmark interpretation
-- [Configuration](configuration.md) — runtime knobs and expected effects
+**Related**: [Getting Started](getting-started.md) | [Testing](testing.md) | [Configuration](configuration.md)

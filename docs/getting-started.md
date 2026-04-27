@@ -18,9 +18,9 @@ cp .env.example .env
 
 Edit `.env`:
 
-- provider: `SONALITY_BASE_URL`, `SONALITY_API_KEY`
-- models: `SONALITY_MODEL`, `SONALITY_ESS_MODEL`, `SONALITY_EMBEDDING_MODEL`
-- databases: `SONALITY_NEO4J_*`, `SONALITY_QDRANT_URL`
+- `SONALITY_BASE_URL` — OpenAI-compatible endpoint
+- `SONALITY_API_KEY` — API key (optional for local providers)
+- `SONALITY_MODEL` — Main model (default: `gpt-4.1-mini`)
 
 ## Run
 
