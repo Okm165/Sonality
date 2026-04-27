@@ -59,16 +59,16 @@ Conditionally (when ESS reliability gates pass):
 - **Structured LLM calls** (ESS classification, routing, retrieval, extraction) use `enable_thinking=False` because thinking mode is incompatible with JSON prefill and hurts structured-output accuracy. The **main chat response** also uses `enable_thinking=False` to prevent deliberation markers leaking into user-visible output; reasoning quality is preserved by the model's training rather than explicit chain-of-thought. Background tasks that already use a system JSON prompt (`llm_call`) always disable thinking for the same reason.
 - A `threading.Semaphore(1)` serializes all LLM HTTP calls to prevent overwhelming single-threaded local inference servers.
 - `SemanticIngestionWorker` runs on its own dedicated `asyncio` event loop in a background thread with its own async Qdrant client, eliminating cross-loop contention. Embeddings are computed synchronously in the worker thread before submitting the DB write to the async path.
-- **Per-reasoning-type magnitude caps** (aligned with AGM minimal change principle): empirical_data ≤ 0.20, expert_opinion ≤ 0.14, logical_argument ≤ 0.10, anecdotal ≤ 0.06, debunked_claim = 0.0, social_pressure ≤ 0.02 per update. Prevents a single high-ESS turn from jumping opinion vectors by 0.8+.
+- **ESS-based update gating**: belief updates are gated by ESS classification. The `belief_update_recommended` flag from the LLM determines whether an interaction can modify beliefs, preventing low-quality or manipulative inputs from affecting the agent's worldview.
 - **`debunked_claim` ESS category**: conclusively-refuted conspiracy theories (Climategate, vaccine-autism fabrication, moon landing, etc.) are classified as `debunked_claim` (score ≈ 0.0–0.07) rather than `anecdotal`. They freeze sponge mutation (staged updates not committed, insight extraction skipped) and have zero belief update magnitude. Backed by FactCheck.org, RefuteClaim (ACL 2024), and HKS Misinformation Review.
 - **Manipulative reasoning type filter**: messages classified as `social_pressure`, `emotional_appeal`, `debunked_claim`, or `anecdotal` trigger a sponge freeze — staged updates are not committed, insight extraction and reflection are skipped. Knowledge extraction still runs to capture factual claims, but opinion-type propositions are not staged as belief updates (only fact/speculation propositions are stored). This prevents coercive rhetoric or emotional appeals from shifting belief vectors while still learning facts stated within those turns.
 - **ESS minimum threshold (0.25)**: even for non-manipulative reasoning types, belief updates require ESS score ≥ 0.25. This filters out borderline `logical_argument` (typically ~0.22) while allowing `empirical_data` (typically 0.45–0.85). Combined with the manipulative filter, ensures only substantive evidence can update beliefs.
-- **Bayesian confidence floor**: belief confidence cannot stay at zero as evidence accumulates. After 2 consistent updates: uncertainty ≤ 0.50. After 3+: uncertainty ≤ 0.30. Applied at both belief creation (when `evidence_increment >= 2` from staged updates) and on each update in the `else` branch. The LLM-assessed `new_uncertainty` from the belief provenance evaluation is threaded through `StagedOpinionUpdate` → `apply_due_staged_updates` → `update_opinion`, so the Bayesian floor is applied after (not instead of) the LLM's own uncertainty estimate. Prevents oscillation caused by the belief update LLM returning `new_uncertainty=1.0` indefinitely despite multiple supporting episodes.
+- **LLM-assessed uncertainty**: belief uncertainty is evaluated by the LLM during belief provenance assessment. The `new_uncertainty` value from the belief update response reflects the model's judgment of how certain the belief should be given accumulated evidence.
 - **Semantic feature tag validation**: each category has a fixed set of valid tags (e.g. `personality` → Communication Style, Values, Behavioral Traits, Temperament, Cognitive Style). LLM is told these in the extraction prompt, preventing cross-category tag contamination.
 - **Contradiction-only feature deletion**: semantic features are never deleted due to topic shifts, empathetic language, or paraphrased recalls of previous discussions. The extraction prompt mandates a direct new assertive counter-claim in the `reason` field; the runtime guard skips any DELETE command with `reason=""`. When ESS type is manipulative (emotional_appeal, social_pressure, etc.) the extraction prompt explicitly prohibits DELETE commands. This prevents personality erosion when users switch topics or the agent expresses empathy. Research-backed: FadeMem (2025), MemGPT, and PersonaAgent all show that topic silence ≠ trait contradiction.
-- **Hybrid BM25+vector retrieval**: derivative search uses RRF (Reciprocal Rank Fusion) of dense vector cosine similarity and sparse BM25 text search via Qdrant's built-in text indexing. This improves recall on exact-term queries (specific study names, statistics) where pure semantic search underperforms. Formula: `RRF(d) = Σ 1/(60 + rank_r(d))`, fusing vector and text ranked lists server-side.
+- **Vector retrieval**: derivative search uses dense vector cosine similarity via Qdrant. Future work may add BM25+RRF hybrid fusion for improved exact-term recall.
 
-Periodically (every ~20 interactions): **reflection** — consolidates accumulated insights into the personality narrative, decays unreinforced beliefs, validates snapshot integrity.
+**Two-tier reflection** runs on each interaction: a fast triage LLM call determines whether deep reflection is warranted, then optionally a deep reflection pass updates beliefs and the personality narrative. This prevents unnecessary compute while ensuring significant events trigger appropriate updates.
 
 ## One Interaction Timeline
 
@@ -167,7 +167,7 @@ docker compose run --rm sonality
 
 ## Database Setup
 
-**Infrastructure:** Neo4j 5 (graph memory + state) + Qdrant (vector search + hybrid BM25).
+**Infrastructure:** Neo4j 5 (graph memory + state) + Qdrant (vector search).
 
 Schema definitions are centralized in `sonality/schema.py` as the single source of truth for both Docker Compose and test containers.
 
@@ -193,17 +193,9 @@ make db-clear  # Clear data, preserve schema
 
 | Command | Description |
 |---|---|
-| `/sponge` | Full personality state (JSON) |
 | `/snapshot` | Current narrative snapshot |
 | `/beliefs` | Opinion vectors with confidence and evidence count |
-| `/insights` | Pending personality insights (cleared at reflection) |
-| `/staged` | Staged opinion updates awaiting cooling-period commit |
-| `/topics` | Topic engagement counts |
-| `/shifts` | Recent personality shifts with magnitudes |
-| `/health` | Personality health metrics and risk indicators |
 | `/models` | Active provider/model/ESS-model and base URL |
-| `/diff` | Text diff of last snapshot change |
-| `/reset` | Reset to seed personality |
 | `/quit` | Exit |
 
 ## Configuration
@@ -216,17 +208,20 @@ Set in `.env` (see `.env.example`):
 | `SONALITY_BASE_URL` | `https://api.openai.com/v1` | OpenAI-compatible chat endpoint |
 | `SONALITY_MODEL` | `gpt-4.1-mini` | Main reasoning model |
 | `SONALITY_ESS_MODEL` | same as `SONALITY_MODEL` | Model for ESS classification (separate model reduces self-judge bias) |
-| `SONALITY_EMBEDDING_BASE_URL` | same as `SONALITY_BASE_URL` | Embedding endpoint; set to `http://localhost:11434/v1` for Ollama |
-| `SONALITY_EMBEDDING_MODEL` | `nomic-embed-text` | Embedding model ID |
-| `SONALITY_EMBEDDING_SEND_DIMENSIONS` | `true` | Set `false` for Ollama models that don't accept a `dimensions` parameter |
-| `SONALITY_FAST_LLM_MAX_TOKENS` | `1024` | Token budget for structured-output calls; **increase to 4096 for thinking/CoT models** |
-| `SONALITY_ASYNC_TIMEOUT` | `300` | Seconds to wait for async operations; increase for slow local LLMs |
-| `SONALITY_OPINION_COOLING_PERIOD` | `3` | Interactions before staged belief commits |
-| `SONALITY_REFLECTION_EVERY` | `20` | Interactions between periodic reflections |
-| `SONALITY_BOOTSTRAP_DAMPENING_UNTIL` | `10` | Early interactions get 0.5× update magnitude |
-| `SONALITY_SEMANTIC_RETRIEVAL_COUNT` | `2` | Semantic memories retrieved per interaction |
-| `SONALITY_EPISODIC_RETRIEVAL_COUNT` | `3` | Episodic memories retrieved per interaction |
+| `SONALITY_LLM_MAX_TOKENS` | `8192` | Max tokens for main chat completion |
+| `SONALITY_ASYNC_TIMEOUT` | `1500` | Seconds to wait for async operations; increase for slow local LLMs |
 | `SONALITY_LOG_LEVEL` | `INFO` | Logging verbosity |
+| `SONALITY_HTTP_API_KEY` | *(empty)* | Optional Bearer token for API authentication |
+| `SONALITY_ESS_MAX_TOKENS` | `512` | Max tokens for ESS classification |
+| `SONALITY_STRUCTURED_JSON_MAX_TOKENS` | `256` | Max tokens for routing/sufficiency/boundary tasks |
+| `SONALITY_EXTRACTION_MAX_TOKENS` | `1024` | Max tokens for knowledge/feature extraction |
+| `SONALITY_RERANK_MAX_TOKENS` | `512` | Max tokens for episode reranking |
+| `SONALITY_NEO4J_MAX_POOL_SIZE` | `50` | Neo4j connection pool size |
+| `SONALITY_NEO4J_CONNECTION_TIMEOUT` | `30.0` | Neo4j connection timeout (seconds) |
+| `SONALITY_LLM_MAX_RETRIES` | `3` | Max retry attempts for LLM calls |
+| `SONALITY_LLM_BACKOFF_BASE` | `2.0` | Exponential backoff base for retries |
+| `SONALITY_EMBEDDING_CACHE_SIZE` | `10000` | Max cached query embeddings |
+| `SONALITY_EMBEDDING_MAX_CHARS` | `4096` | Max chars per embedding input |
 
 If live runs fail, use `make preflight-live-probe` to validate endpoint/model/policy access with a tiny real request before launching long benchmarks.
 
@@ -263,7 +258,7 @@ Related work: Hase et al. (2024) "Fundamental Problems With Model Editing" ident
 **Self-Reflective Memory Architecture (SRMA)** — The Sponge architecture achieves similar goals to SRMA (IJCA 2025):
 - **Episodic encoding** — full-fidelity episode storage with derivative chunking
 - **Reflection scoring** — ESS-based quality filtering before updates
-- **Adaptive retrieval** — BM25+vector hybrid retrieval with listwise reranking
+- **Adaptive retrieval** — dense vector retrieval with listwise reranking
 
 **Sycophancy Resistance** — Implements key findings from BASIL (arXiv 2508.16846) for Bayesian-rational belief revision:
 - **Third-person ESS framing** reduces self-judge sycophancy bias (SYCON Bench, EMNLP 2025: up to 63.8% sycophancy reduction with third-person perspective)
@@ -316,14 +311,9 @@ tests/
 │   ├── L3 Memory primitives  # Vector insert/search
 │   └── L3x Store/retrieve    # Full DualEpisodeStore workflow
 │
-├── test_agent_health.py      # S1-S7: Behavioral health
-│   ├── S1 Clean start        # DB empty verification
-│   ├── S2 Episode storage    # Single turn → episode + derivatives
-│   ├── S3 ESS gating         # Social pressure vs empirical evidence
-│   ├── S4 Memory retrieval   # Related query recalls episode
-│   ├── S5 Anti-sycophancy    # Holds position under pressure
-│   ├── S6 Personality        # Snapshot evolves, beliefs bounded
-│   └── S7 Extended           # 15-turn scenario with contradiction
+├── test_api.py               # API endpoint tests (28 tests)
+├── test_ess_parsing.py       # ESS classifier parsing
+├── test_provider_timeout.py  # LLM provider timeout handling
 │
 benches/
 ├── test_teaching_suite_live.py       # 60-pack teaching scenarios
@@ -334,7 +324,7 @@ benches/
 ```
 
 **Validation status:**
-- Unit tests: 101/101 ✅ (`make test`) — includes 28 API endpoint tests (`tests/test_api.py`)
+- Unit tests: 65/65 ✅ (`make test`) — excludes 22 live tests requiring infrastructure
 - Bench contracts (non-live): 80/80 ✅ (`make bench-contracts`)
 - Use `make check` to run all no-key quality gates. Use `make check-ci` for CI parity (adds format-check).
 
