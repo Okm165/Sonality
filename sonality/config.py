@@ -42,6 +42,8 @@ NEO4J_URL: Final = _env_str("SONALITY_NEO4J_URL", "bolt://localhost:7687")
 NEO4J_USER: Final = _env_str("SONALITY_NEO4J_USER", "neo4j")
 NEO4J_PASSWORD: Final = _env_str("SONALITY_NEO4J_PASSWORD", "sonality_password")
 NEO4J_DATABASE: Final = _env_str("SONALITY_NEO4J_DATABASE", "neo4j")
+NEO4J_MAX_POOL_SIZE: Final = _env_int("SONALITY_NEO4J_MAX_POOL_SIZE", 50)
+NEO4J_CONNECTION_TIMEOUT: Final = _env_float("SONALITY_NEO4J_CONNECTION_TIMEOUT", 30.0)
 
 QDRANT_URL: Final = _env_str("SONALITY_QDRANT_URL", "http://localhost:6333")
 
@@ -56,14 +58,46 @@ QDRANT_RESCORE_QUANTIZED: Final = _env_bool("SONALITY_QDRANT_RESCORE", True)
 FAST_LLM_MODEL: Final = _env_str("SONALITY_FAST_LLM_MODEL", ESS_MODEL)
 AGENT_TEMPERATURE: Final = _env_float("SONALITY_AGENT_TEMPERATURE", 0.6)
 
-# --- LLM max_tokens (unified for all task types) ---
+# --- LLM max_tokens ---
 LLM_MAX_TOKENS: Final = _env_int("SONALITY_LLM_MAX_TOKENS", 8192)
+
+# Task-specific max_tokens for structured outputs (reduces completion reservation waste).
+# Main chat uses LLM_MAX_TOKENS; these smaller budgets are for auxiliary JSON tasks.
+ESS_MAX_TOKENS: Final = _env_int("SONALITY_ESS_MAX_TOKENS", 512)
+STRUCTURED_JSON_MAX_TOKENS: Final = _env_int("SONALITY_STRUCTURED_JSON_MAX_TOKENS", 256)
+EXTRACTION_MAX_TOKENS: Final = _env_int("SONALITY_EXTRACTION_MAX_TOKENS", 1024)
+RERANK_MAX_TOKENS: Final = _env_int("SONALITY_RERANK_MAX_TOKENS", 512)
+
+# --- Limits and thresholds ---
+EPISODE_CONTENT_LIMIT: Final = _env_int("SONALITY_EPISODE_CONTENT_LIMIT", 300)
+REFLECTION_USER_SLICE: Final = _env_int("SONALITY_REFLECTION_USER_SLICE", 500)
+REFLECTION_AGENT_SLICE: Final = _env_int("SONALITY_REFLECTION_AGENT_SLICE", 800)
+ESS_TIMEOUT: Final = _env_int("SONALITY_ESS_TIMEOUT", 120)
+FORGETTING_CANDIDATE_LIMIT: Final = _env_int("SONALITY_FORGETTING_CANDIDATE_LIMIT", 10)
+
+# --- HTTP API Authentication (optional) ---
+HTTP_API_KEY: Final[str | None] = os.environ.get("SONALITY_HTTP_API_KEY")
+
+# --- Retry and backoff configuration ---
+LLM_MAX_RETRIES: Final = _env_int("SONALITY_LLM_MAX_RETRIES", 3)
+LLM_BACKOFF_BASE: Final = _env_float("SONALITY_LLM_BACKOFF_BASE", 2.0)
+
+# --- Embedding cache ---
+EMBEDDING_CACHE_SIZE: Final = _env_int("SONALITY_EMBEDDING_CACHE_SIZE", 10000)
+
+# Concurrent in-flight HTTP LLM calls per process (1 = serialized; raise for multi-GPU).
+LLM_CONCURRENCY: Final = max(1, _env_int("SONALITY_LLM_CONCURRENCY", 1))
+
+# Estimated input token budget for main chat completion (system + messages); trim oldest turns if exceeded.
+CHAT_INPUT_TOKEN_BUDGET: Final = _env_int("SONALITY_CHAT_INPUT_TOKEN_BUDGET", 28000)
 
 # --- Retrieval ---
 RETRIEVAL_MAX_ITERATIONS: Final = _env_int("SONALITY_RETRIEVAL_MAX_ITERATIONS", 3)
 RETRIEVAL_CONFIDENCE_THRESHOLD: Final = _env_float("SONALITY_RETRIEVAL_CONFIDENCE_THRESHOLD", 0.8)
 RETRIEVAL_OVER_FETCH_FACTOR: Final = _env_int("SONALITY_RETRIEVAL_OVER_FETCH_FACTOR", 3)
 MAX_RERANK_CANDIDATES: Final = _env_int("SONALITY_MAX_RERANK_CANDIDATES", 50)
+# Skip LLM query decomposition when the message is shorter than this many whitespace-separated words.
+RETRIEVAL_DECOMPOSE_MIN_WORDS: Final = _env_int("SONALITY_RETRIEVAL_DECOMPOSE_MIN_WORDS", 5)
 
 # Per-HTTP-request timeout for LLM calls. 300s (5 min) covers 4096-token outputs
 # on slower endpoints. Increase further for 70B+ models or throttled endpoints.
