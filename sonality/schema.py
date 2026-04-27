@@ -9,6 +9,7 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Any, Final
 
+from pydantic import BaseModel
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.models import (
     Distance,
@@ -50,22 +51,41 @@ class ChatRole(StrEnum):
     ASSISTANT = "assistant"
 
 
+class ChatMessage(BaseModel):
+    """Typed chat message for internal use."""
+
+    role: ChatRole
+    content: str
+
+    def to_dict(self) -> dict[str, str]:
+        """Convert to dict for API compatibility."""
+        return {"role": self.role, "content": self.content}
+
+
 DENSE_VECTOR: Final = "dense"
 
 _SHARED_HNSW: Final = HnswConfigDiff(
-    m=16, ef_construct=100, full_scan_threshold=10000, max_indexing_threads=0, on_disk=False,
+    m=16,
+    ef_construct=100,
+    full_scan_threshold=10000,
+    max_indexing_threads=0,
+    on_disk=False,
 )
 _SHARED_QUANTIZATION: Final = ScalarQuantization(
     scalar=ScalarQuantizationConfig(type=ScalarType.INT8, quantile=0.99, always_ram=True),
 )
 _SHARED_OPTIMIZERS: Final = OptimizersConfigDiff(
-    indexing_threshold=20000, memmap_threshold=50000, default_segment_number=4,
+    indexing_threshold=20000,
+    memmap_threshold=50000,
+    default_segment_number=4,
 )
 
 QDRANT_COLLECTIONS: Final[dict[str, dict[str, Any]]] = {
     Collection.DERIVATIVES: {
         "vectors_config": {
-            DENSE_VECTOR: VectorParams(size=config.EMBEDDING_DIMENSIONS, distance=Distance.COSINE, on_disk=False),
+            DENSE_VECTOR: VectorParams(
+                size=config.EMBEDDING_DIMENSIONS, distance=Distance.COSINE, on_disk=False
+            ),
         },
         "hnsw_config": _SHARED_HNSW,
         "quantization_config": _SHARED_QUANTIZATION,
@@ -83,7 +103,9 @@ QDRANT_COLLECTIONS: Final[dict[str, dict[str, Any]]] = {
     },
     Collection.SEMANTIC_FEATURES: {
         "vectors_config": {
-            DENSE_VECTOR: VectorParams(size=config.EMBEDDING_DIMENSIONS, distance=Distance.COSINE, on_disk=False),
+            DENSE_VECTOR: VectorParams(
+                size=config.EMBEDDING_DIMENSIONS, distance=Distance.COSINE, on_disk=False
+            ),
         },
         "hnsw_config": _SHARED_HNSW,
         "quantization_config": _SHARED_QUANTIZATION,
