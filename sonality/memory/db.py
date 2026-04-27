@@ -38,6 +38,8 @@ class DatabaseConnections:
         self.neo4j_driver = AsyncGraphDatabase.driver(
             config.NEO4J_URL,
             auth=(config.NEO4J_USER, config.NEO4J_PASSWORD),
+            max_connection_pool_size=config.NEO4J_MAX_POOL_SIZE,
+            connection_timeout=config.NEO4J_CONNECTION_TIMEOUT,
         )
         # Verify Neo4j connectivity
         async with self.neo4j_driver.session(database=config.NEO4J_DATABASE) as session:

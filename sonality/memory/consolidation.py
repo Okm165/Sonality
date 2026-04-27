@@ -51,11 +51,17 @@ async def maybe_consolidate_segment(graph: MemoryGraph, segment_id: str) -> str:
 
     readiness = await asyncio.to_thread(_check_readiness, segment_id, episodes)
     if readiness.readiness_decision is not _ReadinessDecision.READY:
-        log.debug("Segment %s not ready: %s (conf=%.2f)",
-                  segment_id, readiness.reasoning, readiness.confidence)
+        log.debug(
+            "Segment %s not ready: %s (conf=%.2f)",
+            segment_id,
+            readiness.reasoning,
+            readiness.confidence,
+        )
         return ""
 
-    summary_text = await asyncio.to_thread(_generate_summary, episodes, readiness.suggested_summary_focus)
+    summary_text = await asyncio.to_thread(
+        _generate_summary, episodes, readiness.suggested_summary_focus
+    )
     if not summary_text:
         return ""
 
@@ -64,13 +70,21 @@ async def maybe_consolidate_segment(graph: MemoryGraph, segment_id: str) -> str:
     topics = list({t for ep in episodes for t in ep.topics})
 
     await graph.create_summary(
-        uid=summary_uid, level=2, content=summary_text,
-        source_uids=source_uids, topics=topics,
+        uid=summary_uid,
+        level=2,
+        content=summary_text,
+        source_uids=source_uids,
+        topics=topics,
     )
     await graph.mark_segment_consolidated(segment_id)
 
-    log.info("Consolidated segment %s into summary %s (%d episodes -> %d chars)",
-             segment_id, summary_uid[:8], len(episodes), len(summary_text))
+    log.info(
+        "Consolidated segment %s into summary %s (%d episodes -> %d chars)",
+        segment_id,
+        summary_uid[:8],
+        len(episodes),
+        len(summary_text),
+    )
     return summary_uid
 
 
@@ -90,7 +104,7 @@ def _check_readiness(segment_id: str, episodes: list[EpisodeNode]) -> _Readiness
         prompt=prompt,
         response_model=_ReadinessResponse,
         fallback=_ReadinessResponse(),
-        max_tokens=config.LLM_MAX_TOKENS,
+        max_tokens=config.STRUCTURED_JSON_MAX_TOKENS,
         assistant_prefix='{"readiness_decision": "',
     )
     if not result.success:
@@ -112,7 +126,7 @@ def _generate_summary(episodes: list[EpisodeNode], focus: str) -> str:
     try:
         completion = default_provider.chat_completion(
             model=config.FAST_LLM_MODEL,
-            max_tokens=config.LLM_MAX_TOKENS,
+            max_tokens=config.EXTRACTION_MAX_TOKENS,
             messages=({"role": ChatRole.USER, "content": prompt},),
             enable_thinking=False,
         )

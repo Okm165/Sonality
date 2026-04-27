@@ -70,6 +70,7 @@ async def assess_and_forget(
         ),
         response_model=_BatchResponse,
         assistant_prefix='{"decisions": [',
+        max_retries=1,
         fallback=_BatchResponse(
             decisions=[_Decision(uid=ep.uid, reason="Fallback: retain all") for ep in candidates]
         ),
@@ -110,7 +111,9 @@ async def assess_and_forget(
             archived += 1
             log.info("%s episode %s: %s", decision.action.value, decision.uid[:8], decision.reason)
         except Exception:
-            log.exception("Failed to %s episode %s", decision.action.value.lower(), decision.uid[:8])
+            log.exception(
+                "Failed to %s episode %s", decision.action.value.lower(), decision.uid[:8]
+            )
             kept += 1
 
     log.info("Forgetting cycle: %d assessed, %d kept, %d archived", len(candidates), kept, archived)

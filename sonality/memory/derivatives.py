@@ -55,13 +55,15 @@ class DerivativeWithEmbedding:
     embedding: list[float]
 
 
-def chunk_and_embed(embedder: Embedder, text: str, episode_uid: str) -> list[DerivativeWithEmbedding]:
+def chunk_and_embed(
+    embedder: Embedder, text: str, episode_uid: str
+) -> list[DerivativeWithEmbedding]:
     """Split text into semantic chunks and embed each one."""
     result = llm_call(
         prompt=CHUNKING_PROMPT.format(text=text),
         response_model=ChunkingResponse,
         fallback=ChunkingResponse(chunks=[]),
-        max_tokens=config.LLM_MAX_TOKENS,
+        max_tokens=config.EXTRACTION_MAX_TOKENS,
         max_retries=1,
         assistant_prefix='{"chunks": [',
     )

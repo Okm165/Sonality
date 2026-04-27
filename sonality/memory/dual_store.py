@@ -194,7 +194,9 @@ class DualEpisodeStore:
             collection_name=Collection.DERIVATIVES,
             query=query_embedding,
             using=DENSE_VECTOR,
-            query_filter=Filter(must=[FieldCondition(key="archived", match=MatchValue(value=False))]),
+            query_filter=Filter(
+                must=[FieldCondition(key="archived", match=MatchValue(value=False))]
+            ),
             limit=top_k,
             with_payload=True,
             search_params=SearchParams(
@@ -206,7 +208,9 @@ class DualEpisodeStore:
             ),
         )
         hits = [
-            SearchHit(str(p.payload.get("uid", "")), str(p.payload.get("episode_uid", "")), p.score or 0.0)
+            SearchHit(
+                str(p.payload.get("uid", "")), str(p.payload.get("episode_uid", "")), p.score or 0.0
+            )
             for p in response.points
             if p.payload
         ]
@@ -215,9 +219,7 @@ class DualEpisodeStore:
 
     async def archive_derivatives(self, episode_uid: str) -> None:
         """Mark derivatives as archived in Qdrant (soft delete)."""
-        filt = Filter(
-            must=[FieldCondition(key="episode_uid", match=MatchValue(value=episode_uid))]
-        )
+        filt = Filter(must=[FieldCondition(key="episode_uid", match=MatchValue(value=episode_uid))])
         all_ids: list[int | str | UUID] = []
         offset = None
         while True:
@@ -236,7 +238,9 @@ class DualEpisodeStore:
                 payload={"archived": True},
                 points=PointIdsList(points=all_ids),
             )
-            log.info("Qdrant archive_derivatives episode=%s points=%d", episode_uid[:8], len(all_ids))
+            log.info(
+                "Qdrant archive_derivatives episode=%s points=%d", episode_uid[:8], len(all_ids)
+            )
 
     async def delete_derivatives(self, episode_uid: str) -> None:
         """Hard-delete derivatives by episode UID from Qdrant."""

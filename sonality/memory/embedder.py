@@ -34,7 +34,7 @@ class Embedder:
 
     _model: Any = None
 
-    def __init__(self, cache_size: int = 10000) -> None:
+    def __init__(self, cache_size: int = config.EMBEDDING_CACHE_SIZE) -> None:
         from fastembed import TextEmbedding
 
         if Embedder._model is None:

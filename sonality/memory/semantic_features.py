@@ -260,7 +260,7 @@ class SemanticIngestionWorker:
                 episode_uid[:8],
                 category,
             )
-            remaining = SEMANTIC_CATEGORIES[SEMANTIC_CATEGORIES.index(category):]
+            remaining = SEMANTIC_CATEGORIES[SEMANTIC_CATEGORIES.index(category) :]
             self._queue.put((episode_uid, content, tuple(remaining)))
             return
         existing = self._load_existing_features(category)
@@ -272,14 +272,14 @@ class SemanticIngestionWorker:
             existing_features=existing,
         )
 
-        # 2-4 short commands; 256 tokens is ample. Keeping it small caps the semaphore
+        # 2-4 short commands; 256-512 tokens is ample. Keeping it small caps the semaphore
         # hold time to ~60s on a 35B model, reducing foreground latency spikes.
         # max_retries=1: if server is busy, skip this episode rather than blocking further.
         result = llm_call(
             prompt=prompt,
             response_model=FeatureExtractionResponse,
             fallback=FeatureExtractionResponse(),
-            max_tokens=config.LLM_MAX_TOKENS,
+            max_tokens=config.EXTRACTION_MAX_TOKENS,
             max_retries=1,
             assistant_prefix='{"commands": [',
         )
@@ -399,7 +399,7 @@ class SemanticIngestionWorker:
             prompt=FEATURE_CONSOLIDATION_PROMPT.format(category=category, features=features_text),
             response_model=FeatureConsolidationResponse,
             fallback=FeatureConsolidationResponse(),
-            max_tokens=config.LLM_MAX_TOKENS,
+            max_tokens=config.STRUCTURED_JSON_MAX_TOKENS,
             max_retries=1,
             assistant_prefix='{"consolidation_decision": "',
         )

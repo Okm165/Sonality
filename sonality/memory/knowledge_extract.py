@@ -119,7 +119,7 @@ def _split_windows(text: str) -> list[tuple[str, str]]:
                         "content": WINDOW_CONTEXT_SUMMARY_PROMPT.format(text=window_text[:3000]),
                     },
                 ),
-                max_tokens=config.LLM_MAX_TOKENS,
+                max_tokens=config.STRUCTURED_JSON_MAX_TOKENS,
                 enable_thinking=False,
             )
             prev_summary = result.text.strip()
@@ -153,7 +153,7 @@ def _extract_propositions(text: str, preceding_context: str = "") -> list[Extrac
         prompt=KNOWLEDGE_EXTRACTION_PROMPT.format(text=prompt_text),
         response_model=ExtractionResponse,
         fallback=ExtractionResponse(),
-        max_tokens=config.LLM_MAX_TOKENS,
+        max_tokens=config.EXTRACTION_MAX_TOKENS,
         max_retries=1,  # fail fast; retrying rarely helps prose-drift failures
         assistant_prefix='{"propositions": [',  # prefill forces JSON output, bypasses prose drift
     )
@@ -191,7 +191,9 @@ async def _find_nearest_knowledge(
         query=embedding,
         using=DENSE_VECTOR,
         query_filter=Filter(
-            must=[FieldCondition(key="category", match=MatchValue(value=SemanticCategory.KNOWLEDGE))]
+            must=[
+                FieldCondition(key="category", match=MatchValue(value=SemanticCategory.KNOWLEDGE))
+            ]
         ),
         limit=1,
         with_payload=True,
@@ -268,7 +270,9 @@ async def _deduplicate_against_existing(
                     collection_name=Collection.SEMANTIC_FEATURES,
                     scroll_filter=Filter(
                         must=[
-                            FieldCondition(key="category", match=MatchValue(value=SemanticCategory.KNOWLEDGE)),
+                            FieldCondition(
+                                key="category", match=MatchValue(value=SemanticCategory.KNOWLEDGE)
+                            ),
                             FieldCondition(key="uid", match=MatchValue(value=existing_uid)),
                         ]
                     ),
@@ -460,7 +464,9 @@ async def retrieve_relevant_knowledge(
         query=query_embedding,
         using=DENSE_VECTOR,
         query_filter=Filter(
-            must=[FieldCondition(key="category", match=MatchValue(value=SemanticCategory.KNOWLEDGE))]
+            must=[
+                FieldCondition(key="category", match=MatchValue(value=SemanticCategory.KNOWLEDGE))
+            ]
         ),
         limit=top_k,
         score_threshold=min_confidence,

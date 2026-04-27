@@ -44,7 +44,10 @@ class _BatchResponse(BaseModel):
 
 
 async def _record_provenance(
-    topic: str, response: _Response, episode_uid: str, graph: MemoryGraph,
+    topic: str,
+    response: _Response,
+    episode_uid: str,
+    graph: MemoryGraph,
 ) -> None:
     """Create a graph edge linking an episode to a belief."""
     if response.direction > 0:
@@ -56,14 +59,22 @@ async def _record_provenance(
 
     try:
         await graph.link_belief(
-            episode_uid, topic, edge_type=edge_type,
-            strength=response.evidence_strength, reasoning=response.reasoning[:200],
+            episode_uid,
+            topic,
+            edge_type=edge_type,
+            strength=response.evidence_strength,
+            reasoning=response.reasoning[:200],
         )
     except Exception:
         log.exception("Failed to create belief provenance edge for %s", topic)
 
-    log.debug("Provenance: %s edge=%s str=%.2f dir=%+.2f",
-              topic, edge_type.value, response.evidence_strength, response.direction)
+    log.debug(
+        "Provenance: %s edge=%s str=%.2f dir=%+.2f",
+        topic,
+        edge_type.value,
+        response.evidence_strength,
+        response.direction,
+    )
 
 
 async def _assess_single(
@@ -91,17 +102,26 @@ async def _assess_single(
         source_reliability=source_reliability,
     )
     result = await asyncio.to_thread(
-        llm_call, prompt=prompt, response_model=_Response,
+        llm_call,
+        prompt=prompt,
+        response_model=_Response,
         fallback=_Response(direction=0.0, evidence_strength=0.0),
-        assistant_prefix='{"direction": ', max_retries=1,
+        assistant_prefix='{"direction": ',
+        max_retries=1,
     )
     if not result.success:
         log.warning("Belief assessment failed for topic=%s: %s", topic, result.error)
         return
     response = result.value
-    log.info("BELIEF_ASSESS topic=%s dir=%+.2f str=%.2f | prior=%+.3f conf=%.2f | %s",
-             topic, response.direction, response.evidence_strength,
-             b.valence, b.confidence, response.reasoning[:140])
+    log.info(
+        "BELIEF_ASSESS topic=%s dir=%+.2f str=%.2f | prior=%+.3f conf=%.2f | %s",
+        topic,
+        response.direction,
+        response.evidence_strength,
+        b.valence,
+        b.confidence,
+        response.reasoning[:140],
+    )
     await _record_provenance(topic, response, episode_uid, graph)
 
 
@@ -121,10 +141,14 @@ async def assess_belief_evidence_batch(
         return
     if len(topics) == 1:
         await _assess_single(
-            topic=topics[0], belief=beliefs.get(topics[0]),
-            episode_uid=episode_uid, episode_content=episode_content,
-            ess_score=ess_score, reasoning_type=reasoning_type,
-            source_reliability=source_reliability, graph=graph,
+            topic=topics[0],
+            belief=beliefs.get(topics[0]),
+            episode_uid=episode_uid,
+            episode_content=episode_content,
+            ess_score=ess_score,
+            reasoning_type=reasoning_type,
+            source_reliability=source_reliability,
+            graph=graph,
         )
         return
 
@@ -150,23 +174,33 @@ async def assess_belief_evidence_batch(
     )
     batch_max_tokens = min(config.LLM_MAX_TOKENS, max(128, len(topics) * 160))
     result = await asyncio.to_thread(
-        llm_call, prompt=prompt, response_model=_BatchResponse,
-        fallback=fallback, max_tokens=batch_max_tokens, max_retries=1,
+        llm_call,
+        prompt=prompt,
+        response_model=_BatchResponse,
+        fallback=fallback,
+        max_tokens=batch_max_tokens,
+        max_retries=1,
         assistant_prefix='{"assessments": [',
     )
     if not result.success:
         error_lower = result.error.lower()
-        is_server_error = any(kw in error_lower for kw in ("transport error", "network", "timed out"))
+        is_server_error = any(
+            kw in error_lower for kw in ("transport error", "network", "timed out")
+        )
         if is_server_error:
             log.warning("Batch belief assessment server error; skipping %d topics", len(topics))
             return
         log.warning("Batch failed; falling back to sequential for %d topics", len(topics))
         for t in topics:
             await _assess_single(
-                topic=t, belief=beliefs.get(t),
-                episode_uid=episode_uid, episode_content=episode_content,
-                ess_score=ess_score, reasoning_type=reasoning_type,
-                source_reliability=source_reliability, graph=graph,
+                topic=t,
+                belief=beliefs.get(t),
+                episode_uid=episode_uid,
+                episode_content=episode_content,
+                ess_score=ess_score,
+                reasoning_type=reasoning_type,
+                source_reliability=source_reliability,
+                graph=graph,
             )
         return
 
@@ -176,12 +210,21 @@ async def assess_belief_evidence_batch(
         if response is None:
             log.warning("Batch missing result for topic=%s; falling back", t)
             await _assess_single(
-                topic=t, belief=beliefs.get(t),
-                episode_uid=episode_uid, episode_content=episode_content,
-                ess_score=ess_score, reasoning_type=reasoning_type,
-                source_reliability=source_reliability, graph=graph,
+                topic=t,
+                belief=beliefs.get(t),
+                episode_uid=episode_uid,
+                episode_content=episode_content,
+                ess_score=ess_score,
+                reasoning_type=reasoning_type,
+                source_reliability=source_reliability,
+                graph=graph,
             )
             continue
-        log.info("BELIEF_ASSESS topic=%s dir=%+.2f str=%.2f | %s",
-                 t, response.direction, response.evidence_strength, response.reasoning[:140])
+        log.info(
+            "BELIEF_ASSESS topic=%s dir=%+.2f str=%.2f | %s",
+            t,
+            response.direction,
+            response.evidence_strength,
+            response.reasoning[:140],
+        )
         await _record_provenance(t, response, episode_uid, graph)

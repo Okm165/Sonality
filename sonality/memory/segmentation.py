@@ -87,7 +87,7 @@ class EventBoundaryDetector:
             prompt=prompt,
             response_model=BoundaryDetectionResponse,
             fallback=BoundaryDetectionResponse(),
-            max_tokens=config.LLM_MAX_TOKENS,
+            max_tokens=config.STRUCTURED_JSON_MAX_TOKENS,
             assistant_prefix='{"boundary_decision": "',
         )
         if not result.success:
