@@ -51,7 +51,6 @@ async def chain_retrieve(
     all_episodes: list[EpisodeNode] = []
     current_query = query
     max_iter = config.RETRIEVAL_MAX_ITERATIONS
-    threshold = config.RETRIEVAL_CONFIDENCE_THRESHOLD
 
     if max_iter < 1:
         return []
@@ -86,10 +85,7 @@ async def chain_retrieve(
         )
         sufficiency = _suf.value
 
-        if (
-            sufficiency.sufficiency_decision is _SufficiencyDecision.SUFFICIENT
-            and sufficiency.confidence >= threshold
-        ):
+        if sufficiency.sufficiency_decision is _SufficiencyDecision.SUFFICIENT:
             log.info(
                 "Chain retrieval sufficient after %d iterations (conf=%.2f)",
                 iteration,

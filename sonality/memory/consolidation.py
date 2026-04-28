@@ -15,7 +15,7 @@ from pydantic import BaseModel, field_validator
 
 from .. import config
 from ..llm.caller import llm_call
-from ..prompts import CONSOLIDATION_READINESS_PROMPT
+from ..prompts import CONSOLIDATION_READINESS_PROMPT, CONSOLIDATION_SUMMARY_PROMPT
 from ..provider import default_provider
 from ..schema import ChatRole
 from .graph import EpisodeNode, MemoryGraph, format_episode_block, format_episode_line
@@ -117,11 +117,9 @@ def _generate_summary(episodes: list[EpisodeNode], focus: str) -> str:
         format_episode_block(created_at=ep.created_at, content=ep.content, content_limit=500)
         for ep in episodes
     )
-    focus_instruction = f"\n\nFocus on: {focus}" if focus else ""
-    prompt = (
-        f"Summarize these conversation episodes into a concise, comprehensive summary.\n"
-        f"Preserve key facts, decisions, opinions, and important context.\n\n"
-        f"Episodes:\n{content}{focus_instruction}\n\nWrite the summary:"
+    prompt = CONSOLIDATION_SUMMARY_PROMPT.format(
+        episodes=content,
+        focus_instruction=f"\nFocus on: {focus}" if focus else "",
     )
     try:
         completion = default_provider.chat_completion(

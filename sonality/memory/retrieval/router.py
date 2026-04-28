@@ -56,6 +56,7 @@ class _RoutingResponse(BaseModel):
     depth: RetrievalDepth = RetrievalDepth.MODERATE
     temporal_expansion: TemporalExpansionDecision = TemporalExpansionDecision.NO_EXPAND
     semantic_memory: SemanticMemoryDecision = SemanticMemoryDecision.SKIP
+    should_decompose: bool = False
     reasoning: str = ""
 
 
@@ -66,6 +67,7 @@ class RoutingDecision:
     n_results: int
     temporal_expansion: TemporalExpansionDecision
     semantic_memory: SemanticMemoryDecision
+    should_decompose: bool = False
 
 
 _FALLBACK = RoutingDecision(
@@ -99,6 +101,7 @@ def route_query(query: str) -> RoutingDecision:
         n_results=DEPTH_TO_COUNT[r.depth],
         temporal_expansion=r.temporal_expansion,
         semantic_memory=r.semantic_memory,
+        should_decompose=r.should_decompose,
     )
     log.info(
         "Query routed: category=%s depth=%s n=%d temporal=%s semantic=%s reason=%.200s",

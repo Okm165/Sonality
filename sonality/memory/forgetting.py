@@ -6,6 +6,7 @@ or permanently forget. Supports both ARCHIVE (soft) and FORGET (hard) actions.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from enum import StrEnum
 
@@ -63,17 +64,20 @@ async def assess_and_forget(
         f"Consolidation: L{ep.consolidation_level}"
         for ep in candidates
     )
-    result = llm_call(
-        prompt=BATCH_FORGETTING_PROMPT.format(
-            candidates_summary=candidates_summary,
-            snapshot_excerpt=snapshot_excerpt or "No snapshot available",
-        ),
-        response_model=_BatchResponse,
-        assistant_prefix='{"decisions": [',
-        max_retries=1,
-        fallback=_BatchResponse(
-            decisions=[_Decision(uid=ep.uid, reason="Fallback: retain all") for ep in candidates]
-        ),
+    fallback = _BatchResponse(
+        decisions=[_Decision(uid=ep.uid, reason="Fallback: retain all") for ep in candidates]
+    )
+    result = await asyncio.to_thread(
+        lambda: llm_call(
+            prompt=BATCH_FORGETTING_PROMPT.format(
+                candidates_summary=candidates_summary,
+                snapshot_excerpt=snapshot_excerpt or "No snapshot available",
+            ),
+            response_model=_BatchResponse,
+            assistant_prefix='{"decisions": [',
+            max_retries=1,
+            fallback=fallback,
+        )
     )
     raw_decisions = (
         result.value.decisions

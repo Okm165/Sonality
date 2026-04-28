@@ -65,10 +65,9 @@ class ExtractionResponse(BaseModel):
 
         Covers three cases from truncated or malformed LLM output:
         1. Bare list: model returned [{...}, {...}] instead of {"propositions": [...]}
-        2. Bare proposition dict: extract_last_json_object recovered a single inner
-           proposition dict when the outer {"propositions": [...]} was truncated —
-           wrap it rather than silently producing an empty propositions list.
-        3. Normal {"propositions": [...]} — pass through unchanged.
+        2. Bare proposition dict: a single dict with "text" but no "propositions" key
+           (e.g. truncated outer wrapper) — wrap it as a one-element list.
+        3. Normal {"propositions": [...]} — filter empty objects and pass through.
         """
         if isinstance(data, list):
             return {"propositions": [x for x in data if isinstance(x, dict) and "text" in x]}
@@ -363,6 +362,13 @@ async def _persist_proposition(
         },
     )
     await qdrant.upsert(collection_name=Collection.SEMANTIC_FEATURES, points=[point])
+    log.debug(
+        "Persisted proposition: uid=%s tag=%s conf=%.2f citations=%d",
+        uid[:8],
+        tag,
+        confidence,
+        len(citations),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -380,10 +386,10 @@ async def extract_and_store_knowledge(
 
     Stages:
       0. Split into overlapping windows with LLM context summaries (SLIDE-inspired)
-      1-3. LLM extraction per window (Claimify three-stage, confidence calibrated by LLM)
-      4a. Intra-batch deduplication (across windows)
-      4b. Dedup against existing + evidence accumulation (MMA 2025)
-      5. Persist to semantic_features collection in Qdrant.
+      1. LLM extraction per window (five-step pipeline: select, extract, classify, score, format)
+      2. Intra-batch deduplication (across windows)
+      3. Dedup against existing + evidence accumulation (MMA 2025)
+      4. Persist to semantic_features collection in Qdrant.
     """
     windows = _split_windows(text)
     log.debug("Knowledge pipeline: %d windows from %d chars", len(windows), len(text))

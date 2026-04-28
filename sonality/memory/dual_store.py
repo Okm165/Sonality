@@ -86,6 +86,7 @@ class DualEpisodeStore:
         summary: str,
         topics: list[str],
         ess_score: float,
+        reasoning_type: str = "",
         segment_id: str = "",
         segment_label: str = "",
     ) -> StoredEpisode:
@@ -149,6 +150,7 @@ class DualEpisodeStore:
             archived=False,
             user_message=user_message,
             agent_response=agent_response,
+            reasoning_type=reasoning_type,
         )
         try:
             await self._graph.store_episode_atomically(

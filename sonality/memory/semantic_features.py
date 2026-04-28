@@ -17,7 +17,6 @@ from collections.abc import Coroutine
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import TypeVar
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 from qdrant_client import AsyncQdrantClient
@@ -30,7 +29,6 @@ from ..provider import interaction_in_progress, llm_semaphore_idle
 from ..schema import DENSE_VECTOR, Collection, SemanticCategory
 from .embedder import Embedder
 
-_T = TypeVar("_T")
 log = logging.getLogger(__name__)
 
 SEMANTIC_CATEGORIES: list[SemanticCategory] = list(SemanticCategory)
@@ -131,8 +129,9 @@ class SemanticIngestionWorker:
         )
         self._thread = threading.Thread(target=self._run, name="semantic-ingestion", daemon=True)
         self._stop_event = threading.Event()
+        self._last_defer_log: float = 0.0
 
-    def _run_async(self, coro: Coroutine[object, object, _T]) -> _T:
+    def _run_async[T](self, coro: Coroutine[object, object, T]) -> T:
         if not self._loop.is_running() or self._stop_event.is_set():
             coro.close()
             raise RuntimeError("semantic ingestion loop is not running")
@@ -206,14 +205,19 @@ class SemanticIngestionWorker:
             for item in batch:
                 episode_uid, content, categories = item
                 if interaction_in_progress():
-                    log.debug("Semantic worker deferring: interaction active")
+                    now = _time.monotonic()
+                    if now - self._last_defer_log > 30.0:
+                        log.debug(
+                            "Semantic worker deferring: interaction active (%d queued)",
+                            self._queue.qsize() + len(requeue) + 1,
+                        )
+                        self._last_defer_log = now
                     requeue.append(item)
                 else:
                     try:
                         self._process_episode(episode_uid, content, categories)
                     except Exception:
                         log.exception("Semantic ingestion error; continuing")
-                # One task_done per get() to keep Queue.join() accurate.
                 self._queue.task_done()
 
             for item in requeue:
@@ -368,7 +372,7 @@ class SemanticIngestionWorker:
             level = logging.DEBUG if self._stop_event.is_set() else logging.WARNING
             log.log(level, "Feature consolidation failed for category=%s", category, exc_info=True)
 
-    def _load_existing_features(self, category: str) -> str:
+    def _load_existing_features(self, category: SemanticCategory) -> str:
         try:
             rows = self._run_async(self._load_feature_rows_async(category, limit=30))
         except Exception:
@@ -381,14 +385,9 @@ class SemanticIngestionWorker:
             for row in rows
         )
 
-    def _consolidate_features(self, category: str) -> None:
+    def _consolidate_features(self, category: SemanticCategory) -> None:
         features = self._run_async(self._load_feature_rows_async(category, limit=40))
-        if len(features) < 15:
-            log.debug(
-                "Skipping consolidation for category=%s: %d features < 15 threshold",
-                category,
-                len(features),
-            )
+        if len(features) < 2:
             return
         log.debug("Consolidating %d features in category=%s", len(features), category)
         features_text = "\n".join(
@@ -423,7 +422,9 @@ class SemanticIngestionWorker:
                 continue
             self._run_async(self._merge_features_async(category, source_uid, target_uid, action))
 
-    async def _load_feature_rows_async(self, category: str, limit: int) -> list[SemanticFeatureRow]:
+    async def _load_feature_rows_async(
+        self, category: SemanticCategory, limit: int
+    ) -> list[SemanticFeatureRow]:
         results, _ = await self._qdrant.scroll(
             collection_name=Collection.SEMANTIC_FEATURES,
             scroll_filter=Filter(
@@ -455,7 +456,7 @@ class SemanticIngestionWorker:
 
     async def _merge_features_async(
         self,
-        category: str,
+        category: SemanticCategory,
         source_uid: str,
         target_uid: str,
         action: FeatureConsolidationAction,
@@ -497,7 +498,11 @@ class SemanticIngestionWorker:
         log.info("Feature MERGE: %s <- %s (%s)", target_uid[:8], source_uid[:8], action.reason[:80])
 
     async def _persist_command_async(
-        self, episode_uid: str, category: str, cmd: FeatureCommand, embedding: list[float]
+        self,
+        episode_uid: str,
+        category: SemanticCategory,
+        cmd: FeatureCommand,
+        embedding: list[float],
     ) -> None:
         seed = f"semantic:{category}:{cmd.tag.strip().lower()}:{cmd.feature.strip().lower()}"
         feature_uid = str(uuid.uuid5(uuid.NAMESPACE_URL, seed))

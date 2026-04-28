@@ -1,7 +1,7 @@
 """LLM Listwise Reranker for episode relevance ranking.
 
 Takes a query and candidate episodes, uses LLM to rank them by relevance
-with cross-document reasoning. Replaces formula-based utility scoring.
+with cross-document reasoning.
 """
 
 from __future__ import annotations
@@ -25,23 +25,11 @@ class _RerankResponse(BaseModel):
 def rerank_episodes(
     query: str,
     candidates: list[EpisodeNode],
-    *,
-    top_k: int = 0,
 ) -> list[EpisodeNode]:
     """Rerank candidate episodes using LLM Listwise approach.
 
-    Parameters
-    ----------
-    query:
-        The original search query.
-    candidates:
-        Episodes to rank (max ~25 for context efficiency).
-    top_k:
-        Number of top results to return. 0 means return all.
-
-    Returns
-    -------
-    Episodes in LLM-determined relevance order.
+    Returns all candidates in LLM-determined relevance order.
+    Callers should slice the result to their desired count.
     """
     if not candidates:
         return []
@@ -71,9 +59,7 @@ def rerank_episodes(
 
     if result.success:
         ranking = result.value.ranking
-        log.info(
-            "Reranked %d→%d candidates. Top=%s", len(to_rank), top_k or len(to_rank), ranking[:5]
-        )
+        log.info("Reranked %d candidates. Top=%s", len(to_rank), ranking[:5])
 
         # Map 1-indexed ranking to 0-indexed episodes
         reranked: list[EpisodeNode] = []
@@ -89,15 +75,14 @@ def rerank_episodes(
             if i not in seen:
                 reranked.append(ep)
 
-        final = reranked[:top_k] if top_k > 0 else reranked
-        if final:
-            top = final[0]
+        if reranked:
+            top = reranked[0]
             log.debug(
                 "Top episode after rerank: %s | summary=%.80s",
                 top.uid[:8],
                 top.summary or top.content[:80],
             )
-        return final
+        return reranked
 
     log.warning("Rerank fallback: %d candidates unchanged", len(to_rank))
-    return to_rank[:top_k] if top_k > 0 else to_rank
+    return to_rank

@@ -8,13 +8,16 @@ from __future__ import annotations
 import hashlib
 import logging
 import math
-from typing import Any, Final
+from typing import TYPE_CHECKING, Final
 
 from .. import config
 
+if TYPE_CHECKING:
+    from fastembed import TextEmbedding
+
 log = logging.getLogger(__name__)
 
-DENSE_MODEL: Final = "BAAI/bge-large-en-v1.5"
+_DENSE_MODEL: Final = "BAAI/bge-large-en-v1.5"
 
 
 def cosine_similarity(a: list[float], b: list[float]) -> float:
@@ -32,21 +35,17 @@ class Embedder:
     Thread-safe: FastEmbed handles internal synchronization.
     """
 
-    _model: Any = None
+    _model: TextEmbedding | None = None
 
     def __init__(self, cache_size: int = config.EMBEDDING_CACHE_SIZE) -> None:
         from fastembed import TextEmbedding
 
         if Embedder._model is None:
-            log.info("Loading dense embedding model: %s", DENSE_MODEL)
-            Embedder._model = TextEmbedding(model_name=DENSE_MODEL)
-        self._model_ref: Any = Embedder._model
+            log.info("Loading dense embedding model: %s", _DENSE_MODEL)
+            Embedder._model = TextEmbedding(model_name=_DENSE_MODEL)
+        self._model_ref: TextEmbedding = Embedder._model
         self._cache: dict[str, list[float]] = {}
         self._max_cache = cache_size
-
-    @property
-    def dimensions(self) -> int:
-        return config.EMBEDDING_DIMENSIONS
 
     def embed_query(self, query: str) -> list[float]:
         """Embed search query (cached)."""

@@ -35,7 +35,16 @@ class _DecompositionResponse(BaseModel):
     @classmethod
     def normalize_response(cls, data: object) -> object:
         if isinstance(data, list):
-            return {"sub_queries": [x for x in data if isinstance(x, str)]}
+            data = {"sub_queries": data}
+        if isinstance(data, dict) and "sub_queries" in data:
+            raw = data["sub_queries"]
+            data["sub_queries"] = [
+                str(x)
+                if isinstance(x, str)
+                else " ".join(v for v in x.values() if isinstance(v, str))
+                for x in raw
+                if isinstance(x, (str, dict))
+            ]
         return data
 
 

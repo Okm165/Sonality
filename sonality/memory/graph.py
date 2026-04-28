@@ -45,7 +45,6 @@ def format_episode_block(
 
 
 _DEFAULT_SESSION_ID: Final = "default"
-_DEFAULT_TONE: Final = "curious, direct, unpretentious"
 BELIEF_PROMPT_WINDOW: Final = 15
 
 
@@ -73,15 +72,23 @@ class BeliefNode:
 
 
 def format_beliefs_for_prompt_from_nodes(beliefs: Sequence[BeliefNode]) -> str:
-    """Build belief summary lines for prompts (matches ``format_beliefs_for_prompt`` layout)."""
+    """Build belief summary lines for the system prompt.
+
+    Format: topic — valence: +0.40, confidence: 0.60, evidence: 3 | belief text
+    Valence = opinion direction (-1 negative to +1 positive).
+    Confidence = how certain you are (0 to 1).
+    """
     if not beliefs:
         return "No beliefs formed yet."
     lines: list[str] = []
     for b in beliefs:
-        sign = "+" if b.valence >= 0 else ""
-        entry = f"{b.topic}: {sign}{b.valence:.2f} (confidence: {b.confidence:.2f})"
+        parts = [f"valence: {b.valence:+.2f}", f"confidence: {b.confidence:.2f}"]
         if b.evidence_count > 0:
-            entry += f", evidence: {b.evidence_count}"
+            parts.append(f"evidence: {b.evidence_count}")
+        meta = ", ".join(parts)
+        entry = f"{b.topic} — {meta}"
+        if b.belief_text:
+            entry += f" | {b.belief_text}"
         lines.append(entry)
     return "\n".join(lines)
 
@@ -91,7 +98,6 @@ class PersonalitySnapshot:
     """Agent identity narrative stored in Neo4j."""
 
     text: str = ""
-    tone: str = _DEFAULT_TONE
     version: int = 0
 
 
@@ -121,6 +127,7 @@ class EpisodeNode:
     archived: bool = False
     user_message: str = ""
     agent_response: str = ""
+    reasoning_type: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,7 +143,7 @@ _DB: Final = config.NEO4J_DATABASE
 
 
 class MemoryGraph:
-    """Neo4j-backed graph for episode storage and traversal."""
+    """Neo4j-backed graph for episodes, beliefs, personality snapshots, and topic structure."""
 
     def __init__(self, driver: AsyncDriver) -> None:
         self._driver = driver
@@ -191,7 +198,8 @@ class MemoryGraph:
                 access_count: $access_count, last_accessed: $last_accessed,
                 segment_id: $segment_id, consolidation_level: $consolidation_level,
                 archived: $archived, user_message: $user_message,
-                agent_response: $agent_response
+                agent_response: $agent_response,
+                reasoning_type: $reasoning_type
             })
             """,
             uid=episode.uid,
@@ -210,6 +218,7 @@ class MemoryGraph:
             archived=episode.archived,
             user_message=episode.user_message,
             agent_response=episode.agent_response,
+            reasoning_type=episode.reasoning_type,
         )
         if prev_uid:
             await tx.run(
@@ -333,10 +342,7 @@ class MemoryGraph:
     ) -> None:
         await tx.run(
             f"""
-            MERGE (b:Belief {{topic: $topic}})
-            ON CREATE SET b.valence = 0.0, b.confidence = 0.5, b.uncertainty = 0.5,
-                          b.evidence_count = 0, b.belief_text = '', b.provenance = '',
-                          b.formed_at = datetime()
+            MATCH (b:Belief {{topic: $topic}})
             SET b.evidence_count = coalesce(b.evidence_count, 0) + 1,
                 b.last_updated = datetime()
             WITH b
@@ -514,10 +520,11 @@ class MemoryGraph:
     async def get_forgetting_candidates(
         self, *, limit: int = 20, min_age_minutes: int = 60
     ) -> list[EpisodeNode]:
-        """Fetch low-utility raw episodes eligible for forgetting assessment.
+        """Fetch low-utility raw (non-consolidated) episodes eligible for forgetting.
 
-        Only considers episodes older than min_age_minutes to prevent the forgetting
-        cycle from immediately archiving just-ingested episodes.
+        Only considers episodes with consolidation_level=1 that are older than
+        min_age_minutes, preventing the forgetting cycle from targeting just-ingested
+        or already-consolidated episodes.
         """
         async with self._driver.session(database=_DB) as session:
             result = await session.run(
@@ -589,7 +596,8 @@ class MemoryGraph:
         """Load the agent's identity narrative from graph, or return seed defaults."""
         async with self._driver.session(database=_DB) as session:
             result = await session.run(
-                f"MATCH (n:PersonalitySnapshot {{session_id: '{_DEFAULT_SESSION_ID}'}}) RETURN n"
+                "MATCH (n:PersonalitySnapshot {session_id: $sid}) RETURN n",
+                sid=_DEFAULT_SESSION_ID,
             )
             record = await result.single()
         if not record:
@@ -597,7 +605,6 @@ class MemoryGraph:
         props = dict(record["n"])
         return PersonalitySnapshot(
             text=str(props.get("text", SEED_SNAPSHOT)),
-            tone=str(props.get("tone", _DEFAULT_TONE)),
             version=int(props.get("version", 0)),
         )
 
@@ -605,13 +612,13 @@ class MemoryGraph:
         """Write or update the agent's identity narrative."""
         async with self._driver.session(database=_DB) as session:
             await session.run(
-                f"""
-                MERGE (n:PersonalitySnapshot {{session_id: '{_DEFAULT_SESSION_ID}'}})
+                """
+                MERGE (n:PersonalitySnapshot {session_id: $sid})
                 SET n.text = $text,
-                    n.tone = coalesce(n.tone, '{_DEFAULT_TONE}'),
                     n.version = coalesce(n.version, 0) + 1,
                     n.updated_at = datetime()
                 """,
+                sid=_DEFAULT_SESSION_ID,
                 text=text,
             )
         log.info("GRAPH upsert_personality_snapshot chars=%d", len(text))
@@ -629,7 +636,7 @@ class MemoryGraph:
         evidence_count: int = -1,
         provenance: str = "",
     ) -> None:
-        """Create or update a Belief node with full personality state."""
+        """Create or update a Belief node (valence, confidence, uncertainty, evidence count)."""
         topic = topic.strip().lower()
         async with self._driver.session(database=_DB) as session:
             await session.run(
@@ -670,11 +677,7 @@ class MemoryGraph:
         """Fetch strongest beliefs ordered by absolute valence."""
         async with self._driver.session(database=_DB) as session:
             result = await session.run(
-                """
-                MATCH (b:Belief)
-                WHERE b.valence IS NOT NULL
-                RETURN b ORDER BY abs(b.valence) DESC LIMIT $n
-                """,
+                "MATCH (b:Belief) RETURN b ORDER BY abs(b.valence) DESC LIMIT $n",
                 n=n,
             )
             return [_record_to_belief(r["b"]) async for r in result]
@@ -683,14 +686,9 @@ class MemoryGraph:
         """Fetch all beliefs."""
         async with self._driver.session(database=_DB) as session:
             result = await session.run(
-                "MATCH (b:Belief) WHERE b.valence IS NOT NULL RETURN b ORDER BY abs(b.valence) DESC"
+                "MATCH (b:Belief) RETURN b ORDER BY abs(b.valence) DESC"
             )
             return [_record_to_belief(r["b"]) async for r in result]
-
-    async def format_beliefs_for_prompt(self, n: int = BELIEF_PROMPT_WINDOW) -> str:
-        """Build a formatted belief summary for the system prompt."""
-        beliefs = await self.get_top_beliefs(n)
-        return format_beliefs_for_prompt_from_nodes(beliefs)
 
     async def get_last_episode_uid(self) -> str:
         """Get the UID of the most recently created episode."""

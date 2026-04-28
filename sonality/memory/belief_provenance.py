@@ -16,7 +16,7 @@ from pydantic import BaseModel, model_validator
 from .. import config
 from ..ess import ReasoningType, SourceReliability
 from ..llm.caller import llm_call
-from ..prompts import BATCH_BELIEF_UPDATE_PROMPT, BELIEF_UPDATE_PROMPT
+from ..prompts import BATCH_BELIEF_UPDATE_PROMPT, BELIEF_UPDATE_PROMPT, WEB_VERIFICATION_SECTION
 from .graph import BeliefNode, EdgeType, MemoryGraph
 
 log = logging.getLogger(__name__)
@@ -26,7 +26,6 @@ class _Response(BaseModel):
     topic: str = ""
     direction: float = 0.0
     evidence_strength: float = 0.5
-    new_uncertainty: float = 0.5
     reasoning: str = ""
 
 
@@ -87,6 +86,7 @@ async def _assess_single(
     source_reliability: SourceReliability,
     belief: BeliefNode | None,
     graph: MemoryGraph,
+    web_context: str = "",
 ) -> None:
     """Assess how new evidence affects a single belief and create provenance edge."""
     b = belief or BeliefNode(topic=topic)
@@ -101,6 +101,8 @@ async def _assess_single(
         reasoning_type=reasoning_type,
         source_reliability=source_reliability,
     )
+    if web_context:
+        prompt += "\n\n" + WEB_VERIFICATION_SECTION.format(web_verification_context=web_context)
     result = await asyncio.to_thread(
         llm_call,
         prompt=prompt,
@@ -135,21 +137,32 @@ async def assess_belief_evidence_batch(
     source_reliability: SourceReliability,
     beliefs: dict[str, BeliefNode],
     graph: MemoryGraph,
+    web_context: str = "",
 ) -> None:
-    """Batch: one LLM call for all topics, falls back to sequential."""
+    """Batch: one LLM call for all topics, falls back to sequential.
+
+    Assesses how new episode evidence affects each listed belief. Creates
+    SUPPORTS/CONTRADICTS provenance edges. Single-topic input skips the
+    batch call and goes straight to _assess_single.
+    """
     if not topics:
         return
-    if len(topics) == 1:
+
+    async def _fallback_single(topic: str) -> None:
         await _assess_single(
-            topic=topics[0],
-            belief=beliefs.get(topics[0]),
+            topic=topic,
+            belief=beliefs.get(topic),
             episode_uid=episode_uid,
             episode_content=episode_content,
             ess_score=ess_score,
             reasoning_type=reasoning_type,
             source_reliability=source_reliability,
             graph=graph,
+            web_context=web_context,
         )
+
+    if len(topics) == 1:
+        await _fallback_single(topics[0])
         return
 
     topics_data = [
@@ -169,39 +182,28 @@ async def assess_belief_evidence_batch(
         source_reliability=source_reliability,
         topics_json=json.dumps(topics_data, indent=2),
     )
-    fallback = _BatchResponse(
-        assessments=[_Response(topic=t, direction=0.0, evidence_strength=0.0) for t in topics]
-    )
-    batch_max_tokens = min(config.LLM_MAX_TOKENS, max(128, len(topics) * 160))
+    if web_context:
+        prompt += "\n\n" + WEB_VERIFICATION_SECTION.format(web_verification_context=web_context)
+
     result = await asyncio.to_thread(
         llm_call,
         prompt=prompt,
         response_model=_BatchResponse,
-        fallback=fallback,
-        max_tokens=batch_max_tokens,
+        fallback=_BatchResponse(
+            assessments=[_Response(topic=t, direction=0.0, evidence_strength=0.0) for t in topics]
+        ),
+        max_tokens=min(config.LLM_MAX_TOKENS, max(128, len(topics) * 160)),
         max_retries=1,
         assistant_prefix='{"assessments": [',
     )
     if not result.success:
         error_lower = result.error.lower()
-        is_server_error = any(
-            kw in error_lower for kw in ("transport error", "network", "timed out")
-        )
-        if is_server_error:
+        if any(kw in error_lower for kw in ("transport error", "network", "timed out")):
             log.warning("Batch belief assessment server error; skipping %d topics", len(topics))
             return
         log.warning("Batch failed; falling back to sequential for %d topics", len(topics))
         for t in topics:
-            await _assess_single(
-                topic=t,
-                belief=beliefs.get(t),
-                episode_uid=episode_uid,
-                episode_content=episode_content,
-                ess_score=ess_score,
-                reasoning_type=reasoning_type,
-                source_reliability=source_reliability,
-                graph=graph,
-            )
+            await _fallback_single(t)
         return
 
     assessments_by_topic = {a.topic: a for a in result.value.assessments}
@@ -209,16 +211,7 @@ async def assess_belief_evidence_batch(
         response = assessments_by_topic.get(t)
         if response is None:
             log.warning("Batch missing result for topic=%s; falling back", t)
-            await _assess_single(
-                topic=t,
-                belief=beliefs.get(t),
-                episode_uid=episode_uid,
-                episode_content=episode_content,
-                ess_score=ess_score,
-                reasoning_type=reasoning_type,
-                source_reliability=source_reliability,
-                graph=graph,
-            )
+            await _fallback_single(t)
             continue
         log.info(
             "BELIEF_ASSESS topic=%s dir=%+.2f str=%.2f | %s",

@@ -4,6 +4,7 @@ from .chain import chain_retrieve
 from .reranker import rerank_episodes
 from .router import (
     QueryCategory,
+    RoutingDecision,
     SemanticMemoryDecision,
     TemporalExpansionDecision,
     route_query,
@@ -12,6 +13,7 @@ from .split import split_retrieve
 
 __all__ = [
     "QueryCategory",
+    "RoutingDecision",
     "SemanticMemoryDecision",
     "TemporalExpansionDecision",
     "chain_retrieve",
