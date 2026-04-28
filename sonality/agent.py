@@ -1,26 +1,28 @@
-"""Sonality agent: stateless, graph-backed personality with LLM-only decisions.
+"""Sonality agent: stateless, graph-backed personality with LLM-driven tool use.
 
 Each request starts from zero in-memory state. Identity (personality snapshot +
 beliefs) is loaded from Neo4j per request. Conversation context is managed by
-the caller (chat client / API). Reflection runs on every turn (two-tier:
-cheap triage → deep update only when warranted).
+the caller (chat client / API). The agent uses a unified agentic loop where ALL
+cognitive stages — memory recall, web research, evidence assessment, reflection,
+knowledge storage, and consolidation — are tools the LLM invokes autonomously.
 """
 
 from __future__ import annotations
 
 import asyncio
 import dataclasses
+import json
 import logging
+import re
 import threading
 import time
-from collections.abc import Coroutine, Iterator
+from collections.abc import Callable, Coroutine, Iterator
 from concurrent.futures import Future
-
-from pydantic import BaseModel, Field
+from contextvars import Token
+from typing import Final
 
 from . import config
-from .ess import ESSResult, KnowledgeDensity, classifier_exception_fallback, classify
-from .llm.caller import llm_call
+from .ess import ESSResult, classifier_exception_fallback, classify
 from .memory import (
     BoundaryDecision,
     DatabaseConnections,
@@ -29,38 +31,45 @@ from .memory import (
     EventBoundaryDetector,
     MemoryGraph,
     QueryCategory,
+    RoutingDecision,
     SemanticIngestionWorker,
     SemanticMemoryDecision,
     StoredEpisode,
     TemporalExpansionDecision,
     assess_belief_evidence_batch,
     chain_retrieve,
-    extract_and_store_knowledge,
     rerank_episodes,
-    retrieve_relevant_knowledge,
     route_query,
     split_retrieve,
 )
 from .memory.consolidation import maybe_consolidate_segment
-from .memory.forgetting import assess_and_forget
 from .memory.graph import (
     BELIEF_PROMPT_WINDOW,
     BeliefNode,
+    EpisodeNode,
     PersonalitySnapshot,
     format_beliefs_for_prompt_from_nodes,
     format_episode_line,
 )
-from .prompts import (
-    REFLECTION_DEEP_PROMPT,
-    REFLECTION_TRIAGE_PROMPT,
-    build_system_prompt,
+from .progress import (
+    CONTEXT_BUILD,
+    DONE,
+    SUMMARIZING,
+    THINKING,
+    TOOL_CALL,
+    TOOL_RESULT,
+    AgentEvent,
+    noop_progress,
 )
+from .prompts import build_system_prompt
 from .provider import (
     ChatResult,
+    ParsedToolCall,
     StreamChunk,
+    _get_raw_tool_calls,
     default_provider,
+    extract_tool_calls,
     interaction_active,
-    strip_thinking_trace,
 )
 from .request_identity import (
     IdentityBundle,
@@ -68,10 +77,29 @@ from .request_identity import (
     reset_request_identity,
     set_request_identity,
 )
-from .schema import DENSE_VECTOR, ChatRole, Collection, SemanticCategory
-from .token_budget import message_tokens_budget_for_system, trim_chat_messages_for_budget
+from .schema import DENSE_VECTOR, ChatRole, Collection, SemanticCategory, ToolName
+from .token_budget import (
+    _SUMMARIZE_THRESHOLD,
+    message_tokens_budget_for_system,
+    summarize_and_trim,
+)
+from .tools import ToolContext, dispatch_tool, get_definitions
+from .tools.reflect import run_forgetting
+from .web import get_client
 
 log = logging.getLogger(__name__)
+
+_HARD_CEILING: Final = 50  # pure circuit breaker, should never be hit
+
+_MD_BOLD = re.compile(r"\*\*(.+?)\*\*")
+_MD_HEADER = re.compile(r"^#{1,4}\s+", re.MULTILINE)
+
+
+def _strip_markdown(text: str) -> str:
+    """Remove markdown bold and headers from LLM output. Plain text only."""
+    text = _MD_BOLD.sub(r"\1", text)
+    text = _MD_HEADER.sub("", text)
+    return text
 
 
 class SonalityAgent:
@@ -113,7 +141,16 @@ class SonalityAgent:
         self._semantic_worker = SemanticIngestionWorker(config.QDRANT_URL, self._embedder)
         self._semantic_worker.start()
 
-        log.info("SonalityAgent ready (model=%s, ess=%s)", self.model, self.ess_model)
+        self._web_client = get_client()
+        self._loop_tool_history: list[str] = []
+        self._last_assistant_msg = ""
+
+        log.info(
+            "SonalityAgent ready (model=%s, ess=%s, web=%s)",
+            self.model,
+            self.ess_model,
+            "enabled" if self._web_client else "disabled",
+        )
 
     async def _init_runtime(self) -> None:
         db = await DatabaseConnections.create()
@@ -149,6 +186,7 @@ class SonalityAgent:
         *,
         max_tokens: int | None = None,
         temperature: float | None = None,
+        on_progress: Callable[[AgentEvent], None] | None = None,
     ) -> str:
         """Generate a response given the full conversation history from the caller."""
         with interaction_active():
@@ -156,6 +194,7 @@ class SonalityAgent:
                 messages,
                 max_tokens=max_tokens if max_tokens is not None else config.LLM_MAX_TOKENS,
                 temperature=temperature if temperature is not None else config.AGENT_TEMPERATURE,
+                on_progress=on_progress or noop_progress,
             )
 
     def respond_stream(
@@ -164,13 +203,15 @@ class SonalityAgent:
         *,
         max_tokens: int | None = None,
         temperature: float | None = None,
-    ) -> Iterator[StreamChunk]:
-        """Streaming response variant."""
+        on_progress: Callable[[AgentEvent], None] | None = None,
+    ) -> Iterator[StreamChunk | AgentEvent]:
+        """Streaming response variant. Yields StreamChunk for text and AgentEvent for progress."""
         with interaction_active():
             yield from self._respond_stream_inner(
                 messages,
                 max_tokens=max_tokens if max_tokens is not None else config.LLM_MAX_TOKENS,
                 temperature=temperature if temperature is not None else config.AGENT_TEMPERATURE,
+                on_progress=on_progress or noop_progress,
             )
 
     def ingest(self, text: str, *, topic_override: str = "") -> ESSResult:
@@ -195,15 +236,12 @@ class SonalityAgent:
 
             episode_uid = self._store_episode(text, "", ess, "", "")
             if episode_uid:
-                self._extract_knowledge(text, "", ess, episode_uid)
                 self._assess_provenance(list(ess.topics), episode_uid, text, ess)
-                self._semantic_worker.enqueue(
-                    episode_uid,
-                    f"Content: {text}\nESS: {ess.score:.2f} ({ess.reasoning_type})",
-                    categories=(SemanticCategory.KNOWLEDGE,),
-                )
-                self._reflect(text, "", ess, episode_uid)
+                content = f"Content: {text}\nESS: {ess.score:.2f} ({ess.reasoning_type})"
+                self._semantic_worker.enqueue(episode_uid, content, (SemanticCategory.KNOWLEDGE,))
 
+            ctx = self._make_tool_context([])
+            run_forgetting(ctx)
             log.info(
                 "Ingest completed in %.1fs | ess=%.2f topics=%s",
                 time.perf_counter() - _t0,
@@ -235,42 +273,48 @@ class SonalityAgent:
 
     # --- Response pipeline ---
 
-    def _build_context(self, messages: list[dict[str, str]]) -> tuple[str, str]:
-        """Shared setup for respond paths. Returns (user_message, system_prompt)."""
-        user_message = self._last_user_message(messages)
-        bundle = get_request_identity()
-        if bundle is None:
-            bundle = self._run_async(self._fetch_identity_bundle())
-        snapshot_text = bundle.snapshot_text
-        beliefs_text = bundle.beliefs_prompt_text
-        try:
-            relevant = self._run_async(self._retrieve(user_message))
-        except Exception:
-            log.exception("Retrieval failed")
-            relevant = []
-        try:
-            knowledge = self._run_async(
-                retrieve_relevant_knowledge(user_message, self._db.qdrant, self._embedder)
-            )
-        except Exception:
-            log.warning(
-                "Knowledge retrieval failed; continuing without knowledge context", exc_info=True
-            )
-            knowledge = []
+    def _prepare_context(
+        self,
+        messages: list[dict[str, str]],
+        max_tokens: int,
+        on_progress: Callable[[AgentEvent], None],
+    ) -> tuple[Token[IdentityBundle | None], str, str, list[dict[str, str]]]:
+        """Load identity, build system prompt, trim messages."""
+        bundle = self._run_async(self._fetch_identity_bundle())
+        id_token = set_request_identity(bundle)
+        on_progress(AgentEvent(type=CONTEXT_BUILD, detail="Loading identity..."))
+
+        user_message = next(
+            (m.get("content", "") for m in reversed(messages) if m.get("role") == ChatRole.USER),
+            "",
+        )
         log.info(
-            "Context: snapshot_chars=%d belief_lines=%d episodes=%d knowledge=%d",
-            len(snapshot_text),
-            len(beliefs_text.splitlines()),
-            len(relevant),
-            len(knowledge),
+            "Context: snapshot=%d chars, %d beliefs",
+            len(bundle.snapshot_text),
+            len(bundle.all_beliefs),
         )
         system_prompt = build_system_prompt(
-            snapshot_text=snapshot_text,
-            beliefs_text=beliefs_text,
-            relevant_episodes=relevant,
-            knowledge_context=knowledge,
+            snapshot_text=bundle.snapshot_text,
+            beliefs_text=bundle.beliefs_prompt_text,
         )
-        return user_message, system_prompt
+
+        msg_count_before = len(messages)
+        conv = summarize_and_trim(
+            list(messages),
+            max_message_tokens=message_tokens_budget_for_system(
+                total_budget=config.CHAT_INPUT_TOKEN_BUDGET,
+                system_prompt=system_prompt,
+                reserve_completion=max_tokens,
+            ),
+        )
+        if len(conv) < msg_count_before and msg_count_before >= _SUMMARIZE_THRESHOLD:
+            on_progress(
+                AgentEvent(
+                    type=SUMMARIZING,
+                    detail=f"Compressed {msg_count_before} messages to {len(conv)}",
+                )
+            )
+        return id_token, user_message, system_prompt, conv
 
     def _respond_inner(
         self,
@@ -278,50 +322,41 @@ class SonalityAgent:
         *,
         max_tokens: int,
         temperature: float,
+        on_progress: Callable[[AgentEvent], None],
     ) -> str:
         _t0 = time.perf_counter()
+        log.info(
+            "Request: %d messages, max_tokens=%d, temp=%.2f", len(messages), max_tokens, temperature
+        )
         id_token = None
         try:
-            bundle = self._run_async(self._fetch_identity_bundle())
-            id_token = set_request_identity(bundle)
-            user_message, system_prompt = self._build_context(messages)
+            id_token, user_message, system_prompt, conv = self._prepare_context(
+                messages, max_tokens, on_progress
+            )
             log.info("User: %.120s", user_message)
-            conv = trim_chat_messages_for_budget(
-                list(messages),
-                max_message_tokens=message_tokens_budget_for_system(
-                    total_budget=config.CHAT_INPUT_TOKEN_BUDGET,
-                    system_prompt=system_prompt,
-                    reserve_completion=max_tokens,
-                ),
+
+            assistant_msg = self._agentic_loop(
+                system_prompt,
+                conv,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                on_progress=on_progress,
             )
-
-            for attempt in range(1, 4):
-                try:
-                    completion = default_provider.chat_completion(
-                        model=self.model,
-                        max_tokens=max_tokens,
-                        temperature=temperature,
-                        messages=({"role": ChatRole.SYSTEM, "content": system_prompt}, *conv),
-                        enable_thinking=False,
-                    )
-                    break
-                except RuntimeError as exc:
-                    if attempt < 3:
-                        log.warning("LLM failed (attempt %d/3): %s", attempt, exc)
-                        continue
-                    log.error("LLM failed after 3 attempts: %s", exc)
-                    completion = ChatResult(text="", input_tokens=0, output_tokens=0, raw={})
-                    break
-
-            assistant_msg = completion.text
             log.info("Agent: %.200s", assistant_msg)
-            log.info(
-                "LLM tokens: input=%d output=%d",
-                completion.input_tokens,
-                completion.output_tokens,
-            )
-            self._post_process(user_message, assistant_msg)
-            log.info("Total: %.1fs", time.perf_counter() - _t0)
+            self._bookkeep(user_message, assistant_msg)
+            elapsed = time.perf_counter() - _t0
+            ess = self.last_ess
+            on_progress(AgentEvent(
+                type=DONE,
+                detail=json.dumps({
+                    "tool_count": len(self._loop_tool_history),
+                    "elapsed": round(elapsed, 1),
+                    "ess_score": round(ess.score, 2),
+                    "reasoning_type": ess.reasoning_type,
+                    "topics": list(ess.topics),
+                }),
+            ))
+            log.info("Total: %.1fs", elapsed)
             return assistant_msg
         finally:
             if id_token is not None:
@@ -333,40 +368,231 @@ class SonalityAgent:
         *,
         max_tokens: int,
         temperature: float,
-    ) -> Iterator[StreamChunk]:
+        on_progress: Callable[[AgentEvent], None],
+    ) -> Iterator[StreamChunk | AgentEvent]:
+        """Agentic streaming: tool calls yield AgentEvents, final text yields StreamChunks."""
+        _t0 = time.perf_counter()
+        log.info(
+            "Stream request: %d messages, max_tokens=%d, temp=%.2f",
+            len(messages),
+            max_tokens,
+            temperature,
+        )
         id_token = None
         try:
-            bundle = self._run_async(self._fetch_identity_bundle())
-            id_token = set_request_identity(bundle)
-            user_message, system_prompt = self._build_context(messages)
-            log.info("User (stream): %.120s", user_message)
-            conv = trim_chat_messages_for_budget(
-                list(messages),
-                max_message_tokens=message_tokens_budget_for_system(
-                    total_budget=config.CHAT_INPUT_TOKEN_BUDGET,
-                    system_prompt=system_prompt,
-                    reserve_completion=max_tokens,
-                ),
+            id_token, user_message, system_prompt, conv = self._prepare_context(
+                messages, max_tokens, on_progress
             )
+            log.info("User (stream): %.120s", user_message)
 
-            chunks: list[str] = []
-            for content, reasoning in default_provider.chat_completion_stream(
-                model=self.model,
+            yield from self._run_agentic_loop(
+                system_prompt,
+                conv,
                 max_tokens=max_tokens,
                 temperature=temperature,
-                messages=({"role": ChatRole.SYSTEM, "content": system_prompt}, *conv),
-                enable_thinking=False,
-            ):
-                if content:
-                    chunks.append(content)
-                yield StreamChunk(content, reasoning)
+            )
 
-            assistant_msg = strip_thinking_trace("".join(chunks))
-            log.info("Agent: %.200s", assistant_msg)
-            self._post_process(user_message, assistant_msg)
+            self._bookkeep(user_message, self._last_assistant_msg)
+            elapsed = time.perf_counter() - _t0
+            ess = self.last_ess
+            yield AgentEvent(
+                type=DONE,
+                detail=json.dumps({
+                    "tool_count": len(self._loop_tool_history),
+                    "elapsed": round(elapsed, 1),
+                    "ess_score": round(ess.score, 2),
+                    "reasoning_type": ess.reasoning_type,
+                    "topics": list(ess.topics),
+                }),
+            )
+            log.info("Stream total: %.1fs", elapsed)
         finally:
             if id_token is not None:
                 reset_request_identity(id_token)
+
+    # --- Tool context and loop status ---
+
+    def _make_tool_context(self, llm_messages: list[dict[str, object]]) -> ToolContext:
+        """Create ToolContext bridging agent state to the tools package."""
+        return ToolContext(
+            run_async=self._run_async,
+            web_client=self._web_client,
+            graph=self._graph,
+            dual_store=self._dual_store,
+            qdrant=self._db.qdrant,
+            embedder=self._embedder,
+            identity=get_request_identity(),
+            llm_messages=llm_messages,
+            retrieve=lambda q: self._run_async(self._retrieve(q)),
+        )
+
+    def _build_loop_status(self, iteration: int) -> str:
+        """Minimal step counter — the LLM decides its own strategy."""
+        return f"[Step {iteration + 1}]"
+
+    def _prepare_iteration(
+        self,
+        iteration: int,
+        llm_messages: list[dict[str, object]],
+    ) -> list[dict[str, object]]:
+        """Per-iteration setup: cognitive state injection and tool definitions."""
+        llm_messages.append(
+            {"role": ChatRole.USER, "content": self._build_loop_status(iteration)}
+        )
+        return get_definitions()
+
+    # --- Agentic tool-calling loop ---
+
+    def _dedup_tool_calls(
+        self,
+        tool_calls: list[ParsedToolCall],
+        recent_calls: set[tuple[str, str]],
+    ) -> list[ParsedToolCall]:
+        """Filter exact duplicate tool calls (same name + same args) as a safety measure.
+
+        No warnings or behavioral nudges are injected — the LLM manages its own
+        tool strategy via prompts. This only prevents wasting compute on truly
+        identical repeat calls.
+        """
+        calls: list[ParsedToolCall] = []
+        for tc in tool_calls:
+            sig = (tc.name, json.dumps(tc.args, sort_keys=True))
+            if sig in recent_calls:
+                log.info("Skipping duplicate call: %s", tc.name)
+            else:
+                recent_calls.add(sig)
+                calls.append(tc)
+        return calls
+
+    def _dispatch_tools(
+        self,
+        calls: list[ParsedToolCall],
+        llm_messages: list[dict[str, object]],
+    ) -> list[tuple[ParsedToolCall, str]]:
+        """Execute tool calls and record results. Returns (call, result_text) pairs."""
+        ctx = self._make_tool_context(llm_messages)
+        t_tools = time.perf_counter()
+        results: list[tuple[ParsedToolCall, str]] = []
+        for tc in calls:
+            result_text = dispatch_tool(tc.name, tc.args, ctx)
+            tool_elapsed = time.perf_counter() - t_tools
+            self._loop_tool_history.append(tc.name)
+            llm_messages.append(
+                {"role": ChatRole.TOOL, "content": result_text, "tool_call_id": tc.id}
+            )
+            log.info(
+                "Tool %s: %.60s → %d chars (%.1fs)",
+                tc.name,
+                json.dumps(tc.args)[:60],
+                len(result_text),
+                tool_elapsed,
+            )
+            results.append((tc, result_text))
+        return results
+
+    def _run_agentic_loop(
+        self,
+        system_prompt: str,
+        conv: list[dict[str, str]],
+        *,
+        max_tokens: int,
+        temperature: float,
+    ) -> Iterator[AgentEvent | StreamChunk]:
+        """Core agentic loop — yields events during reasoning, StreamChunk for the final answer.
+
+        The LLM decides the full workflow via tool calls. Stall detection and
+        dedup prevent infinite loops. A generous hard ceiling is a pure circuit breaker.
+        """
+        self._loop_tool_history.clear()
+        llm_messages: list[dict[str, object]] = [
+            {"role": ChatRole.SYSTEM, "content": system_prompt},
+        ]
+        llm_messages.extend(dict(m) for m in conv)
+        recent_calls: set[tuple[str, str]] = set()
+        completion = ChatResult(text="", input_tokens=0, output_tokens=0, raw={})
+
+        for iteration in range(_HARD_CEILING):
+            yield AgentEvent(type=THINKING, iteration=iteration, detail="Analyzing...")
+            log.debug("Agentic loop step %d", iteration + 1)
+
+            tools = self._prepare_iteration(iteration, llm_messages)
+            try:
+                completion = default_provider.chat_completion(
+                    model=self.model,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    messages=llm_messages,
+                    tools=tools,
+                    tool_choice="auto",
+                    enable_thinking=False,
+                )
+            except RuntimeError as exc:
+                log.error("LLM failed at step %d: %s", iteration, exc)
+                break
+
+            tool_calls = extract_tool_calls(completion.raw)
+            if not tool_calls:
+                log.debug(
+                    "Agentic loop: final response after %d steps (%d chars)",
+                    iteration + 1,
+                    len(completion.text),
+                )
+                clean = _strip_markdown(completion.text)
+                self._last_assistant_msg = clean
+                yield StreamChunk(clean, "")
+                return
+
+            assistant_msg: dict[str, object] = {
+                "role": ChatRole.ASSISTANT,
+                "content": completion.text or "",
+            }
+            raw_tc = _get_raw_tool_calls(completion.raw)
+            if raw_tc:
+                assistant_msg["tool_calls"] = raw_tc
+            llm_messages.append(assistant_msg)
+            calls_to_run = self._dedup_tool_calls(tool_calls, recent_calls)
+            if not calls_to_run:
+                continue
+
+            for tc in calls_to_run:
+                yield AgentEvent(
+                    type=TOOL_CALL,
+                    tool_name=tc.name,
+                    tool_args=json.dumps(tc.args),
+                    iteration=iteration,
+                )
+            for tc, result_text in self._dispatch_tools(calls_to_run, llm_messages):
+                yield AgentEvent(
+                    type=TOOL_RESULT,
+                    tool_name=tc.name,
+                    tool_result_summary=result_text[:200],
+                    iteration=iteration,
+                    sources_count=(
+                        result_text.count("[SOURCE ") if tc.name == ToolName.WEB_SEARCH else 0
+                    ),
+                )
+
+        log.warning("Agentic loop: hard ceiling reached (%d steps)", _HARD_CEILING)
+        clean = _strip_markdown(completion.text)
+        self._last_assistant_msg = clean
+        yield StreamChunk(clean, "")
+
+    def _agentic_loop(
+        self,
+        system_prompt: str,
+        conv: list[dict[str, str]],
+        *,
+        max_tokens: int,
+        temperature: float,
+        on_progress: Callable[[AgentEvent], None],
+    ) -> str:
+        """Non-streaming wrapper: forwards events to on_progress, returns final text."""
+        for item in self._run_agentic_loop(
+            system_prompt, conv, max_tokens=max_tokens, temperature=temperature
+        ):
+            if isinstance(item, AgentEvent):
+                on_progress(item)
+        return self._last_assistant_msg
 
     # --- Identity loading ---
 
@@ -385,7 +611,7 @@ class SonalityAgent:
     # --- Retrieval ---
 
     async def _retrieve(self, user_message: str) -> list[str]:
-        """Full retrieval pipeline: route → search → expand → rerank."""
+        """Full retrieval pipeline: route → category-specific search → expand → rerank."""
         if not self._dual_store.has_episodes:
             return []
 
@@ -394,44 +620,7 @@ class SonalityAgent:
         if decision.category == QueryCategory.NONE:
             return []
 
-        if decision.category == QueryCategory.MULTI_ENTITY:
-            word_count = len(user_message.split())
-            if word_count < config.RETRIEVAL_DECOMPOSE_MIN_WORDS:
-                over_fetch = decision.n_results * config.RETRIEVAL_OVER_FETCH_FACTOR
-                results = await self._dual_store.vector_search(user_message, top_k=over_fetch)
-                episode_uids = list({h.episode_uid for h in results})
-                topic_hits = await self._graph.find_topic_related_episodes(
-                    user_message, limit=max(2, over_fetch // 2)
-                )
-                episodes = topic_hits + await self._graph.get_episodes(episode_uids)
-            else:
-                episodes = await split_retrieve(
-                    self._dual_store, self._graph, user_message, n_per_sub=decision.n_results
-                )
-        elif decision.category in (QueryCategory.TEMPORAL, QueryCategory.AGGREGATION):
-            episodes = await chain_retrieve(
-                self._dual_store, self._graph, user_message, base_n=decision.n_results
-            )
-        elif decision.category == QueryCategory.BELIEF_QUERY:
-            over_fetch = decision.n_results * config.RETRIEVAL_OVER_FETCH_FACTOR
-            belief_hits = await self._graph.find_belief_related_episodes(
-                user_message, limit=over_fetch
-            )
-            topic_hits = await self._graph.find_topic_related_episodes(
-                user_message, limit=max(2, over_fetch // 2)
-            )
-            vector_hits = await self._dual_store.vector_search(user_message, top_k=over_fetch)
-            vector_uids = list({h.episode_uid for h in vector_hits})
-            episodes = belief_hits + topic_hits + await self._graph.get_episodes(vector_uids)
-        else:
-            over_fetch = decision.n_results * config.RETRIEVAL_OVER_FETCH_FACTOR
-            results = await self._dual_store.vector_search(user_message, top_k=over_fetch)
-            episode_uids = list({h.episode_uid for h in results})
-            topic_hits = await self._graph.find_topic_related_episodes(
-                user_message, limit=max(2, over_fetch // 2)
-            )
-            episodes = topic_hits + await self._graph.get_episodes(episode_uids)
-
+        episodes = await self._fetch_episodes_for_category(decision, user_message)
         episodes = list({ep.uid: ep for ep in episodes}.values())
 
         if decision.temporal_expansion is TemporalExpansionDecision.EXPAND and episodes:
@@ -443,8 +632,7 @@ class SonalityAgent:
             if new_uids:
                 episodes.extend(await self._graph.get_episodes(new_uids))
 
-        need_rerank = len(episodes) > 1 and len(episodes) > decision.n_results
-        if need_rerank:
+        if len(episodes) > 1 and len(episodes) > decision.n_results:
             episodes = await asyncio.to_thread(rerank_episodes, user_message, episodes)
 
         selected = episodes[: decision.n_results]
@@ -464,14 +652,41 @@ class SonalityAgent:
             for ep in selected
         ]
         log.info(
-            "Retrieval: category=%s episodes=%d semantic=%d (deduped=%d reranked=%d)",
+            "Retrieval: category=%s episodes=%d semantic=%d",
             decision.category,
             len(selected),
             len(semantic_context),
-            len(episodes),
-            need_rerank,
         )
         return [*episode_context, *semantic_context]
+
+    async def _fetch_episodes_for_category(
+        self, decision: RoutingDecision, user_message: str
+    ) -> list[EpisodeNode]:
+        """Dispatch episode fetching based on query category."""
+        cat = decision.category
+        over_fetch = decision.n_results * config.RETRIEVAL_OVER_FETCH_FACTOR
+
+        if cat in (QueryCategory.TEMPORAL, QueryCategory.AGGREGATION):
+            return await chain_retrieve(
+                self._dual_store, self._graph, user_message, base_n=decision.n_results
+            )
+
+        if cat == QueryCategory.MULTI_ENTITY and decision.should_decompose:
+            return await split_retrieve(
+                self._dual_store, self._graph, user_message, n_per_sub=decision.n_results
+            )
+
+        vector_hits = await self._dual_store.vector_search(user_message, top_k=over_fetch)
+        vector_uids = list({h.episode_uid for h in vector_hits})
+        topic_hits = await self._graph.find_topic_related_episodes(
+            user_message, limit=max(2, over_fetch // 2)
+        )
+        belief_hits = (
+            await self._graph.find_belief_related_episodes(user_message, limit=over_fetch)
+            if cat == QueryCategory.BELIEF_QUERY
+            else []
+        )
+        return belief_hits + topic_hits + await self._graph.get_episodes(vector_uids)
 
     async def _search_semantic_features(self, query: str, *, top_k: int) -> list[str]:
         query_embedding = await asyncio.to_thread(self._embedder.embed_query, query)
@@ -491,16 +706,27 @@ class SonalityAgent:
             if p.payload
         ]
 
-    # --- Post-processing ---
+    # --- Bookkeeping ---
 
-    def _post_process(self, user_message: str, agent_response: str) -> None:
-        """Classify, store episode, extract knowledge, assess provenance, reflect."""
+    def _bookkeep(self, user_message: str, agent_response: str) -> None:
+        """Mechanical bookkeeping after the agent responds.
+
+        ESS classification, episode storage, provenance assessment,
+        semantic feature ingestion, and periodic forgetting.
+        """
         try:
             ess = self._classify_ess(user_message)
         except Exception:
-            log.exception("ESS classification failed")
+            log.exception("ESS classification failed — using fallback")
             ess = classifier_exception_fallback(user_message)
         self.last_ess = ess
+        log.info(
+            "ESS: score=%.2f type=%s update=%s topics=%s",
+            ess.score,
+            ess.reasoning_type,
+            ess.belief_update_recommended,
+            list(ess.topics),
+        )
 
         previous_segment_id = self._boundary_detector.current_segment_id
         segment_id = segment_label = ""
@@ -525,26 +751,30 @@ class SonalityAgent:
                 log.warning("Consolidation failed for segment %s", closed_segment_id, exc_info=True)
 
         if episode_uid:
-            self._extract_knowledge(user_message, agent_response, ess, episode_uid)
             if ess.belief_update_recommended:
                 self._assess_provenance(list(ess.topics), episode_uid, user_message, ess)
-            self._semantic_worker.enqueue(
-                episode_uid,
-                f"User: {user_message}\nAssistant: {agent_response}\n"
-                f"ESS: {ess.score:.2f} ({ess.reasoning_type})",
-            )
 
-        self._reflect(user_message, agent_response, ess, episode_uid)
+            content = (
+                f"User: {user_message}\nAssistant: {agent_response}\n"
+                f"ESS: {ess.score:.2f} ({ess.reasoning_type})"
+                if agent_response
+                else f"Content: {user_message}\nESS: {ess.score:.2f} ({ess.reasoning_type})"
+            )
+            categories = (SemanticCategory.KNOWLEDGE,) if not agent_response else ()
+            self._semantic_worker.enqueue(episode_uid, content, categories)
+
+        ctx = self._make_tool_context([])
+        run_forgetting(ctx)
 
     def _classify_ess(self, user_message: str) -> ESSResult:
-        """Run ESS classification. LLM-only, no code-based overrides."""
-        snapshot = self._run_async(self._graph.get_personality_snapshot())
-        all_beliefs = self._run_async(self._graph.get_all_beliefs())
-        tracked_topics = ", ".join(b.topic for b in all_beliefs[:20]) or "(none yet)"
+        """Run ESS classification using the per-request identity bundle."""
+        bundle = get_request_identity()
+        assert bundle, "Identity bundle must be loaded before ESS classification"
+        tracked = ", ".join(b.topic for b in bundle.all_beliefs[:20]) or "(none yet)"
         return classify(
             user_message=user_message,
-            snapshot_text=snapshot.text,
-            tracked_topics=tracked_topics,
+            snapshot_text=bundle.snapshot_text,
+            tracked_topics=tracked,
             model=self.ess_model,
         )
 
@@ -564,34 +794,21 @@ class SonalityAgent:
                     summary=ess.summary[:300],
                     topics=list(ess.topics),
                     ess_score=ess.score,
+                    reasoning_type=ess.reasoning_type,
                     segment_id=segment_id,
                     segment_label=segment_label,
                 )
             )
+            log.info(
+                "Episode stored: uid=%s segment=%s topics=%s",
+                stored.episode_uid[:8],
+                segment_id[:8] if segment_id else "none",
+                list(ess.topics),
+            )
             return stored.episode_uid
         except Exception:
-            log.exception("Episode storage failed")
+            log.exception("Episode storage failed — continuing without episode")
             return ""
-
-    def _extract_knowledge(
-        self, user_msg: str, agent_resp: str, ess: ESSResult, episode_uid: str
-    ) -> None:
-        if ess.knowledge_density == KnowledgeDensity.NONE:
-            return
-        text = f"User: {user_msg}\nAssistant: {agent_resp}" if agent_resp else user_msg
-        try:
-            stored = self._run_async(
-                extract_and_store_knowledge(
-                    text=text,
-                    episode_uid=episode_uid,
-                    qdrant=self._db.qdrant,
-                    embedder=self._embedder,
-                )
-            )
-            if stored:
-                log.info("Knowledge: stored %d propositions", stored)
-        except Exception:
-            log.exception("Knowledge extraction failed")
 
     def _assess_provenance(
         self,
@@ -624,169 +841,3 @@ class SonalityAgent:
             )
         except Exception:
             log.exception("Provenance assessment failed")
-
-    # --- Two-tier reflection ---
-
-    def _reflect(self, user_msg: str, agent_resp: str, ess: ESSResult, episode_uid: str) -> None:
-        """Tier 1: triage (should we reflect?). Tier 2: deep reflection if yes."""
-        bundle = get_request_identity()
-        if bundle is not None:
-            snapshot_text = bundle.snapshot_text
-            belief_nodes = list(bundle.all_beliefs[:BELIEF_PROMPT_WINDOW])
-        else:
-            snapshot_text = self._run_async(self._graph.get_personality_snapshot()).text
-            belief_nodes = self._run_async(self._graph.get_top_beliefs())
-        beliefs_text = (
-            "\n".join(
-                f"{b.topic}: valence={b.valence:+.2f}, confidence={b.confidence:.2f}"
-                for b in belief_nodes
-            )
-            or "(no beliefs yet)"
-        )
-
-        triage_prompt = REFLECTION_TRIAGE_PROMPT.format(
-            beliefs=beliefs_text,
-            user_message=user_msg[: config.REFLECTION_USER_SLICE],
-            agent_response=(
-                agent_resp[: config.REFLECTION_USER_SLICE]
-                if agent_resp
-                else "(ingest, no response)"
-            ),
-            ess_score=ess.score,
-            reasoning_type=ess.reasoning_type,
-            topics=list(ess.topics),
-        )
-        triage_result = llm_call(
-            prompt=triage_prompt,
-            response_model=_TriageResponse,
-            fallback=_TriageResponse(should_reflect=False, reason="triage failed"),
-            max_tokens=config.STRUCTURED_JSON_MAX_TOKENS,
-            max_retries=1,
-        )
-        if not triage_result.success or not triage_result.value.should_reflect:
-            log.debug(
-                "Reflection triage: skip (%s)",
-                triage_result.value.reason if triage_result.success else "error",
-            )
-            return
-
-        log.info("Reflection triage: YES (%s)", triage_result.value.reason)
-
-        episodes = self._run_async(self._graph.list_recent_episode_context(10))
-        deep_prompt = REFLECTION_DEEP_PROMPT.format(
-            snapshot=snapshot_text,
-            beliefs=beliefs_text,
-            episode_count=len(episodes),
-            episodes="\n".join(episodes) or "(no recent episodes)",
-            user_message=user_msg[: config.REFLECTION_AGENT_SLICE],
-            agent_response=(
-                agent_resp[: config.REFLECTION_AGENT_SLICE]
-                if agent_resp
-                else "(ingest, no response)"
-            ),
-        )
-        deep_result = llm_call(
-            prompt=deep_prompt,
-            response_model=_DeepReflectionResponse,
-            fallback=_DeepReflectionResponse(),
-            max_tokens=config.EXTRACTION_MAX_TOKENS,
-            max_retries=1,
-        )
-        if not deep_result.success:
-            log.warning("Deep reflection failed: %s", deep_result.error)
-            return
-
-        reflection = deep_result.value
-        log.info(
-            "Reflection deep: updates=%d new_beliefs=%d snapshot_changed=%s",
-            len(reflection.belief_updates),
-            len(reflection.new_beliefs),
-            reflection.snapshot_changed,
-        )
-        self._apply_reflection(reflection, episode_uid)
-
-    def _apply_reflection(self, reflection: _DeepReflectionResponse, episode_uid: str) -> None:
-        """Write belief updates and snapshot revision to graph."""
-        all_updates = [
-            *((b, f"reflection:{episode_uid[:8]}") for b in reflection.belief_updates),
-            *((b, f"new_belief:{episode_uid[:8]}") for b in reflection.new_beliefs),
-        ]
-        for patch, provenance in all_updates:
-            if not patch.topic:
-                continue
-            try:
-                self._run_async(
-                    self._graph.upsert_belief(
-                        patch.topic,
-                        valence=patch.valence,
-                        confidence=patch.confidence,
-                        belief_text=patch.belief_text,
-                        provenance=provenance,
-                    )
-                )
-                log.info(
-                    "Belief %s: %s val=%+.2f conf=%.2f reason=%.100s",
-                    provenance.split(":")[0],
-                    patch.topic,
-                    patch.valence,
-                    patch.confidence,
-                    patch.reasoning,
-                )
-            except Exception:
-                log.exception("Failed to upsert belief: %s", patch.topic)
-
-        if reflection.snapshot_changed and reflection.snapshot_revision:
-            text = reflection.snapshot_revision[:2000]
-            try:
-                self._run_async(self._graph.upsert_personality_snapshot(text))
-                log.info("Personality snapshot updated (%d chars)", len(text))
-            except Exception:
-                log.exception("Failed to update personality snapshot")
-
-        try:
-            candidates = self._run_async(
-                self._graph.get_forgetting_candidates(limit=config.FORGETTING_CANDIDATE_LIMIT)
-            )
-            if candidates:
-                snapshot = self._run_async(self._graph.get_personality_snapshot())
-                self._run_async(
-                    assess_and_forget(
-                        candidates,
-                        self._graph,
-                        self._dual_store,
-                        snapshot_excerpt=snapshot.text[:500],
-                    )
-                )
-        except Exception:
-            log.warning("Forgetting cycle skipped", exc_info=True)
-
-    # --- Helpers ---
-
-    @staticmethod
-    def _last_user_message(messages: list[dict[str, str]]) -> str:
-        for msg in reversed(messages):
-            if msg.get("role") == ChatRole.USER:
-                return msg.get("content", "")
-        return ""
-
-
-class _TriageResponse(BaseModel):
-    should_reflect: bool = False
-    reason: str = ""
-
-
-class _BeliefPatch(BaseModel):
-    """Single belief create/update from LLM reflection."""
-
-    topic: str = ""
-    valence: float = 0.0
-    confidence: float = 0.5
-    belief_text: str = ""
-    reasoning: str = ""
-
-
-class _DeepReflectionResponse(BaseModel):
-    belief_updates: list[_BeliefPatch] = Field(default_factory=list)
-    new_beliefs: list[_BeliefPatch] = Field(default_factory=list)
-    snapshot_revision: str = ""
-    snapshot_changed: bool = False
