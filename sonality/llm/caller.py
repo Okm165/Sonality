@@ -64,16 +64,37 @@ def _raw_call(
     messages.append({"role": ChatRole.USER, "content": prompt})
     if assistant_prefix:
         messages.append({"role": ChatRole.ASSISTANT, "content": assistant_prefix})
+    log.debug(
+        "_raw_call: model=%s prompt=%d chars max_tokens=%d prefix=%d chars",
+        model,
+        len(prompt),
+        max_tokens,
+        len(assistant_prefix),
+    )
     completion = default_provider.chat_completion(
         model=model,
         messages=tuple(messages),
         max_tokens=max_tokens,
-        # Prefilled assistant turns are incompatible with enable_thinking on most servers.
-        # Thinking mode also hurts JSON tasks: the model reasons in the thinking trace then
-        # fails to produce valid JSON in content. Disable it for all structured llm_call uses.
         enable_thinking=False,
     )
-    return (assistant_prefix + completion.text) if assistant_prefix else completion.text
+    result = (assistant_prefix + completion.text) if assistant_prefix else completion.text
+    log.debug(
+        "_raw_call: response=%d chars, in=%d out=%d tokens",
+        len(result),
+        completion.input_tokens,
+        completion.output_tokens,
+    )
+    return result
+
+
+def llm_call_text(
+    prompt: str,
+    *,
+    max_tokens: int = 256,
+    model: str = config.FAST_LLM_MODEL,
+) -> str:
+    """Simple LLM call that returns plain text (no JSON parsing)."""
+    return _raw_call(prompt=prompt, model=model, max_tokens=max_tokens)
 
 
 def llm_call[T: BaseModel](
