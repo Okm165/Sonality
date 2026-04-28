@@ -6,12 +6,41 @@ import json
 import logging
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from typing import Final
 
 import httpx
 
 from . import config
 
 log = logging.getLogger(__name__)
+
+# Shared tool labels for UX display (no emojis)
+TOOL_LABELS: Final[dict[str, str]] = {
+    "recall_memory": "Recalling",
+    "web_search": "Searching web",
+    "web_extract": "Reading page",
+    "store_knowledge": "Storing",
+    "reflect": "Reflecting",
+    "assess_evidence": "Assessing",
+    "consolidate": "Consolidating",
+}
+
+
+def pipeline_summary(tool_names: list[str]) -> str:
+    """Build compact pipeline: recall > search x3 > reflect."""
+    if not tool_names:
+        return ""
+    parts: list[str] = []
+    i = 0
+    while i < len(tool_names):
+        name = tool_names[i]
+        count = 1
+        while i + count < len(tool_names) and tool_names[i + count] == name:
+            count += 1
+        short = TOOL_LABELS.get(name, name.replace("_", " "))
+        parts.append(f"{short} x{count}" if count > 1 else short)
+        i += count
+    return " > ".join(parts)
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,6 +54,8 @@ class ChatResponse:
 class HealthStatus:
     belief_count: int
     snapshot_version: int
+    uptime_seconds: float = 0.0
+    version: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,6 +64,19 @@ class Belief:
     valence: float
     confidence: float
     belief_text: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class ProgressEvent:
+    """Agent progress event parsed from SSE."""
+
+    type: str
+    detail: str = ""
+    tool_name: str = ""
+    tool_args: str = ""
+    tool_result_summary: str = ""
+    iteration: int = 0
+    sources_count: int = 0
 
 
 class SonalityClient:
@@ -55,13 +99,14 @@ class SonalityClient:
         return HealthStatus(
             belief_count=d.get("belief_count", 0),
             snapshot_version=d.get("snapshot_version", 0),
+            uptime_seconds=float(d.get("uptime_seconds", 0)),
+            version=d.get("version", ""),
         )
 
     async def beliefs(self) -> list[Belief]:
+        """Fetch all beliefs from the API. Server returns a JSON list."""
         r = await self._client.get("/beliefs")
         r.raise_for_status()
-        data = r.json()
-        items = data if isinstance(data, list) else data.get("beliefs", [])
         return [
             Belief(
                 topic=b.get("topic", ""),
@@ -69,7 +114,7 @@ class SonalityClient:
                 confidence=float(b.get("confidence", 0)),
                 belief_text=b.get("belief_text", ""),
             )
-            for b in items
+            for b in r.json()
         ]
 
     async def chat(self, message: str) -> ChatResponse:
@@ -93,10 +138,16 @@ class SonalityClient:
             topics=tuple(d.get("topics", [])),
         )
 
-    async def chat_stream(self, message: str) -> AsyncIterator[str]:
-        """Stream chat response with full history via SSE."""
+    async def chat_stream(self, message: str) -> AsyncIterator[str | ProgressEvent]:
+        """Stream chat response with full history via SSE.
+
+        Yields str for content deltas and ProgressEvent for agent progress.
+        """
         self._history.append({"role": "user", "content": message})
         self._trim_history()
+        log.debug(
+            "chat_stream: sending %d messages (latest=%d chars)", len(self._history), len(message)
+        )
         chunks: list[str] = []
         try:
             async with self._client.stream(
@@ -109,20 +160,46 @@ class SonalityClient:
                 },
             ) as r:
                 r.raise_for_status()
+                event_type = ""
                 async for line in r.aiter_lines():
-                    if not line or line == "data: [DONE]" or not line.startswith("data: "):
+                    if not line:
+                        event_type = ""
+                        continue
+                    if line.startswith("event: "):
+                        event_type = line[7:].strip()
+                        continue
+                    if line == "data: [DONE]":
+                        continue
+                    if not line.startswith("data: "):
                         continue
                     try:
-                        chunk = json.loads(line[6:])
-                        if content := chunk.get("choices", [{}])[0].get("delta", {}).get("content"):
-                            chunks.append(content)
-                            yield content
-                    except (json.JSONDecodeError, IndexError):
+                        data = json.loads(line[6:])
+                    except json.JSONDecodeError:
                         continue
+
+                    if event_type and event_type not in ("", "message"):
+                        yield ProgressEvent(
+                            type=event_type,
+                            detail=data.get("detail", ""),
+                            tool_name=data.get("tool_name", ""),
+                            tool_args=data.get("tool_args", ""),
+                            tool_result_summary=data.get("tool_result_summary", ""),
+                            iteration=data.get("iteration", 0),
+                            sources_count=data.get("sources_count", 0),
+                        )
+                        event_type = ""
+                        continue
+
+                    if content := data.get("choices", [{}])[0].get("delta", {}).get("content"):
+                        chunks.append(content)
+                        yield content
+                    event_type = ""
         except Exception:
             self._history.pop()
             raise
-        self._history.append({"role": "assistant", "content": "".join(chunks)})
+        full_response = "".join(chunks)
+        log.debug("chat_stream: received %d chars in %d chunks", len(full_response), len(chunks))
+        self._history.append({"role": "assistant", "content": full_response})
 
     def _trim_history(self) -> None:
         while len(self._history) > self._max_history:
