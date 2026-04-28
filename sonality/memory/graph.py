@@ -685,9 +685,7 @@ class MemoryGraph:
     async def get_all_beliefs(self) -> list[BeliefNode]:
         """Fetch all beliefs."""
         async with self._driver.session(database=_DB) as session:
-            result = await session.run(
-                "MATCH (b:Belief) RETURN b ORDER BY abs(b.valence) DESC"
-            )
+            result = await session.run("MATCH (b:Belief) RETURN b ORDER BY abs(b.valence) DESC")
             return [_record_to_belief(r["b"]) async for r in result]
 
     async def get_last_episode_uid(self) -> str:

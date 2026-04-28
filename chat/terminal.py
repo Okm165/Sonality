@@ -16,7 +16,7 @@ from rich.table import Table
 from rich.text import Text
 
 from . import config
-from .client import Belief, ProgressEvent, SonalityClient, TOOL_LABELS, pipeline_summary
+from .client import TOOL_LABELS, Belief, ProgressEvent, SonalityClient, pipeline_summary
 
 log = logging.getLogger(__name__)
 
@@ -190,9 +190,8 @@ async def _chat_loop(client: SonalityClient) -> None:
                     snap.append(f" | {h.version}", style="dim")
                 if beliefs:
                     top = ", ".join(
-                        b.topic for b in sorted(
-                            beliefs, key=lambda b: b.confidence, reverse=True
-                        )[:5]
+                        b.topic
+                        for b in sorted(beliefs, key=lambda b: b.confidence, reverse=True)[:5]
                     )
                     snap.append(f"\nTop: {top}", style="cyan")
                 console.print(Panel(snap, title="Personality Snapshot", border_style="magenta"))
@@ -203,7 +202,9 @@ async def _chat_loop(client: SonalityClient) -> None:
         if cmd == "/health":
             try:
                 h = await client.health()
-                console.print(f"[green]Healthy[/green] v{h.snapshot_version} | {h.belief_count} beliefs")
+                console.print(
+                    f"[green]Healthy[/green] v{h.snapshot_version} | {h.belief_count} beliefs"
+                )
             except Exception as e:
                 console.print(f"[red]Error: {e}[/red]")
             continue
@@ -307,9 +308,7 @@ async def _main() -> None:
                 banner.append(f" | {h.version}", style="dim")
             if beliefs:
                 top = ", ".join(
-                    b.topic for b in sorted(
-                        beliefs, key=lambda b: b.confidence, reverse=True
-                    )[:4]
+                    b.topic for b in sorted(beliefs, key=lambda b: b.confidence, reverse=True)[:4]
                 )
                 banner.append(f"\n{top}", style="cyan")
             console.print(Panel(banner, border_style="blue", padding=(0, 2)))

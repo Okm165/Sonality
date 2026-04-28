@@ -346,16 +346,20 @@ class SonalityAgent:
             self._bookkeep(user_message, assistant_msg)
             elapsed = time.perf_counter() - _t0
             ess = self.last_ess
-            on_progress(AgentEvent(
-                type=DONE,
-                detail=json.dumps({
-                    "tool_count": len(self._loop_tool_history),
-                    "elapsed": round(elapsed, 1),
-                    "ess_score": round(ess.score, 2),
-                    "reasoning_type": ess.reasoning_type,
-                    "topics": list(ess.topics),
-                }),
-            ))
+            on_progress(
+                AgentEvent(
+                    type=DONE,
+                    detail=json.dumps(
+                        {
+                            "tool_count": len(self._loop_tool_history),
+                            "elapsed": round(elapsed, 1),
+                            "ess_score": round(ess.score, 2),
+                            "reasoning_type": ess.reasoning_type,
+                            "topics": list(ess.topics),
+                        }
+                    ),
+                )
+            )
             log.info("Total: %.1fs", elapsed)
             return assistant_msg
         finally:
@@ -397,13 +401,15 @@ class SonalityAgent:
             ess = self.last_ess
             yield AgentEvent(
                 type=DONE,
-                detail=json.dumps({
-                    "tool_count": len(self._loop_tool_history),
-                    "elapsed": round(elapsed, 1),
-                    "ess_score": round(ess.score, 2),
-                    "reasoning_type": ess.reasoning_type,
-                    "topics": list(ess.topics),
-                }),
+                detail=json.dumps(
+                    {
+                        "tool_count": len(self._loop_tool_history),
+                        "elapsed": round(elapsed, 1),
+                        "ess_score": round(ess.score, 2),
+                        "reasoning_type": ess.reasoning_type,
+                        "topics": list(ess.topics),
+                    }
+                ),
             )
             log.info("Stream total: %.1fs", elapsed)
         finally:
@@ -436,9 +442,7 @@ class SonalityAgent:
         llm_messages: list[dict[str, object]],
     ) -> list[dict[str, object]]:
         """Per-iteration setup: cognitive state injection and tool definitions."""
-        llm_messages.append(
-            {"role": ChatRole.USER, "content": self._build_loop_status(iteration)}
-        )
+        llm_messages.append({"role": ChatRole.USER, "content": self._build_loop_status(iteration)})
         return get_definitions()
 
     # --- Agentic tool-calling loop ---

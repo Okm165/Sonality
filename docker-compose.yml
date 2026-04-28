@@ -256,6 +256,7 @@ services:
       POSTGRES_USER: firecrawl
       POSTGRES_PASSWORD: firecrawl
       POSTGRES_DB: firecrawl
+    command: postgres -c cron.database_name=firecrawl
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U firecrawl -d firecrawl"]
       interval: 5s

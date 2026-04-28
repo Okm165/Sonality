@@ -18,7 +18,7 @@ from aiogram.types import BufferedInputFile, Message
 
 from . import config
 from .audio import AudioProcessor, chunk_text, mp3_to_ogg_opus, optimize_for_speech
-from .client import ProgressEvent, SonalityClient, TOOL_LABELS, pipeline_summary
+from .client import TOOL_LABELS, ProgressEvent, SonalityClient, pipeline_summary
 
 log = logging.getLogger(__name__)
 router = Router()
@@ -122,8 +122,7 @@ async def cmd_start(msg: Message, pool: ClientPool) -> None:
         status = f"v{h.snapshot_version} | {h.belief_count} beliefs"
         if beliefs:
             top = ", ".join(
-                b.topic
-                for b in sorted(beliefs, key=lambda b: b.confidence, reverse=True)[:3]
+                b.topic for b in sorted(beliefs, key=lambda b: b.confidence, reverse=True)[:3]
             )
             status += f"\nTop: {top}"
     except Exception:
@@ -183,17 +182,14 @@ async def cmd_snapshot(msg: Message, pool: ClientPool) -> None:
         top_topics = ""
         if beliefs:
             top = ", ".join(
-                b.topic
-                for b in sorted(beliefs, key=lambda b: b.confidence, reverse=True)[:5]
+                b.topic for b in sorted(beliefs, key=lambda b: b.confidence, reverse=True)[:5]
             )
             top_topics = f"\nTop beliefs: {top}"
         await msg.answer(
             f"<b>Personality Snapshot</b>\n\n"
             f"Version: {h.snapshot_version}\n"
             f"Beliefs: {h.belief_count}\n"
-            f"Uptime: {uptime_min}m"
-            + (f"\nBuild: {h.version}" if h.version else "")
-            + top_topics,
+            f"Uptime: {uptime_min}m" + (f"\nBuild: {h.version}" if h.version else "") + top_topics,
             parse_mode="HTML",
         )
     except Exception as e:
@@ -302,9 +298,7 @@ async def handle_text(msg: Message, bot: Bot, pool: ClientPool, audio: AudioProc
                     if item.tool_args:
                         try:
                             parsed = json.loads(item.tool_args)
-                            args_summary = parsed.get(
-                                "query", parsed.get("url", "")
-                            )[:50]
+                            args_summary = parsed.get("query", parsed.get("url", ""))[:50]
                         except json.JSONDecodeError:
                             args_summary = item.tool_args[:50]
                     if item.tool_name:
@@ -339,9 +333,7 @@ async def handle_text(msg: Message, bot: Bot, pool: ClientPool, audio: AudioProc
                 if use_draft:
                     try:
                         if not draft_started and status_msg and completed_steps:
-                            summary = " | ".join(
-                                f"[done] {s}" for s in completed_steps[-3:]
-                            )
+                            summary = " | ".join(f"[done] {s}" for s in completed_steps[-3:])
                             with contextlib.suppress(Exception):
                                 await status_msg.edit_text(summary)
                             draft_started = True
@@ -351,18 +343,14 @@ async def handle_text(msg: Message, bot: Bot, pool: ClientPool, audio: AudioProc
                             text=accumulated_text + " |",
                         )
                     except Exception:
-                        log.info(
-                            "sendMessageDraft unavailable, falling back to editMessageText"
-                        )
+                        log.info("sendMessageDraft unavailable, falling back to editMessageText")
                         use_draft = False
 
                 if not use_draft and accumulated_text:
                     display = accumulated_text + " |"
                     if not draft_started:
                         if status_msg and completed_steps:
-                            summary = " | ".join(
-                                f"[done] {s}" for s in completed_steps[-3:]
-                            )
+                            summary = " | ".join(f"[done] {s}" for s in completed_steps[-3:])
                             with contextlib.suppress(Exception):
                                 await status_msg.edit_text(summary)
                         draft_started = True
@@ -490,7 +478,7 @@ async def _main() -> None:
         try:
             polling_task = asyncio.create_task(dp.start_polling(bot))
             shutdown_task = asyncio.create_task(shutdown_event.wait())
-            done, pending = await asyncio.wait(
+            _done, pending = await asyncio.wait(
                 [polling_task, shutdown_task], return_when=asyncio.FIRST_COMPLETED
             )
             for task in pending:

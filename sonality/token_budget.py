@@ -155,7 +155,8 @@ def _llm_summarize_messages(messages: list[dict[str, str]], previous_summary: st
     from .prompts import CONVERSATION_SUMMARY_PROMPT
 
     formatted = "\n".join(
-        f"{m.get('role', ChatRole.USER).capitalize()}: {m.get('content', '')[:300]}" for m in messages
+        f"{m.get('role', ChatRole.USER).capitalize()}: {m.get('content', '')[:300]}"
+        for m in messages
     )
     prev_section = (
         f"Previous summary to update:\n{previous_summary}"
