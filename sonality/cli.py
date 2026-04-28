@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import signal
 import sys
 from collections.abc import Callable
 
@@ -78,6 +79,16 @@ def main() -> None:
         sys.exit(1)
 
     agent = SonalityAgent(model=args.model, ess_model=args.ess_model)
+    shutdown_requested = False
+
+    def signal_handler(signum: int, frame: object) -> None:
+        nonlocal shutdown_requested
+        shutdown_requested = True
+        print("\nShutdown signal received...")
+
+    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, signal_handler)
+
     print(
         BANNER.format(
             version=__version__,
@@ -89,50 +100,55 @@ def main() -> None:
 
     conversation: list[dict[str, str]] = []
 
-    while True:
-        try:
-            user_input = input("\nYou: ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print("\nGoodbye.")
-            break
+    try:
+        while not shutdown_requested:
+            try:
+                user_input = input("\nYou: ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print("\nGoodbye.")
+                break
 
-        if not user_input:
-            continue
+            if not user_input:
+                continue
 
-        command = user_input.lower()
-        if command == "/quit":
-            print("Goodbye.")
-            break
-        if command == "/clear":
-            conversation.clear()
-            print("  Conversation cleared.")
-            continue
-        if command.startswith("/"):
-            handler = COMMAND_HANDLERS.get(command)
-            if handler is None:
-                print(f"  Unknown command: {command}")
-            else:
-                handler(agent)
-            continue
+            command = user_input.lower()
+            if command == "/quit":
+                print("Goodbye.")
+                break
+            if command == "/clear":
+                conversation.clear()
+                print("  Conversation cleared.")
+                continue
+            if command.startswith("/"):
+                handler = COMMAND_HANDLERS.get(command)
+                if handler is None:
+                    print(f"  Unknown command: {command}")
+                else:
+                    handler(agent)
+                continue
 
-        conversation.append({"role": ChatRole.USER, "content": user_input})
+            conversation.append({"role": ChatRole.USER, "content": user_input})
 
-        print()
-        try:
-            response = agent.respond(list(conversation))
-        except Exception as exc:
-            log.exception("REPL respond failed")
-            print(f"\033[31mError: {exc}\033[0m")
-            continue
+            print()
+            try:
+                response = agent.respond(list(conversation))
+            except Exception as exc:
+                log.exception("REPL respond failed")
+                print(f"\033[31mError: {exc}\033[0m")
+                continue
 
-        conversation.append({"role": ChatRole.ASSISTANT, "content": response})
-        print(f"Sonality: {response}")
+            conversation.append({"role": ChatRole.ASSISTANT, "content": response})
+            print(f"Sonality: {response}")
 
-        ess = agent.last_ess
-        parts = [f"ESS {ess.score:.2f}"]
-        if ess.topics:
-            parts.append(", ".join(ess.topics))
-        print(f"  [{' | '.join(parts)}]")
+            ess = agent.last_ess
+            parts = [f"ESS {ess.score:.2f}"]
+            if ess.topics:
+                parts.append(", ".join(ess.topics))
+            print(f"  [{' | '.join(parts)}]")
+    finally:
+        log.info("Shutting down agent...")
+        agent.shutdown()
+        log.info("Agent shutdown complete")
 
 
 if __name__ == "__main__":

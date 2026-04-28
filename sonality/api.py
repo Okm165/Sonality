@@ -14,7 +14,6 @@ import time
 import uuid
 from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import asynccontextmanager
-from contextvars import ContextVar
 from functools import partial
 from typing import Final
 
@@ -22,18 +21,19 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Field
-from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
+from starlette.responses import Response
 
 from . import __version__, config
 from .agent import SonalityAgent
 from .ess import ReasoningType, UrgencyLevel
 from .memory.graph import BeliefNode
+from .progress import AgentEvent
+from .provider import StreamChunk
 from .schema import ChatRole
+from .token_budget import estimate_tokens_utf8
 
 MODEL_ID: Final = "sonality"
-
-# Request ID for distributed tracing and debugging
-_request_id_ctx: ContextVar[str] = ContextVar("request_id", default="")
 
 log = logging.getLogger(__name__)
 
@@ -41,24 +41,17 @@ _agent_store: dict[str, SonalityAgent] = {}
 _agent_lock: asyncio.Lock | None = None
 _startup_time: float = 0.0
 
-# Optional API key authentication
 _api_key_header = APIKeyHeader(name="Authorization", auto_error=False)
 
 
 class RequestIDMiddleware(BaseHTTPMiddleware):
-    """Add request ID to each request for tracing."""
+    """Attach X-Request-ID header to every response for tracing."""
 
-    async def dispatch(self, request: Request, call_next):  # type: ignore[no-untyped-def]
+    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
         request_id = request.headers.get("X-Request-ID") or uuid.uuid4().hex[:16]
-        _request_id_ctx.set(request_id)
         response = await call_next(request)
         response.headers["X-Request-ID"] = request_id
         return response
-
-
-def get_request_id() -> str:
-    """Get current request ID for logging context."""
-    return _request_id_ctx.get()
 
 
 async def verify_api_key(request: Request, api_key: str | None = Depends(_api_key_header)) -> None:
@@ -183,6 +176,9 @@ async def chat_completions(
         def sse_chunk(delta: dict[str, str], finish: str | None = None) -> str:
             return f"data: {json.dumps({'id': chunk_id, 'object': 'chat.completion.chunk', 'created': created, 'model': MODEL_ID, 'choices': [{'index': 0, 'delta': delta, 'finish_reason': finish}]})}\n\n"
 
+        def sse_event(event_type: str, data: dict[str, object]) -> str:
+            return f"event: {event_type}\ndata: {json.dumps(data)}\n\n"
+
         async def generate() -> AsyncIterator[str]:
             async with _get_lock():
                 loop = asyncio.get_event_loop()
@@ -195,14 +191,28 @@ async def chat_completions(
                         temperature=request.temperature,
                     ),
                 )
-                for content, reasoning in stream_iter:
-                    delta = {
-                        k: v
-                        for k, v in [("content", content), ("reasoning_content", reasoning)]
-                        if v
-                    }
-                    if delta:
-                        yield sse_chunk(delta)
+                for item in stream_iter:
+                    if isinstance(item, AgentEvent):
+                        yield sse_event(
+                            item.type,
+                            {
+                                "detail": item.detail,
+                                "tool_name": item.tool_name,
+                                "tool_args": item.tool_args,
+                                "tool_result_summary": item.tool_result_summary,
+                                "iteration": item.iteration,
+                                "sources_count": item.sources_count,
+                            },
+                        )
+                    elif isinstance(item, StreamChunk):
+                        content, reasoning = item
+                        delta = {
+                            k: v
+                            for k, v in [("content", content), ("reasoning_content", reasoning)]
+                            if v
+                        }
+                        if delta:
+                            yield sse_chunk(delta)
             yield sse_chunk({}, "stop")
             yield "data: [DONE]\n\n"
 
@@ -218,8 +228,8 @@ async def chat_completions(
             )
         )
 
-    prompt_tokens = sum(len(m.content.split()) for m in request.messages) * 4 // 3
-    completion_tokens = len(response_text.split()) * 4 // 3
+    prompt_tokens = sum(estimate_tokens_utf8(m.content) for m in request.messages)
+    completion_tokens = estimate_tokens_utf8(response_text)
 
     return ChatCompletionResponse(
         id=f"chatcmpl-{uuid.uuid4().hex[:24]}",
@@ -388,6 +398,7 @@ def serve() -> None:
     """CLI entry point: ``sonality-server``."""
     import argparse
     import os
+    import signal
 
     import uvicorn
 
@@ -402,6 +413,16 @@ def serve() -> None:
         level=getattr(logging, log_level.upper()),
         format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
     )
+
+    shutdown_event = asyncio.Event()
+
+    def handle_signal(signum: int, frame: object) -> None:
+        log.info("Received signal %d, initiating shutdown...", signum)
+        shutdown_event.set()
+
+    signal.signal(signal.SIGTERM, handle_signal)
+    signal.signal(signal.SIGINT, handle_signal)
+
     uvicorn.run(
         "sonality.api:app",
         host=args.host,
