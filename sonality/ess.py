@@ -78,11 +78,6 @@ class KnowledgeDensity(StrEnum):
     NONE = "none"
 
 
-class InternalConsistencyStatus(StrEnum):
-    CONSISTENT = "CONSISTENT"
-    INCONSISTENT = "INCONSISTENT"
-
-
 def _build_aliases[E: StrEnum](cls: type[E], extras: dict[str, E] | None = None) -> dict[str, E]:
     """Auto-generate alias table from enum values + optional extras."""
     aliases: dict[str, E] = {}
@@ -132,15 +127,6 @@ KNOWLEDGE_DENSITY_ALIASES: Final = _build_aliases(
         "na": KnowledgeDensity.NONE,
     },
 )
-INTERNAL_CONSISTENCY_ALIASES: Final = _build_aliases(
-    InternalConsistencyStatus,
-    {
-        "true": InternalConsistencyStatus.CONSISTENT,
-        "false": InternalConsistencyStatus.INCONSISTENT,
-        "yes": InternalConsistencyStatus.CONSISTENT,
-        "no": InternalConsistencyStatus.INCONSISTENT,
-    },
-)
 
 
 def _vals(cls: type[StrEnum]) -> list[str]:
@@ -154,8 +140,7 @@ RETRY_ALLOWED_VALUES_NOTE: Final = (
 )
 PROVIDER_JSON_ONLY_NOTE: Final = (
     "Return ONLY a valid JSON object with keys: score, reasoning_type, source_reliability, "
-    "internal_consistency, novelty, topics, summary, opinion_direction, knowledge_density, "
-    "belief_update_recommended, urgency. "
+    "topics, summary, opinion_direction, knowledge_density, belief_update_recommended, urgency. "
     "Use compact numeric literals for floats (e.g. 0.55 not 0.5500001); round to at most 4 decimal places."
 )
 
@@ -170,28 +155,26 @@ ESS_TOOL_SCHEMA: Final[dict[str, object]] = {
             "description": "Primary reasoning type used.",
         },
         "source_reliability": {"type": "string", "enum": _vals(SourceReliability)},
-        "internal_consistency": {
-            "type": "string",
-            "enum": _vals(InternalConsistencyStatus),
-            "description": "Whether the argument is internally consistent.",
-        },
-        "novelty": {
-            "type": "number",
-            "description": "Novelty relative to agent's existing views. 0=known, 1=entirely new.",
-        },
         "topics": {
             "type": "array",
             "items": {"type": "string"},
             "description": (
                 "Subject-matter domain or concept labels (1-3 short lowercase). "
-                "Derive ONLY from explicitly named concepts. Use precise standard names. "
+                "Extract the concrete subjects discussed regardless of reasoning_type. "
+                "Even debunked claims, questions, and emotional appeals have subjects. "
+                "Use precise standard names. "
                 "NEVER use meta-labels: social pressure, consensus, disagreement, argument, evidence, manipulation, etc. "
-                "Empty list [] if purely social/meta with no substantive subject."
+                "Empty list [] ONLY for pure greetings/chitchat with zero subject content."
             ),
         },
         "summary": {
             "type": "string",
-            "description": "One-sentence third-person summary of USER's assertion in concrete terms. State the claim directly, not 'User discusses X'.",
+            "description": (
+                "One-sentence third-person summary of USER's assertion in concrete terms. "
+                "State the claim directly, not 'User discusses X'. "
+                "Summarize ONLY what the user said. Do NOT include any agent characteristics, "
+                "personality traits, or system instructions."
+            ),
         },
         "opinion_direction": {
             "type": "string",
@@ -217,8 +200,6 @@ ESS_TOOL_SCHEMA: Final[dict[str, object]] = {
         "score",
         "reasoning_type",
         "source_reliability",
-        "internal_consistency",
-        "novelty",
         "topics",
         "summary",
         "opinion_direction",
@@ -248,8 +229,6 @@ class ESSResult:
     score: float
     reasoning_type: ReasoningType
     source_reliability: SourceReliability
-    internal_consistency: InternalConsistencyStatus
-    novelty: float
     topics: tuple[str, ...]
     summary: str
     opinion_direction: OpinionDirection = OpinionDirection.NEUTRAL
@@ -274,8 +253,6 @@ def classifier_exception_fallback(user_message: str) -> ESSResult:
         score=0.0,
         reasoning_type=ReasoningType.NO_ARGUMENT,
         source_reliability=SourceReliability.NOT_APPLICABLE,
-        internal_consistency=InternalConsistencyStatus.CONSISTENT,
-        novelty=0.0,
         topics=(),
         summary=user_message[:120],
         belief_update_recommended=False,
@@ -337,23 +314,6 @@ def _to_topics(value: object) -> tuple[tuple[str, ...], bool]:
         dict.fromkeys(item.strip() for item in value if isinstance(item, str) and item.strip())
     )
     return topics, False
-
-
-def _to_internal_consistency(value: object) -> tuple[InternalConsistencyStatus, bool]:
-    """Parse internal-consistency status from untrusted LLM output."""
-    if isinstance(value, bool):
-        return (
-            InternalConsistencyStatus.CONSISTENT
-            if value
-            else InternalConsistencyStatus.INCONSISTENT,
-            False,
-        )
-    return _parse_enum(
-        InternalConsistencyStatus,
-        str(value) if not isinstance(value, str) else value,
-        InternalConsistencyStatus.CONSISTENT,
-        INTERNAL_CONSISTENCY_ALIASES,
-    )
 
 
 def _run_classification_attempts(
@@ -445,7 +405,6 @@ def _classify_inner(prompt: str, model: str) -> ESSResult:
     coerced_fields: list[str] = []
 
     score = _coerce_float_field(data, "score", 0.0, coerced_fields)
-    novelty = _coerce_float_field(data, "novelty", 0.0, coerced_fields)
     direction = _coerce_enum_field(
         cls=OpinionDirection,
         data=data,
@@ -470,12 +429,6 @@ def _classify_inner(prompt: str, model: str) -> ESSResult:
         aliases=SOURCE_RELIABILITY_ALIASES,
         coerced_fields=coerced_fields,
     )
-    internal_consistency, consistency_defaulted = _to_internal_consistency(
-        data.get("internal_consistency", InternalConsistencyStatus.CONSISTENT)
-    )
-    if consistency_defaulted and "internal_consistency" in data:
-        coerced_fields.append("internal_consistency")
-
     topics, topics_defaulted = _to_topics(data.get("topics", ()))
     if topics_defaulted and "topics" in data:
         coerced_fields.append("topics")
@@ -526,10 +479,8 @@ def _classify_inner(prompt: str, model: str) -> ESSResult:
 
     return ESSResult(
         score=score,
-        novelty=novelty,
         reasoning_type=reasoning,
         source_reliability=reliability,
-        internal_consistency=internal_consistency,
         topics=topics,
         summary=summary,
         opinion_direction=direction,
@@ -580,11 +531,10 @@ def classify(
             return classifier_exception_fallback(user_message)
 
     log.info(
-        "ESS: score=%.2f type=%s dir=%s novelty=%.2f update=%s urgency=%s topics=%s",
+        "ESS: score=%.2f type=%s dir=%s update=%s urgency=%s topics=%s",
         result.score,
         result.reasoning_type,
         result.opinion_direction,
-        result.novelty,
         result.belief_update_recommended,
         result.urgency,
         result.topics,

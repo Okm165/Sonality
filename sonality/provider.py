@@ -1,34 +1,37 @@
 from __future__ import annotations
 
 import contextlib
-import http.client
 import json
 import logging
 import re
-import ssl
 import threading
 import time
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from typing import NamedTuple
+from typing import Final, NamedTuple
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 from . import config
 
 log = logging.getLogger(__name__)
 
-_RETRYABLE_HTTP_STATUSES = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
-_EMPTY_MAPPING: dict[str, object] = {}
-_THINKING_ANSWER_MARKERS = ("Final Output:", "Output:", "Answer:", "Final Answer:", "Response:")
-_THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.IGNORECASE | re.DOTALL)
-_THINK_CODE_BLOCK_RE = re.compile(r"```(?:thinking|thought|reasoning)[\s\S]*?```", re.IGNORECASE)
+_RETRYABLE_HTTP_STATUSES: Final = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
+_EMPTY_MAPPING: Final[Mapping[str, object]] = {}
+_THINKING_ANSWER_MARKERS: Final = (
+    "Final Output:",
+    "Output:",
+    "Answer:",
+    "Final Answer:",
+    "Response:",
+)
+_THINK_BLOCK_RE: Final = re.compile(r"<think>.*?</think>", re.IGNORECASE | re.DOTALL)
+_THINK_CODE_BLOCK_RE: Final = re.compile(
+    r"```(?:thinking|thought|reasoning)[\s\S]*?```", re.IGNORECASE
+)
 # Qwen 3 sometimes outputs asterisk-prefixed reasoning without <think> tags
-# Matches: "*Wait, I need to...", "*thinking*", "*checks instruction*"
-_ASTERISK_THOUGHT_RE = re.compile(r"^\s*\*[^*\n]+\*?\s*$", re.MULTILINE)
-# Leaked context markers from retrieval system
-_SEMANTIC_MARKER_RE = re.compile(r"\[semantic/[^\]]*\][^\n]*\n?", re.IGNORECASE)
+_ASTERISK_THOUGHT_RE: Final = re.compile(r"^\s*\*[^*\n]+\*?\s*$", re.MULTILINE)
+_SEMANTIC_MARKER_RE: Final = re.compile(r"\[semantic/[^\]]*\][^\n]*\n?", re.IGNORECASE)
 
 
 class StreamChunk(NamedTuple):
@@ -68,7 +71,7 @@ def _normalize_schema_notation(text: str) -> str:
 
 
 def extract_last_json_object(text: str) -> dict[str, object] | None:
-    """Find the last valid JSON object in text."""
+    """Find the largest (by character span) valid JSON object in text."""
     stripped = text.strip()
     cleaned = stripped.replace("```json", "").replace("```", "").strip()
     cleaned = re.sub(r":\s*\+(\d)", r": \1", cleaned)
@@ -203,35 +206,70 @@ class LLMProvider:
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
+        log.debug("POST %s (%d bytes)", normalized, len(body))
         for attempt in range(1, 4):
             request = Request(url, data=body, headers=headers, method="POST")
+            t0 = time.time()
             try:
                 with urlopen(request, timeout=self.timeout) as response:
                     parsed = json.loads(response.read().decode("utf-8"))
+                elapsed = time.time() - t0
                 if isinstance(parsed, dict):
+                    log.debug("POST %s OK in %.1fs", normalized, elapsed)
                     return parsed
                 raise RuntimeError("Provider returned a non-object JSON payload")
             except HTTPError as exc:
+                elapsed = time.time() - t0
                 if attempt < 3 and int(exc.code) in _RETRYABLE_HTTP_STATUSES:
-                    time.sleep(1.5**attempt)
+                    log.warning(
+                        "POST %s HTTP %d (attempt %d/3, %.1fs), retrying",
+                        normalized,
+                        exc.code,
+                        attempt,
+                        elapsed,
+                    )
+                    time.sleep(config.LLM_BACKOFF_BASE**attempt)
                     continue
                 detail = exc.read().decode("utf-8") if exc.fp else ""
+                log.error(
+                    "POST %s HTTP %d after %.1fs: %s", normalized, exc.code, elapsed, detail[:200]
+                )
                 raise RuntimeError(f"Provider HTTP {exc.code}: {detail}") from exc
             except URLError as exc:
+                elapsed = time.time() - t0
                 reason = getattr(exc, "reason", None)
                 if isinstance(reason, TimeoutError):
+                    log.error("POST %s timeout after %.1fs", normalized, elapsed)
                     raise RuntimeError(f"Provider timeout: {reason}") from exc
                 reason_str = str(reason) if reason else str(exc)
                 if "name resolution" in reason_str.lower():
+                    log.error("POST %s DNS failure: %s", normalized, reason_str)
                     raise RuntimeError(f"Provider network error: {exc}") from exc
                 if attempt < 3:
-                    time.sleep(1.5**attempt)
+                    log.warning(
+                        "POST %s network error (attempt %d/3, %.1fs): %s",
+                        normalized,
+                        attempt,
+                        elapsed,
+                        reason_str,
+                    )
+                    time.sleep(config.LLM_BACKOFF_BASE**attempt)
                     continue
+                log.error("POST %s network error after 3 attempts: %s", normalized, reason_str)
                 raise RuntimeError(f"Provider network error: {exc}") from exc
             except (TimeoutError, ConnectionError, OSError) as exc:
+                elapsed = time.time() - t0
                 if attempt < 3:
-                    time.sleep(1.5**attempt)
+                    log.warning(
+                        "POST %s transport error (attempt %d/3, %.1fs): %s",
+                        normalized,
+                        attempt,
+                        elapsed,
+                        exc,
+                    )
+                    time.sleep(config.LLM_BACKOFF_BASE**attempt)
                     continue
+                log.error("POST %s transport error after 3 attempts: %s", normalized, exc)
                 raise RuntimeError(f"Provider transport error: {exc}") from exc
         raise RuntimeError("Provider request failed after retries")
 
@@ -239,14 +277,22 @@ class LLMProvider:
         self,
         *,
         model: str,
-        messages: Sequence[Mapping[str, str]],
+        messages: Sequence[Mapping[str, object]],
         max_tokens: int,
         temperature: float = -1.0,
         tools: Sequence[Mapping[str, object]] = (),
-        tool_choice: Mapping[str, object] = _EMPTY_MAPPING,
+        tool_choice: str | Mapping[str, object] = _EMPTY_MAPPING,
         enable_thinking: bool = False,
     ) -> ChatResult:
         """Synchronous chat completion with semaphore protection."""
+        log.info(
+            "LLM call: model=%s msgs=%d max_tokens=%d tools=%d temp=%.1f",
+            model,
+            len(messages),
+            max_tokens,
+            len(tools),
+            temperature,
+        )
         payload: dict[str, object] = {
             "model": model,
             "messages": [dict(m) for m in messages],
@@ -258,8 +304,11 @@ class LLMProvider:
         if tools:
             payload["tools"] = [dict(t) for t in tools]
         if tool_choice:
-            payload["tool_choice"] = dict(tool_choice)
+            payload["tool_choice"] = (
+                tool_choice if isinstance(tool_choice, str) else dict(tool_choice)
+            )
 
+        t0 = time.time()
         with self._semaphore:
             raw = self._post_json("/chat/completions", payload)
 
@@ -291,80 +340,17 @@ class LLMProvider:
                 usage.get("completion_tokens", usage.get("output_tokens", 0))
             )
 
+        elapsed = time.time() - t0
+        log.info(
+            "LLM done: in=%d out=%d text=%d elapsed=%.1fs",
+            input_tokens,
+            output_tokens,
+            len(text),
+            elapsed,
+        )
         return ChatResult(
             text=text, input_tokens=input_tokens, output_tokens=output_tokens, raw=raw
         )
-
-    def chat_completion_stream(
-        self,
-        *,
-        model: str,
-        messages: Sequence[Mapping[str, str]],
-        max_tokens: int,
-        temperature: float = -1.0,
-        enable_thinking: bool = False,
-    ) -> Iterator[StreamChunk]:
-        """Stream chat completion, yielding content and reasoning deltas."""
-        payload: dict[str, object] = {
-            "model": model,
-            "messages": [dict(m) for m in messages],
-            "max_tokens": max_tokens,
-            "stream": True,
-            "chat_template_kwargs": {"enable_thinking": enable_thinking},
-        }
-        if temperature >= 0.0:
-            payload["temperature"] = temperature
-
-        parsed = urlparse(self.base_url)
-        host = parsed.hostname or "localhost"
-        port = parsed.port or (443 if parsed.scheme == "https" else 80)
-        headers = {"Content-Type": "application/json"}
-        if self.api_key:
-            headers["Authorization"] = f"Bearer {self.api_key}"
-
-        with self._semaphore:
-            conn = (
-                http.client.HTTPSConnection(
-                    host, port, timeout=self.timeout, context=ssl.create_default_context()
-                )
-                if parsed.scheme == "https"
-                else http.client.HTTPConnection(host, port, timeout=self.timeout)
-            )
-            try:
-                conn.request(
-                    "POST",
-                    (parsed.path or "") + "/chat/completions",
-                    json.dumps(payload).encode(),
-                    headers,
-                )
-                resp = conn.getresponse()
-                if resp.status != 200:
-                    raise RuntimeError(f"Provider HTTP {resp.status}: {resp.read().decode()}")
-
-                buf = ""
-                while data := resp.read(4096).decode("utf-8", errors="replace"):
-                    buf += data
-                    while "\n" in buf:
-                        line, buf = buf.split("\n", 1)
-                        if not (line := line.strip()) or not line.startswith("data:"):
-                            continue
-                        if (payload_str := line[5:].strip()) == "[DONE]":
-                            return
-                        try:
-                            parsed_data = json.loads(payload_str)
-                        except json.JSONDecodeError:
-                            continue
-                        choices = parsed_data.get("choices")
-                        if isinstance(choices, list) and choices:
-                            delta = choices[0].get("delta", {})
-                            content, reasoning = (
-                                delta.get("content") or "",
-                                delta.get("reasoning_content") or "",
-                            )
-                            if content or reasoning:
-                                yield StreamChunk(content, reasoning)
-            finally:
-                conn.close()
 
     def semaphore_idle(self) -> bool:
         """Return True if the semaphore is free (advisory, subject to TOCTOU)."""
@@ -399,18 +385,14 @@ def llm_semaphore_idle() -> bool:
     return not interaction_in_progress() and default_provider.semaphore_idle()
 
 
-def strip_analysis_block(text: str) -> str:
-    """Strip <analysis>...</analysis> scratchpad blocks from LLM output.
+_ANALYSIS_COMPLETE_RE: Final = re.compile(r"<analysis>[\s\S]*?</analysis>", re.IGNORECASE)
+_ANALYSIS_UNCLOSED_RE: Final = re.compile(r"<analysis>[\s\S]*$", re.IGNORECASE)
 
-    The analysis block is a chain-of-thought drafting area that improves output
-    quality but should not be parsed as part of the structured response.
-    """
-    import re
 
-    # Strip complete <analysis>...</analysis> blocks
-    text = re.sub(r"<analysis>[\s\S]*?</analysis>", "", text, flags=re.IGNORECASE)
-    # Strip unclosed <analysis> blocks (model cut off mid-thought)
-    text = re.sub(r"<analysis>[\s\S]*$", "", text, flags=re.IGNORECASE)
+def _strip_analysis_block(text: str) -> str:
+    """Strip <analysis>...</analysis> scratchpad blocks from LLM output."""
+    text = _ANALYSIS_COMPLETE_RE.sub("", text)
+    text = _ANALYSIS_UNCLOSED_RE.sub("", text)
     return text.strip()
 
 
@@ -421,8 +403,7 @@ def decode_llm_json(text: str) -> dict[str, object] | list[object]:
     first (preserving bare arrays), then falls back to extract_last_json_object
     for messy output. Raises ValueError if no JSON can be extracted.
     """
-    # Strip analysis scratchpad blocks before JSON extraction
-    cleaned = strip_analysis_block(text)
+    cleaned = _strip_analysis_block(text)
     cleaned = cleaned.replace("```json", "").replace("```", "").strip()
     if not cleaned:
         raise ValueError("Empty LLM response")
@@ -432,6 +413,15 @@ def decode_llm_json(text: str) -> dict[str, object] | list[object]:
             return parsed
     except json.JSONDecodeError:
         pass
+    # Fix double-escaped quotes: \\" → " inside JSON strings
+    if '\\"' in cleaned:
+        try:
+            fixed = cleaned.replace('\\"', '"')
+            parsed = json.loads(fixed)
+            if isinstance(parsed, (dict, list)):
+                return parsed
+        except json.JSONDecodeError:
+            pass
     obj = extract_last_json_object(cleaned)
     if obj is not None:
         return obj
@@ -447,36 +437,59 @@ def parse_json_object(text: str) -> dict[str, object]:
         return {}
 
 
+class ParsedToolCall(NamedTuple):
+    """Parsed tool call from an LLM chat-completion payload."""
+
+    name: str
+    args: dict[str, object]
+    id: str
+
+
+def _get_raw_tool_calls(raw: Mapping[str, object]) -> list[dict[str, object]]:
+    """Navigate choices[0].message.tool_calls safely, returning raw dicts."""
+    choices = raw.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return []
+    first = choices[0]
+    if not isinstance(first, dict):
+        return []
+    message = first.get("message")
+    if not isinstance(message, dict):
+        return []
+    calls = message.get("tool_calls")
+    return [c for c in calls if isinstance(c, dict)] if isinstance(calls, list) else []
+
+
+def extract_tool_calls(raw: Mapping[str, object]) -> list[ParsedToolCall]:
+    """Parse all tool calls from a raw LLM completion payload."""
+    parsed: list[ParsedToolCall] = []
+    for call in _get_raw_tool_calls(raw):
+        func = call.get("function")
+        if not isinstance(func, dict):
+            continue
+        name = str(func.get("name", ""))
+        raw_args = func.get("arguments", "{}")
+        args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+        if not isinstance(args, dict):
+            args = {}
+        parsed.append(ParsedToolCall(name=name, args=args, id=str(call.get("id", ""))))
+    return parsed
+
+
 def extract_tool_call_arguments(
     raw_payload: Mapping[str, object], function_name: str
 ) -> dict[str, object]:
-    """Extract tool call arguments from raw completion payload."""
-    choices = raw_payload.get("choices")
-    if not isinstance(choices, list) or not choices:
-        return {}
-    first = choices[0]
-    if not isinstance(first, dict):
-        return {}
-    message = first.get("message")
-    if not isinstance(message, dict):
-        return {}
-    tool_calls = message.get("tool_calls")
-    if not isinstance(tool_calls, list):
-        return {}
-    for call in tool_calls:
-        if not isinstance(call, dict):
+    """Extract arguments for a specific tool call by function name."""
+    for call in _get_raw_tool_calls(raw_payload):
+        func = call.get("function")
+        if not isinstance(func, dict) or func.get("name") != function_name:
             continue
-        function = call.get("function")
-        if not isinstance(function, dict) or function.get("name") != function_name:
-            continue
-        arguments = function.get("arguments")
+        arguments = func.get("arguments")
         if isinstance(arguments, dict):
             return dict(arguments)
         if isinstance(arguments, str):
-            try:
+            with contextlib.suppress(json.JSONDecodeError):
                 parsed = json.loads(arguments)
                 if isinstance(parsed, dict):
                     return dict(parsed)
-            except json.JSONDecodeError:
-                continue
     return {}
