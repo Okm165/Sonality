@@ -15,6 +15,7 @@ from typing import Final
 
 import feedparser  # type: ignore[import-untyped]
 import httpx
+from _helpers import print_error, print_result, show_beliefs
 from dotenv import load_dotenv
 from gnews import GNews  # type: ignore[import-untyped]
 from rich.console import Console
@@ -184,15 +185,7 @@ _HTML_TAG = re.compile(r"<[^>]+>")
 def _enrich(article: Article) -> str:
     """Enriched text with source credibility marker for ESS classification."""
     desc = _HTML_TAG.sub("", article.description).strip()
-    return (
-        f"[News/{article.source}]\n\n"
-        f"{article.title}\n\n"
-        f"{desc}\n\n"
-        f"Source: {article.link}"
-    )
-
-
-from _helpers import print_error, print_result, show_beliefs
+    return f"[News/{article.source}]\n\n{article.title}\n\n{desc}\n\nSource: {article.link}"
 
 
 def _ingest_one(
@@ -233,8 +226,6 @@ def _ingest_one(
         time.sleep(throttle)
 
     return ok, total
-
-
 
 
 # ---------------------------------------------------------------------------

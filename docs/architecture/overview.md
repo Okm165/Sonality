@@ -32,25 +32,27 @@ SonalityAgent
 flowchart LR
     subgraph Build
         Load[Load identity]
-        Route[Route query]
-        Retrieve[Retrieve context]
+        Trim[Trim context]
     end
-    Build --> LLM[Generate] --> Post
-    subgraph Post
+    Build --> Loop
+    subgraph Loop[Agentic Loop]
+        LLM[LLM decides] --> Tools[recall / search / assess / reflect / store / consolidate]
+        Tools --> LLM
+    end
+    Loop --> Bookkeep
+    subgraph Bookkeep
         ESS[ESS classify]
         Store[Store episode]
-        Reflect[Reflection]
+        Prov[Provenance]
     end
 ```
 
 1. Load personality snapshot + beliefs
-2. Route query → retrieval strategy
-3. Retrieve episodes + knowledge
-4. Build prompt, generate response
-5. ESS classify user message
-6. Store episode (atomic Neo4j→Qdrant)
-7. Knowledge extraction, provenance, semantic features
-8. Two-tier reflection (if triggered)
+2. Trim conversation history to token budget
+3. Agentic loop: LLM autonomously calls tools (recall, search, assess, reflect, store, consolidate)
+4. Bookkeeping: ESS classify, boundary detection, store episode, provenance, semantic features, forgetting
+
+The agent handles all cognitive work via tools. Bookkeeping runs automatically and silently.
 
 ## Retrieval Strategies
 
@@ -64,7 +66,7 @@ flowchart LR
 ## Ingestion (non-conversational)
 
 ```
-ESS classify → if update_recommended → store → extract → provenance → reflect
+ESS classify → if update_recommended → store → provenance → semantic features → forgetting
 ```
 
 ## Error Handling
@@ -73,4 +75,4 @@ ESS classify → if update_recommended → store → extract → provenance → 
 |-----------|----------|
 | LLM | 3 retries → empty |
 | ESS | `classifier_exception_fallback` |
-| Knowledge | Log and continue |
+| Episode storage | Log and continue |

@@ -11,8 +11,8 @@ Levels (run in order, each depends on the previous passing):
   L3   Memory primitives      — Qdrant vector insert/search, similarity ordering
   L3x  Memory store/retrieve  — full DualEpisodeStore write + vector recall
 
-For full agent behavioral tests (anti-sycophancy, memory retrieval, personality
-accumulation), run: uv run pytest tests/test_agent_health.py -v -s -m live
+For full agent behavioral tests, extend this suite with L4+ levels
+covering anti-sycophancy, memory retrieval, and personality accumulation.
 """
 
 from __future__ import annotations
@@ -596,7 +596,7 @@ class TestL2xPerPromptParsing:
                     "role": "user",
                     "content": "A 2023 RCT showed exercise reduces mortality by 30%. Rate this argument.\n\n"
                     "Return ONLY a valid JSON object with keys: score, reasoning_type, source_reliability, "
-                    "internal_consistency, novelty, topics, summary, opinion_direction.",
+                    "topics, summary, opinion_direction.",
                 },
             ),
             max_tokens=config.LLM_MAX_TOKENS,
@@ -613,37 +613,11 @@ class TestL2xPerPromptParsing:
         data = tool_args or json_fallback
 
         print(f"\n  path={path}  ({elapsed})")
-        print(f"  internal_consistency={data.get('internal_consistency')!r}")
         print(f"  score={data.get('score')}  reasoning_type={data.get('reasoning_type')!r}")
         print(f"  content_preview={completion.text[:80]!r}")
 
         assert data, f"Both tool_call and JSON fallback returned empty.\nraw={completion.raw}"
         assert "score" in data, f"Missing 'score' field.\ndata={data}"
-
-    def test_ess_internal_consistency_no_longer_coerced(self) -> None:
-        """After alias fix, internal_consistency should not be coerced."""
-        from sonality.ess import classify
-        from sonality.memory.graph import SEED_SNAPSHOT
-
-        t = time.perf_counter()
-        result = classify(
-            user_message=(
-                "A Cochrane review of 89 RCTs found statistically significant benefits "
-                "of exercise for depression, with effect sizes comparable to medication."
-            ),
-            snapshot_text=SEED_SNAPSHOT,
-        )
-        elapsed = _elapsed(t)
-
-        print(
-            f"\n  score={result.score:.3f}  consistency={result.internal_consistency}  "
-            f"severity={result.default_severity}  fields={result.defaulted_fields}  ({elapsed})"
-        )
-        coerced = [f for f in result.defaulted_fields if "internal_consistency" in f]
-        assert not coerced, (
-            f"internal_consistency still coerced after alias fix: {coerced}\n"
-            f"All defaulted: {result.defaulted_fields}"
-        )
 
     def test_chunking_prompt_parses_correctly(self) -> None:
         """CHUNKING_PROMPT → ChunkingResponse: list of chunk objects extracted."""

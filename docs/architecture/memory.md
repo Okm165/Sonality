@@ -23,7 +23,7 @@ flowchart LR
 | `Derivative` | uid, text, key_concept, sequence_num |
 | `Belief` | topic, valence (-1→+1), confidence, evidence_count |
 | `Segment` | id, label, created_at |
-| `PersonalitySnapshot` | text, tone, version |
+| `PersonalitySnapshot` | text, version |
 
 ### Edges
 

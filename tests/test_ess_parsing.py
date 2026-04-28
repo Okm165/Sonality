@@ -6,7 +6,6 @@ from collections.abc import Mapping
 from unittest.mock import MagicMock, patch
 
 from sonality.ess import (
-    InternalConsistencyStatus,
     OpinionDirection,
     ReasoningType,
     SourceReliability,
@@ -54,8 +53,6 @@ def test_classify_normalizes_labels_and_boolean_strings() -> None:
         "score": "0.72",
         "reasoning_type": "Logical Argument",
         "source_reliability": "Peer Reviewed",
-        "internal_consistency": "false",
-        "novelty": "0.35",
         "topics": "governance, open_source",
         "summary": "Structured governance evidence.",
         "opinion_direction": "Support",
@@ -65,11 +62,9 @@ def test_classify_normalizes_labels_and_boolean_strings() -> None:
         result = classify("message", "snapshot")
 
     assert result.score == 0.72
-    assert result.novelty == 0.35
     assert result.reasoning_type == ReasoningType.LOGICAL_ARGUMENT
     assert result.source_reliability == SourceReliability.PEER_REVIEWED
     assert result.opinion_direction == OpinionDirection.SUPPORTS
-    assert result.internal_consistency is InternalConsistencyStatus.INCONSISTENT
     assert result.topics == ("governance", "open_source")
     assert result.attempt_count == 1
     assert result.input_tokens == 11
@@ -85,8 +80,6 @@ def test_classify_marks_defaults_on_invalid_fields() -> None:
         "score": "not-a-number",
         "reasoning_type": "vibes_only",
         "source_reliability": "trust_me_bro",
-        "internal_consistency": "unknown",
-        "novelty": "n/a",
         "topics": ["policy"],
         "summary": "Unreliable claim",
         "opinion_direction": "mixedish",
@@ -96,11 +89,9 @@ def test_classify_marks_defaults_on_invalid_fields() -> None:
         result = classify("message", "snapshot")
 
     assert result.score == 0.0
-    assert result.novelty == 0.0
     assert result.reasoning_type == ReasoningType.NO_ARGUMENT
     assert result.source_reliability == SourceReliability.NOT_APPLICABLE
     assert result.opinion_direction == OpinionDirection.NEUTRAL
-    assert result.internal_consistency is InternalConsistencyStatus.CONSISTENT
     assert result.topics == ("policy",)
     assert result.used_defaults
     assert "coerced:score" in result.defaulted_fields
@@ -116,8 +107,6 @@ def test_classify_coerces_malformed_enum_without_retry() -> None:
         "score": "0.71",
         "reasoning_type": "vibes_only",
         "source_reliability": "peer_reviewed",
-        "internal_consistency": True,
-        "novelty": 0.4,
         "topics": ["governance"],
         "summary": "Malformed required enum gets coerced.",
         "opinion_direction": "supports",
@@ -140,8 +129,6 @@ def test_classify_debunked_claim_aliases_resolve() -> None:
             "score": "0.04",
             "reasoning_type": alias,
             "source_reliability": "unverified_claim",
-            "internal_consistency": True,
-            "novelty": "0.1",
             "topics": ["climate", "conspiracy"],
             "summary": "Debunked conspiracy theory.",
             "opinion_direction": "opposes",
@@ -160,8 +147,6 @@ def test_classify_marks_missing_when_required_field_absent_after_retries() -> No
     payload = {
         "score": "0.55",
         "source_reliability": "informed_opinion",
-        "internal_consistency": True,
-        "novelty": 0.2,
         "topics": ["policy"],
         "summary": "Missing required field",
         "opinion_direction": "neutral",

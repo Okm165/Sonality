@@ -82,6 +82,31 @@ SONALITY_NEO4J_PASSWORD=sonality_password
 SONALITY_QDRANT_URL=http://localhost:6333
 ```
 
+## Web Search
+
+| Variable | Default | Notes |
+|----------|---------|-------|
+| `SONALITY_WEB_SEARCH_URL` | `http://localhost:3002` | Firecrawl API URL (Docker service) |
+| `SONALITY_WEB_SEARCH_ENABLED` | `true` | Master toggle for web access |
+| `SONALITY_WEB_CACHE_TTL` | `14400` | Search cache TTL in seconds (4h) |
+| `SONALITY_REFLECTION_WEB_QUERIES` | `3` | Max web queries per reflection enrichment step |
+
+The agent uses a unified agentic loop where the LLM decides ALL cognitive steps via tool calls: memory recall, web search, evidence assessment, reflection, knowledge storage, and consolidation. All tools are always available — there are no per-turn limits. The agent decides when to stop. Stall detection and deduplication prevent infinite loops. Web search and scrape are backed by Firecrawl (self-hosted via docker-compose), which uses Playwright for JavaScript rendering and SearXNG for search.
+
+## HTTP API Authentication
+
+| Variable | Default | Notes |
+|----------|---------|-------|
+| `SONALITY_HTTP_API_KEY` | *(unset)* | If set, all API requests require this key |
+
+## Logging
+
+| Variable | Default | Notes |
+|----------|---------|-------|
+| `SONALITY_LOG_LEVEL` | `INFO` | Python log level (DEBUG for full pipeline visibility) |
+
+All logging uses structured `key=value` pairs with %-formatting for lazy evaluation.
+
 ## Docker Compose
 
 The `docker-compose.yml` provides all required services:
@@ -93,4 +118,10 @@ docker compose up -d
 Services:
 - `neo4j`: Graph database (ports 7474, 7687)
 - `qdrant`: Vector database (ports 6333, 6334)
+- `firecrawl`: Web search + scrape API (port 3002)
+- `firecrawl-playwright`: Headless browser rendering (internal)
+- `firecrawl-redis`: Job queue (internal)
+- `firecrawl-rabbitmq`: Message broker (internal)
+- `firecrawl-postgres`: Job management DB (internal)
+- `searxng`: Meta-search engine (internal)
 - `speaches`: STT/TTS for Telegram (port 8001)

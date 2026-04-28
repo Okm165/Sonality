@@ -47,7 +47,6 @@ async def _seed_graph_async(
                     """
                     MERGE (n:PersonalitySnapshot {session_id: 'default'})
                     SET n.text = $text,
-                        n.tone = 'curious, direct, unpretentious',
                         n.version = 1,
                         n.updated_at = datetime()
                     """,

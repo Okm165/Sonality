@@ -13,12 +13,11 @@ from dataclasses import dataclass
 from typing import Final
 
 import httpx
+from _helpers import print_error, print_result, show_beliefs
 from dotenv import load_dotenv
 from rich.console import Console
 from rich.markup import escape
 from rich.panel import Panel
-
-from _helpers import print_error, print_result, show_beliefs
 
 X_API: Final = "https://api.x.com/2"
 TWEET_FIELDS: Final = (
@@ -322,8 +321,6 @@ def _panel(
         f" · {_k(m.get('bookmark_count', 0))} saves[/dim]"
     )
     return Panel("\n".join(lines), border_style="blue", padding=(0, 1))
-
-
 
 
 # ---------------------------------------------------------------------------

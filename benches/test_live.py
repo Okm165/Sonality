@@ -310,10 +310,9 @@ class TestLongHorizonDriftLive:
 
             snapshot_lengths = [len(r.snapshot_after) for r in results]
 
-            from sonality.memory.updater import SNAPSHOT_CHAR_LIMIT
-
-            assert max(snapshot_lengths) <= SNAPSHOT_CHAR_LIMIT * 1.2, (
-                f"Snapshot grew to {max(snapshot_lengths)} chars (limit {SNAPSHOT_CHAR_LIMIT})"
+            snapshot_char_limit = 2000
+            assert max(snapshot_lengths) <= snapshot_char_limit * 1.2, (
+                f"Snapshot grew to {max(snapshot_lengths)} chars (limit {snapshot_char_limit})"
             )
 
             pressure_steps = [r for r in results if "pressure" in r.label]
@@ -433,10 +432,9 @@ class TestSnapshotGrowthLive:
                     print(f"\nSnapshot lengths: {lengths}")
                     print(f"Max: {max(lengths)}, Min: {min(lengths)}")
 
-                    from sonality.memory.updater import SNAPSHOT_CHAR_LIMIT
-
-                    assert max(lengths) <= SNAPSHOT_CHAR_LIMIT * 1.1, (
-                        f"Snapshot grew to {max(lengths)} chars, limit is {SNAPSHOT_CHAR_LIMIT}"
+                    snapshot_char_limit = 2000
+                    assert max(lengths) <= snapshot_char_limit * 1.1, (
+                        f"Snapshot grew to {max(lengths)} chars, limit is {snapshot_char_limit}"
                     )
                 finally:
                     agent.shutdown()

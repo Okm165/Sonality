@@ -12,7 +12,7 @@ interactions, and monitor whether personality evolution remains coherent and evi
    - `make run` for local REPL usage.
    - Optionally `make reset` before a new training cycle.
 3. Capture baseline state:
-   - `/snapshot` for narrative baseline.
+   - `/health` to check snapshot version baseline.
    - `/beliefs` for structured stance baseline.
    - `/health` for initial diagnostics.
 
@@ -33,7 +33,7 @@ After each turn, inspect:
 
 - ESS score and topics (shown after each response in REPL status line).
 - Belief states (`/beliefs`) to track opinion changes.
-- Personality snapshot (`/snapshot`) for identity coherence.
+- Agent health (`/health`) for snapshot version and identity coherence tracking.
 
 Expected behavior:
 
@@ -50,7 +50,7 @@ Use this monitoring checklist:
 - **Stability:** major shifts require repeated high-quality evidence.
 - **Specificity:** reflection output stays concrete (not generic assistant drift).
 
-Use `/snapshot`, `/beliefs`, and historical snapshots in Neo4j `PersonalitySnapshot` nodes.
+Use `/beliefs`, `/health`, and historical snapshots in Neo4j `PersonalitySnapshot` nodes.
 
 ## 5) Run non-live quality gates
 

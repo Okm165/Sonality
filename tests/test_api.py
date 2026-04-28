@@ -17,7 +17,6 @@ from fastapi.testclient import TestClient
 from sonality.api import _agent_store, app
 from sonality.ess import (
     ESSResult,
-    InternalConsistencyStatus,
     KnowledgeDensity,
     OpinionDirection,
     ReasoningType,
@@ -37,8 +36,6 @@ def _make_ess(**kwargs: Any) -> ESSResult:
         "score": 0.55,
         "reasoning_type": ReasoningType.EMPIRICAL_DATA,
         "source_reliability": SourceReliability.UNVERIFIED_CLAIM,
-        "internal_consistency": InternalConsistencyStatus.CONSISTENT,
-        "novelty": 0.6,
         "topics": ("climate", "energy"),
         "summary": "User asserts that renewable energy reduces emissions.",
         "opinion_direction": OpinionDirection.SUPPORTS,

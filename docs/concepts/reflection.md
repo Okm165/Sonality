@@ -19,7 +19,7 @@ flowchart LR
 Lightweight LLM check per interaction. Decides if deeper reflection is warranted.
 
 **Input:** Current beliefs, user message, ESS result  
-**Output:** `{"should_reflect": bool, "reason": str}`
+**Output:** `{"should_reflect": bool, "reason": str, "web_queries": list[str]}`
 
 **Criteria:**
 - Evidence that changes existing beliefs?
@@ -41,9 +41,9 @@ Full context analysis when triage approves.
 
 **Output:**
 ```python
-class _DeepReflectionResponse(BaseModel):
-    belief_updates: list[_BeliefPatch]  # topic, valence, confidence, belief_text
-    new_beliefs: list[_BeliefPatch]
+class DeepReflectionResponse(BaseModel):
+    belief_updates: list[BeliefPatch]  # topic, valence, confidence, belief_text
+    new_beliefs: list[BeliefPatch]
     snapshot_revision: str
     snapshot_changed: bool
 ```
@@ -66,7 +66,9 @@ await assess_and_forget(candidates, ...)
 
 ## Execution
 
-Runs in background worker thread — responses are not blocked.
+The agent invokes `reflect` as a tool during the agentic loop when evidence
+warrants belief evaluation. Triage + deep reflection run synchronously within
+the tool call. The agent is fully responsible for deciding when to reflect.
 
 ## Research
 

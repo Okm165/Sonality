@@ -37,10 +37,10 @@ docker compose run --rm sonality
 
 ## Useful REPL Commands
 
-- `/models` - show current model configuration
-- `/snapshot` - display personality snapshot
 - `/beliefs` - show current belief states
+- `/health` - show agent health (belief count, snapshot version)
 - `/clear` - clear conversation history
+- `/help` - show available commands
 - `/quit` - exit REPL
 
 ## Verify Installation

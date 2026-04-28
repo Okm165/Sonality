@@ -38,7 +38,7 @@ def print_error(exc: httpx.HTTPStatusError) -> None:
         if body:
             console.print(f"    [dim red]{escape(body)}[/dim red]")
     else:
-        console.print(f"  [red]✗ HTTP error (no response)[/red]")
+        console.print("  [red]✗ HTTP error (no response)[/red]")
 
 
 def show_beliefs(beliefs: list[dict[str, object]]) -> None:
