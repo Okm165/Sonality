@@ -1,0 +1,99 @@
+use_default_settings: true
+
+general:
+  debug: false
+  instance_name: "sonality-search"
+  enable_metrics: false
+
+search:
+  safe_search: 0
+  autocomplete: ""
+  default_lang: "en"
+  formats:
+    - html
+    - json
+  # Suspend engines longer on errors to prevent rapid retries
+  ban_time_on_fail: 300
+  max_ban_time_on_fail: 600
+
+server:
+  secret_key: "sonality-searxng-internal"
+  bind_address: "0.0.0.0"
+  port: 8080
+  limiter: false
+  public_instance: false
+  image_proxy: false
+  method: "POST"
+
+outgoing:
+  request_timeout: 8.0
+  max_request_timeout: 12.0
+  pool_connections: 50
+  pool_maxsize: 15
+  enable_http2: true
+  retries: 1
+
+ui:
+  static_use_hash: true
+  default_theme: simple
+  infinite_scroll: false
+  query_in_title: true
+
+engines:
+  # Primary engines - reliable and fast
+  - name: google
+    disabled: false
+    weight: 1.5
+    timeout: 6.0
+
+  - name: duckduckgo
+    disabled: false
+    weight: 1.2
+    timeout: 6.0
+
+  - name: bing
+    disabled: false
+    weight: 1.0
+    timeout: 6.0
+
+  # Disabled - aggressive rate limiting
+  - name: brave
+    disabled: true
+
+  # Knowledge engines
+  - name: wikipedia
+    disabled: false
+    weight: 0.8
+    timeout: 5.0
+
+  # Disabled - init failures
+  - name: wikidata
+    disabled: true
+
+  - name: ahmia
+    disabled: true
+
+  - name: torch
+    disabled: true
+
+  # Developer/technical
+  - name: github
+    disabled: false
+    weight: 0.7
+    timeout: 6.0
+
+  - name: stackoverflow
+    disabled: false
+    weight: 0.7
+    timeout: 6.0
+
+  # Academic
+  - name: arxiv
+    disabled: false
+    weight: 0.6
+    timeout: 8.0
+
+  - name: google scholar
+    disabled: false
+    weight: 0.6
+    timeout: 8.0

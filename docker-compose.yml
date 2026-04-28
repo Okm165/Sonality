@@ -1,7 +1,14 @@
-# Sonality Docker Compose configuration
+# Sonality Docker Compose - Production-Ready Configuration
 #
-# Two-service stack: Neo4j (graph + state) + Qdrant (vectors + hybrid search)
-# Neo4j: Schema initialized by application on startup
+# Services: Neo4j (graph + state), Qdrant (vectors), Speaches (STT/TTS),
+# Firecrawl (web search + scrape: API + Playwright + SearXNG + Redis + RabbitMQ + Postgres)
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+    compress: "true"
 
 services:
   sonality:
@@ -16,13 +23,16 @@ services:
     environment:
       SONALITY_NEO4J_URL: bolt://neo4j:7687
       SONALITY_QDRANT_URL: http://qdrant:6333
-      SONALITY_LOG_LEVEL: DEBUG
+      SONALITY_WEB_SEARCH_URL: http://firecrawl:3002
+      SONALITY_LOG_LEVEL: INFO
     volumes:
       - ./data:/app/data
     depends_on:
       neo4j:
         condition: service_healthy
       qdrant:
+        condition: service_healthy
+      firecrawl:
         condition: service_healthy
     restart: unless-stopped
     healthcheck:
@@ -31,9 +41,12 @@ services:
       timeout: 5s
       retries: 3
       start_period: 90s
+    logging: *default-logging
+
+  # --- Graph Database ---
 
   neo4j:
-    image: neo4j:5
+    image: neo4j:5.26
     ports:
       - "7474:7474"
       - "7687:7687"
@@ -45,29 +58,46 @@ services:
       NEO4J_PLUGINS: '["apoc", "graph-data-science"]'
       NEO4J_dbms_security_procedures_unrestricted: apoc.*,gds.*
       NEO4J_dbms_security_procedures_allowlist: apoc.*,gds.*
+      # Memory: heap initial = max for GC stability
       NEO4J_server_memory_heap_initial__size: 1G
-      NEO4J_server_memory_heap_max__size: 2G
+      NEO4J_server_memory_heap_max__size: 1G
       NEO4J_server_memory_pagecache_size: 512M
+      # Transaction memory limits
+      NEO4J_dbms_memory_transaction_total_max: 512M
+      NEO4J_db_memory_transaction_max: 256M
     healthcheck:
       test: ["CMD-SHELL", "cypher-shell -u neo4j -p sonality_password 'RETURN 1' || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 5
-      start_period: 30s
+      start_period: 45s
+    restart: unless-stopped
+    logging: *default-logging
+
+  # --- Vector Database ---
 
   qdrant:
-    image: qdrant/qdrant:latest
+    image: qdrant/qdrant:v1.17.0
     ports:
       - "6333:6333"
       - "6334:6334"
     volumes:
       - qdrant_data:/qdrant/storage
+      - qdrant_snapshots:/qdrant/snapshots
+    environment:
+      QDRANT__LOG_LEVEL: INFO
+      QDRANT__SERVICE__GRPC_PORT: 6334
+      QDRANT__STORAGE__ON_DISK_PAYLOAD: "true"
     healthcheck:
-      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/localhost/6333 && printf 'GET /readyz HTTP/1.0\\r\\nHost: localhost\\r\\n\\r\\n' >&3 && grep -q 'all shards are ready' <&3"]
-      interval: 5s
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/localhost/6333 && printf \"GET /readyz HTTP/1.0\\r\\nHost: localhost\\r\\n\\r\\n\" >&3 && grep -q \"all shards are ready\" <&3'"]
+      interval: 10s
       timeout: 5s
       retries: 5
-      start_period: 15s
+      start_period: 20s
+    restart: unless-stopped
+    logging: *default-logging
+
+  # --- Speech Services (STT/TTS) ---
 
   speaches:
     image: ghcr.io/speaches-ai/speaches:latest-cpu
@@ -97,9 +127,171 @@ services:
       retries: 3
       start_period: 180s
     restart: unless-stopped
+    logging: *default-logging
+
+  # --- Firecrawl Web Search + Scrape Stack ---
+
+  firecrawl:
+    image: ghcr.io/firecrawl/firecrawl:latest
+    ports:
+      - "3002:3002"
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+    environment:
+      PORT: "3002"
+      HOST: 0.0.0.0
+      USE_DB_AUTHENTICATION: "false"
+      REDIS_URL: redis://firecrawl-redis:6379
+      REDIS_RATE_LIMIT_URL: redis://firecrawl-redis:6379
+      PLAYWRIGHT_MICROSERVICE_URL: http://firecrawl-playwright:3000/scrape
+      SEARXNG_ENDPOINT: http://searxng:8080
+      NUQ_RABBITMQ_URL: amqp://firecrawl-rabbitmq:5672
+      POSTGRES_HOST: firecrawl-postgres
+      POSTGRES_USER: firecrawl
+      POSTGRES_PASSWORD: firecrawl
+      POSTGRES_DB: firecrawl
+      POSTGRES_PORT: "5432"
+      NUM_WORKERS_PER_QUEUE: "1"
+      BULL_AUTH_KEY: sonality-firecrawl-admin
+      # Disable resource checks - let container limits handle it
+      MAX_CPU: "1.0"
+      MAX_RAM: "1.0"
+    depends_on:
+      firecrawl-redis:
+        condition: service_healthy
+      firecrawl-rabbitmq:
+        condition: service_healthy
+      firecrawl-playwright:
+        condition: service_started
+      firecrawl-postgres:
+        condition: service_healthy
+      searxng:
+        condition: service_healthy
+    command: ["node", "dist/src/harness.js", "--start-docker"]
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: "4.0"
+          memory: 4G
+    tmpfs:
+      - /tmp/.cache:noexec,nosuid,size=512m
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"require('http').get('http://localhost:3002/',r=>{process.exit(r.statusCode<400?0:1)}).on('error',()=>process.exit(1))\""]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 90s
+    restart: unless-stopped
+    logging: *default-logging
+
+  firecrawl-playwright:
+    image: ghcr.io/firecrawl/playwright-service:latest
+    environment:
+      PORT: "3000"
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:3000/health || exit 0"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+    logging: *default-logging
+
+  firecrawl-redis:
+    image: redis:7-alpine
+    volumes:
+      - firecrawl_redis_data:/data
+    command: >
+      redis-server
+      --bind 0.0.0.0
+      --maxmemory 512mb
+      --maxmemory-policy noeviction
+      --appendonly yes
+      --appendfsync everysec
+    deploy:
+      resources:
+        limits:
+          memory: 768M
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+    logging: *default-logging
+
+  firecrawl-rabbitmq:
+    image: rabbitmq:3-management-alpine
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_running"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+    logging: *default-logging
+
+  firecrawl-postgres:
+    image: ghcr.io/firecrawl/nuq-postgres:latest
+    volumes:
+      - firecrawl_postgres_data:/var/lib/postgresql/data
+    environment:
+      POSTGRES_USER: firecrawl
+      POSTGRES_PASSWORD: firecrawl
+      POSTGRES_DB: firecrawl
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U firecrawl -d firecrawl"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+    logging: *default-logging
+
+  searxng:
+    image: searxng/searxng:latest
+    volumes:
+      - ./config/searxng:/etc/searxng:ro
+    environment:
+      SEARXNG_SECRET: sonality-searxng-internal
+      UWSGI_WORKERS: "8"
+      UWSGI_THREADS: "4"
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1G
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+    logging: *default-logging
 
 volumes:
   neo4j_data:
   neo4j_logs:
   qdrant_data:
+  qdrant_snapshots:
   speaches_cache:
+  firecrawl_redis_data:
+  firecrawl_postgres_data:
