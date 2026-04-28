@@ -12,6 +12,7 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "qdrant-client>=1.12.0",
     "uvicorn>=0.34.0",
+    "httpx>=0.28.0",
 ]
 
 [dependency-groups]
@@ -19,9 +20,10 @@ scripts = [
     "openai>=2.29.0",
     "httpx>=0.28.1",
     "rich>=14.0.0",
+    "rich-stepper>=0.1.0",
     "feedparser>=6.0.0",
     "gnews>=0.4.0",
-    "aiogram>=3.20.0",
+    "aiogram>=3.26.0",
 ]
 dev = [
     "ruff>=0.8.0",
