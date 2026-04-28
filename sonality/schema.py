@@ -9,7 +9,6 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Any, Final
 
-from pydantic import BaseModel
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.models import (
     Distance,
@@ -49,17 +48,39 @@ class ChatRole(StrEnum):
     SYSTEM = "system"
     USER = "user"
     ASSISTANT = "assistant"
+    TOOL = "tool"
 
 
-class ChatMessage(BaseModel):
-    """Typed chat message for internal use."""
+class ToolName(StrEnum):
+    """Canonical tool names — single source of truth for all tool references."""
 
-    role: ChatRole
-    content: str
+    RECALL_MEMORY = "recall_memory"
+    WEB_SEARCH = "web_search"
+    WEB_EXTRACT = "web_extract"
+    ASSESS_EVIDENCE = "assess_evidence"
+    CONSOLIDATE = "consolidate"
+    REFLECT = "reflect"
+    STORE_KNOWLEDGE = "store_knowledge"
 
-    def to_dict(self) -> dict[str, str]:
-        """Convert to dict for API compatibility."""
-        return {"role": self.role, "content": self.content}
+
+class EventType(StrEnum):
+    """Agent progress event types."""
+
+    THINKING = "thinking"
+    TOOL_CALL = "tool_call"
+    TOOL_RESULT = "tool_result"
+    CONTEXT_BUILD = "context_build"
+    SUMMARIZING = "summarizing"
+    DONE = "done"
+
+
+class AssessFocus(StrEnum):
+    """Focus modes for the assess_evidence tool."""
+
+    GAPS = "gaps"
+    CONTRADICTIONS = "contradictions"
+    QUALITY = "quality"
+    SUMMARY = "summary"
 
 
 DENSE_VECTOR: Final = "dense"
