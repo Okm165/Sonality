@@ -1,7 +1,11 @@
 """Unified tool system — symmetric schema + executor for every agent tool.
 
-Each tool module exports DEFINITIONS (schemas) and EXECUTORS (name -> function).
-ToolContext provides all runtime dependencies without coupling to SonalityAgent.
+Architecture: each tool module (memory, web, synthesize) exports two parallel
+registries: DEFINITIONS (OpenAI-compatible function schemas for the LLM) and
+EXECUTORS (name → callable). This module lazily merges them at first use.
+
+ToolContext carries all runtime dependencies (graph, embedder, web client, etc.)
+so tool executors never import from agent.py — the dependency arrow is one-way.
 """
 
 from __future__ import annotations
@@ -9,9 +13,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Final, TypeVar
-
-from ..schema import ToolName
+from typing import TYPE_CHECKING, Protocol, TypeVar
 
 if TYPE_CHECKING:
     from qdrant_client import AsyncQdrantClient
@@ -24,7 +26,9 @@ log = logging.getLogger(__name__)
 
 _T = TypeVar("_T")
 
-WEB_TOOL_NAMES: Final = frozenset({ToolName.WEB_SEARCH, ToolName.WEB_EXTRACT})
+
+class RunAsync(Protocol):
+    def __call__(self, coro: Coroutine[object, object, _T], /) -> _T: ...
 
 
 _ToolExecutor = Callable[["dict[str, object]", "ToolContext"], str]
@@ -37,7 +41,7 @@ class ToolContext:
     The agent populates this from its own state. Tools never import from agent.
     """
 
-    run_async: Callable[[Coroutine[object, object, _T]], _T]
+    run_async: RunAsync
     web_client: WebSearchClient | None
     graph: MemoryGraph
     dual_store: DualEpisodeStore
@@ -46,6 +50,24 @@ class ToolContext:
     identity: IdentityBundle | None
     llm_messages: list[dict[str, object]]
     retrieve: Callable[[str], list[str]]
+
+    def build_research_transcript(
+        self, *, tool_tail: int = 6, assistant_tail: int = 3, char_limit: int = 1200
+    ) -> str:
+        """Collect recent tool results and assistant reasoning into a single transcript."""
+        from ..schema import ChatRole
+
+        parts: list[str] = []
+        for m in self.llm_messages[-20:]:
+            if m.get("role") == ChatRole.TOOL and len(parts) < tool_tail:
+                parts.append(str(m.get("content", ""))[:char_limit])
+        for m in self.llm_messages[-10:]:
+            if m.get("role") == ChatRole.ASSISTANT and assistant_tail > 0:
+                content = str(m.get("content", ""))
+                if content:
+                    parts.append(f"[Your reasoning]: {content[:600]}")
+                    assistant_tail -= 1
+        return "\n---\n".join(parts)
 
 
 _DISPATCH: dict[str, _ToolExecutor] = {}
@@ -57,9 +79,9 @@ def _load() -> None:
     global _LOADED
     if _LOADED:
         return
-    from . import assess, consolidate, memory, reflect, web
+    from . import memory, synthesize, web
 
-    for mod in (memory, web, assess, consolidate, reflect):
+    for mod in (memory, web, synthesize):
         _DEFINITIONS.extend(mod.DEFINITIONS)
         _DISPATCH.update(mod.EXECUTORS)
     _LOADED = True

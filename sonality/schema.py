@@ -1,7 +1,9 @@
 """Database schema definitions for Neo4j and Qdrant.
 
-Shared enums, vector configs, and collection schemas. Neo4j graph relationship
-types (EdgeType) live in memory/graph.py alongside the Cypher queries that use them.
+Central schema registry: Qdrant collection configs (vectors, indices, quantization),
+Neo4j constraints/indices, and shared enums (ChatRole, ToolName, EventType,
+SemanticCategory, Collection). Neo4j relationship types live in memory/graph.py
+alongside the Cypher queries that use them.
 """
 
 from __future__ import annotations
@@ -57,10 +59,8 @@ class ToolName(StrEnum):
     RECALL_MEMORY = "recall_memory"
     WEB_SEARCH = "web_search"
     WEB_EXTRACT = "web_extract"
-    ASSESS_EVIDENCE = "assess_evidence"
-    CONSOLIDATE = "consolidate"
-    REFLECT = "reflect"
-    STORE_KNOWLEDGE = "store_knowledge"
+    SYNTHESIZE = "synthesize"
+    INTEGRATE_KNOWLEDGE = "integrate_knowledge"
 
 
 class EventType(StrEnum):
@@ -71,16 +71,8 @@ class EventType(StrEnum):
     TOOL_RESULT = "tool_result"
     CONTEXT_BUILD = "context_build"
     SUMMARIZING = "summarizing"
+    REVIEWING = "reviewing"
     DONE = "done"
-
-
-class AssessFocus(StrEnum):
-    """Focus modes for the assess_evidence tool."""
-
-    GAPS = "gaps"
-    CONTRADICTIONS = "contradictions"
-    QUALITY = "quality"
-    SUMMARY = "summary"
 
 
 DENSE_VECTOR: Final = "dense"

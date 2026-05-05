@@ -61,6 +61,7 @@ def sanitize_web_content(text: str, *, max_chars: int = 500) -> str:
     text = _TRAILING_WS_RE.sub("", text)
     text = text.strip()
     if len(text) > max_chars:
+        # Truncate at the last full line to avoid cutting mid-sentence.
         text = text[:max_chars].rsplit("\n", 1)[0] + "\n..."
     return text
 

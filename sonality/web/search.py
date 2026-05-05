@@ -50,7 +50,10 @@ class SearchResult:
 
 @dataclass(frozen=True, slots=True)
 class SearchResponse:
-    """Complete search response."""
+    """Complete search response from Firecrawl /v1/search.
+
+    results is an immutable tuple of SearchResult (each with Playwright-rendered markdown).
+    """
 
     results: tuple[SearchResult, ...]
 
@@ -77,6 +80,11 @@ class WebSearchClient:
         cache_ttl: int = 14400,
         max_concurrent: int = 3,
     ) -> None:
+        """Initialize with Firecrawl base URL.
+
+        cache_ttl: seconds to cache search results (default 4 hours).
+        max_concurrent: semaphore limit for parallel HTTP requests.
+        """
         self._base_url = base_url.rstrip("/")
         self._http = httpx.AsyncClient(base_url=self._base_url, timeout=60.0)
         self._cache: dict[str, tuple[float, SearchResponse]] = {}
@@ -171,7 +179,7 @@ class WebSearchClient:
         *,
         max_results: int = 5,
     ) -> list[SearchResponse]:
-        """Parallel search across multiple queries."""
+        """Parallel search across multiple queries. Failed queries are omitted."""
         responses = await asyncio.gather(
             *(self.search(q, max_results=max_results) for q in queries),
             return_exceptions=True,
@@ -190,4 +198,5 @@ class WebSearchClient:
         return self._call_count
 
     async def close(self) -> None:
+        """Close the underlying HTTP client."""
         await self._http.aclose()
