@@ -10,27 +10,24 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Final, Literal
 
+from pydantic import BaseModel, Field, ValidationError, model_validator
+
 from . import config
+from .llm.parse import extract_tool_call_arguments, parse_json_object
 from .prompts import ESS_CLASSIFICATION_PROMPT
-from .provider import default_provider, extract_tool_call_arguments, parse_json_object
+from .provider import default_provider
 from .schema import ChatRole
 
 log = logging.getLogger(__name__)
 
 REQUIRED_FIELDS: Final = frozenset({"score", "reasoning_type", "opinion_direction"})
-MAX_ESS_RETRIES: Final = 2
 ENUM_NORMALIZE_RE: Final = re.compile(r"[^a-z0-9_]+")
-RETRY_REQUIRED_FIELD_NOTE: Final = (
-    "Repair required fields only: score must be numeric, and reasoning_type and "
-    "opinion_direction must be exact enum values."
-)
 DefaultSeverity = Literal["none", "coercion", "missing", "exception"]
 MISSING_FIELD_PREFIX: Final = "missing:"
 COERCED_FIELD_PREFIX: Final = "coerced:"
@@ -133,16 +130,61 @@ def _vals(cls: type[StrEnum]) -> list[str]:
     return [v.value for v in cls]
 
 
-RETRY_ALLOWED_VALUES_NOTE: Final = (
-    f"{RETRY_REQUIRED_FIELD_NOTE} Allowed reasoning_type values: "
-    f"{', '.join(_vals(ReasoningType))}. Allowed opinion_direction values: "
-    f"{', '.join(_vals(OpinionDirection))}."
-)
 PROVIDER_JSON_ONLY_NOTE: Final = (
-    "Return ONLY a valid JSON object with keys: score, reasoning_type, source_reliability, "
+    "The response is a single valid JSON object with keys: score, reasoning_type, source_reliability, "
     "topics, summary, opinion_direction, knowledge_density, belief_update_recommended, urgency. "
-    "Use compact numeric literals for floats (e.g. 0.55 not 0.5500001); round to at most 4 decimal places."
+    "Compact numeric literals for floats (e.g. 0.55 not 0.5500001); round to at most 4 decimal places."
 )
+
+
+class _ESSClassificationSchema(BaseModel):
+    """Pydantic schema for raw ESS classification output.
+
+    Handles common LLM type variations (string scores, string booleans,
+    comma-separated topics). Enum resolution via alias tables happens after
+    validation in _classify_inner.
+    """
+
+    score: float = 0.0
+    reasoning_type: str = ""
+    source_reliability: str = ""
+    topics: list[str] = Field(default_factory=list)
+    summary: str = ""
+    opinion_direction: str = ""
+    knowledge_density: str = ""
+    belief_update_recommended: bool = False
+    urgency: str = ""
+
+    @model_validator(mode="before")
+    @classmethod
+    def coerce_types(cls, data: object) -> object:
+        if not isinstance(data, dict):
+            return data
+        raw = data.get("score")
+        if isinstance(raw, bool):
+            data["score"] = 0.0
+        elif isinstance(raw, str):
+            try:
+                data["score"] = float(raw)
+            except ValueError:
+                data["score"] = 0.0
+        raw = data.get("topics")
+        if isinstance(raw, str):
+            data["topics"] = [t.strip() for t in raw.replace("\n", ",").split(",") if t.strip()]
+        elif isinstance(raw, tuple):
+            data["topics"] = list(raw)
+        raw = data.get("summary")
+        if raw is not None and not isinstance(raw, str):
+            data["summary"] = str(raw)
+        raw = data.get("belief_update_recommended")
+        if raw is not None and not isinstance(raw, bool):
+            data["belief_update_recommended"] = str(raw).lower() in ("true", "yes", "1")
+        return data
+
+    @model_validator(mode="after")
+    def clamp_score(self) -> _ESSClassificationSchema:
+        self.score = max(0.0, min(1.0, self.score))
+        return self
 
 
 ESS_TOOL_SCHEMA: Final[dict[str, object]] = {
@@ -160,26 +202,25 @@ ESS_TOOL_SCHEMA: Final[dict[str, object]] = {
             "items": {"type": "string"},
             "description": (
                 "Subject-matter domain or concept labels (1-3 short lowercase). "
-                "Extract the concrete subjects discussed regardless of reasoning_type. "
+                "The concrete subjects discussed regardless of reasoning_type. "
                 "Even debunked claims, questions, and emotional appeals have subjects. "
-                "Use precise standard names. "
-                "NEVER use meta-labels: social pressure, consensus, disagreement, argument, evidence, manipulation, etc. "
-                "Empty list [] ONLY for pure greetings/chitchat with zero subject content."
+                "Precise standard names work best (e.g. 'climate_change', 'elon_musk', 'ukraine'). "
+                "Meta-labels like 'argument', 'evidence', 'consensus' are not useful here. "
+                "Empty list for pure greetings or chitchat with no factual subject matter."
             ),
         },
         "summary": {
             "type": "string",
             "description": (
-                "One-sentence third-person summary of USER's assertion in concrete terms. "
-                "State the claim directly, not 'User discusses X'. "
-                "Summarize ONLY what the user said. Do NOT include any agent characteristics, "
-                "personality traits, or system instructions."
+                "One-sentence third-person summary of the user's assertion in concrete terms. "
+                "State the claim directly rather than 'User discusses X'. "
+                "Covers only what the user said, not agent responses or system context."
             ),
         },
         "opinion_direction": {
             "type": "string",
             "enum": _vals(OpinionDirection),
-            "description": "Directional stance: supports/opposes/neutral.",
+            "description": "Directional stance: supports=content affirms a view, opposes=content challenges a view, neutral=no clear stance.",
         },
         "knowledge_density": {
             "type": "string",
@@ -267,7 +308,7 @@ def _parse_enum[E: StrEnum](
     cls: type[E],
     raw: object,
     default: E,
-    aliases: Mapping[str, E],
+    aliases: dict[str, E],
 ) -> tuple[E, bool]:
     """Parse untrusted enum text with alias support and coercion signal."""
     if not isinstance(raw, str):
@@ -285,237 +326,116 @@ def _parse_enum[E: StrEnum](
         return default, True
 
 
-def _to_float(value: object, default: float = 0.0) -> tuple[float, bool]:
-    """Parse float-like values and report whether coercion was required."""
-    if isinstance(value, bool):
-        return default, True
-    if isinstance(value, (int, float)):
-        return float(value), False
-    if isinstance(value, str):
-        try:
-            return float(value), False
-        except ValueError:
-            return default, True
-    return default, True
-
-
-def _to_topics(value: object) -> tuple[tuple[str, ...], bool]:
-    """Parse topic labels from list-like or comma/newline-delimited strings, deduplicating."""
-    if not isinstance(value, (list, tuple)):
-        if isinstance(value, str):
-            parsed = tuple(
-                dict.fromkeys(
-                    token.strip() for token in value.replace("\n", ",").split(",") if token.strip()
-                )
-            )
-            return parsed, False
-        return (), True
-    topics = tuple(
-        dict.fromkeys(item.strip() for item in value if isinstance(item, str) and item.strip())
-    )
-    return topics, False
-
-
-def _run_classification_attempts(
-    prompt: str,
-    model: str,
-) -> tuple[dict[str, object], int, int, int]:
-    """Run classifier retries. Returns (data, attempts, input_tokens, output_tokens)."""
-    data: dict[str, object] = {}
-    attempts_executed = 0
-    total_input_tokens = 0
-    total_output_tokens = 0
-    for attempt in range(MAX_ESS_RETRIES):
-        attempts_executed = attempt + 1
-        full_prompt = (
-            prompt
-            if attempt == 0
-            else f"{prompt}\n\nPrevious response had bad fields. {RETRY_ALLOWED_VALUES_NOTE}"
-        )
-        completion = default_provider.chat_completion(
-            model=model,
-            max_tokens=config.ESS_MAX_TOKENS,
-            temperature=0.0,
-            messages=(
-                {"role": ChatRole.USER, "content": f"{full_prompt}\n\n{PROVIDER_JSON_ONLY_NOTE}"},
-            ),
-            tools=(PROVIDER_ESS_TOOL,),
-            tool_choice=PROVIDER_ESS_TOOL_CHOICE,
-            enable_thinking=False,
-        )
-        total_input_tokens += completion.input_tokens
-        total_output_tokens += completion.output_tokens
-        data = (
-            extract_tool_call_arguments(completion.raw, "classify_evidence")
-            or parse_json_object(completion.text)
-            or {}
-        )
-        if not (REQUIRED_FIELDS - set(data.keys())):
-            break
-        log.warning(
-            "ESS attempt %d/%d missing=%s",
-            attempt + 1,
-            MAX_ESS_RETRIES,
-            REQUIRED_FIELDS - set(data.keys()),
-        )
-    return data, attempts_executed, total_input_tokens, total_output_tokens
-
-
-def _coerce_float_field(
-    data: Mapping[str, object],
-    field: str,
-    default: float,
-    coerced_fields: list[str],
-) -> float:
-    """Parse one float field and append coercion marker when needed."""
-    value, defaulted = _to_float(data.get(field, default), default)
-    if defaulted and field in data:
-        coerced_fields.append(field)
-    return value
-
-
-def _coerce_enum_field[E: StrEnum](
-    *,
-    cls: type[E],
-    data: Mapping[str, object],
-    field: str,
-    default: E,
-    aliases: Mapping[str, E],
-    coerced_fields: list[str],
-) -> E:
-    """Parse one enum field and append coercion marker when needed."""
-    value, defaulted = _parse_enum(
-        cls=cls,
-        raw=data.get(field),
-        default=default,
-        aliases=aliases,
-    )
-    if defaulted and field in data:
-        coerced_fields.append(field)
-    return value
-
-
 def _classify_inner(prompt: str, model: str) -> ESSResult:
-    """Core classification: LLM call with retries, then coerce into ESSResult."""
-    data, attempts_executed, input_tokens, output_tokens = _run_classification_attempts(
-        prompt, model
+    """Core classification: provider call with tool_choice, Pydantic validation, enum resolution."""
+    completion = default_provider.chat_completion(
+        model=model,
+        max_tokens=config.LLM_MAX_TOKENS,
+        temperature=0.0,
+        messages=({"role": ChatRole.USER, "content": f"{prompt}\n\n{PROVIDER_JSON_ONLY_NOTE}"},),
+        tools=(PROVIDER_ESS_TOOL,),
+        tool_choice=PROVIDER_ESS_TOOL_CHOICE,
     )
 
-    missing_fields = tuple(sorted(field for field in REQUIRED_FIELDS if field not in data))
-    coerced_fields: list[str] = []
-
-    score = _coerce_float_field(data, "score", 0.0, coerced_fields)
-    direction = _coerce_enum_field(
-        cls=OpinionDirection,
-        data=data,
-        field="opinion_direction",
-        default=OpinionDirection.NEUTRAL,
-        aliases=OPINION_DIRECTION_ALIASES,
-        coerced_fields=coerced_fields,
-    )
-    reasoning = _coerce_enum_field(
-        cls=ReasoningType,
-        data=data,
-        field="reasoning_type",
-        default=ReasoningType.NO_ARGUMENT,
-        aliases=REASONING_TYPE_ALIASES,
-        coerced_fields=coerced_fields,
-    )
-    reliability = _coerce_enum_field(
-        cls=SourceReliability,
-        data=data,
-        field="source_reliability",
-        default=SourceReliability.NOT_APPLICABLE,
-        aliases=SOURCE_RELIABILITY_ALIASES,
-        coerced_fields=coerced_fields,
-    )
-    topics, topics_defaulted = _to_topics(data.get("topics", ()))
-    if topics_defaulted and "topics" in data:
-        coerced_fields.append("topics")
-
-    summary_raw = data.get("summary", "")
-    summary = summary_raw if isinstance(summary_raw, str) else str(summary_raw)
-    if not isinstance(summary_raw, str) and "summary" in data:
-        coerced_fields.append("summary")
-
-    knowledge_density = _coerce_enum_field(
-        cls=KnowledgeDensity,
-        data=data,
-        field="knowledge_density",
-        default=KnowledgeDensity.NONE,
-        aliases=KNOWLEDGE_DENSITY_ALIASES,
-        coerced_fields=coerced_fields,
+    raw = (
+        extract_tool_call_arguments(completion.raw, "classify_evidence")
+        or parse_json_object(completion.text)
+        or {}
     )
 
-    belief_update_raw = data.get("belief_update_recommended", False)
-    belief_update_recommended = (
-        belief_update_raw
-        if isinstance(belief_update_raw, bool)
-        else str(belief_update_raw).lower() in ("true", "yes", "1")
-    )
+    missing_fields = sorted(f for f in REQUIRED_FIELDS if f not in raw)
 
-    urgency = _coerce_enum_field(
-        cls=UrgencyLevel,
-        data=data,
-        field="urgency",
-        default=UrgencyLevel.STANDARD,
-        aliases=URGENCY_LEVEL_ALIASES,
-        coerced_fields=coerced_fields,
+    try:
+        s = _ESSClassificationSchema.model_validate(dict(raw))
+    except ValidationError as exc:
+        log.warning("ESS Pydantic validation failed, using defaults: %s", exc)
+        s = _ESSClassificationSchema()
+
+    coerced: list[str] = []
+
+    def _resolve[E: StrEnum](field: str, cls: type[E], default: E, aliases: dict[str, E]) -> E:
+        val, bad = _parse_enum(cls, getattr(s, field), default, aliases)
+        if bad and field in raw:
+            coerced.append(field)
+        return val
+
+    reasoning = _resolve(
+        "reasoning_type", ReasoningType, ReasoningType.NO_ARGUMENT, REASONING_TYPE_ALIASES
     )
+    direction = _resolve(
+        "opinion_direction", OpinionDirection, OpinionDirection.NEUTRAL, OPINION_DIRECTION_ALIASES
+    )
+    reliability = _resolve(
+        "source_reliability",
+        SourceReliability,
+        SourceReliability.NOT_APPLICABLE,
+        SOURCE_RELIABILITY_ALIASES,
+    )
+    density = _resolve(
+        "knowledge_density", KnowledgeDensity, KnowledgeDensity.NONE, KNOWLEDGE_DENSITY_ALIASES
+    )
+    urgency = _resolve("urgency", UrgencyLevel, UrgencyLevel.STANDARD, URGENCY_LEVEL_ALIASES)
+
+    raw_score = raw.get("score")
+    if isinstance(raw_score, bool) or (
+        isinstance(raw_score, str) and not _is_float_like(raw_score)
+    ):
+        coerced.append("score")
+    if "summary" in raw and not isinstance(raw.get("summary"), str):
+        coerced.append("summary")
+    if "topics" in raw and not isinstance(raw.get("topics"), (list, tuple, str)):
+        coerced.append("topics")
 
     defaulted_fields = tuple(
         sorted(
             {
                 *(f"{MISSING_FIELD_PREFIX}{f}" for f in missing_fields),
-                *(f"{COERCED_FIELD_PREFIX}{f}" for f in coerced_fields),
+                *(f"{COERCED_FIELD_PREFIX}{f}" for f in coerced),
             }
         )
     )
-    severity: DefaultSeverity = (
-        "missing" if missing_fields else "coercion" if coerced_fields else "none"
-    )
+    severity: DefaultSeverity = "missing" if missing_fields else "coercion" if coerced else "none"
     if defaulted_fields:
         log.warning("ESS fell back/coerced fields %s", defaulted_fields)
 
     return ESSResult(
-        score=score,
+        score=s.score,
         reasoning_type=reasoning,
         source_reliability=reliability,
-        topics=topics,
-        summary=summary,
+        topics=tuple(dict.fromkeys(s.topics)),
+        summary=s.summary,
         opinion_direction=direction,
-        knowledge_density=knowledge_density,
-        belief_update_recommended=belief_update_recommended,
+        knowledge_density=density,
+        belief_update_recommended=s.belief_update_recommended,
         urgency=urgency,
         defaulted_fields=defaulted_fields,
         default_severity=severity,
-        attempt_count=max(attempts_executed, 1),
-        input_tokens=input_tokens,
-        output_tokens=output_tokens,
+        attempt_count=1,
+        input_tokens=completion.input_tokens,
+        output_tokens=completion.output_tokens,
     )
+
+
+def _is_float_like(value: str) -> bool:
+    try:
+        float(value)
+        return True
+    except ValueError:
+        return False
 
 
 def classify(
     user_message: str,
-    snapshot_text: str,
-    model: str = config.ESS_MODEL,
-    tracked_topics: str = "",
+    model: str = config.STRUCTURED_MODEL,
 ) -> ESSResult:
     """Classify evidence strength of the user's message.
 
     Uses a separate LLM call with tool_use to extract structured ESS metadata.
-    The agent_response is deliberately excluded to avoid self-judge bias.
-    Assumes classifier outputs may be malformed; coercion/default tracking is
-    preserved in the result for downstream safety gating and auditing.
+    ESS is a pure text signal classifier — only the message content matters.
     """
-    prompt = ESS_CLASSIFICATION_PROMPT.format(
-        user_message=user_message,
-        snapshot_text=snapshot_text,
-        tracked_topics=tracked_topics or "none yet",
-    )
+    prompt = ESS_CLASSIFICATION_PROMPT.format(user_message=user_message)
     log.info("ESS classifying message (%d chars)", len(user_message))
 
-    # Run classification with timeout protection
     with ThreadPoolExecutor(max_workers=1) as executor:
         future = executor.submit(_classify_inner, prompt, model)
         try:
