@@ -1,9 +1,15 @@
+"""LLM HTTP transport: provider, chat completion, concurrency control.
+
+All JSON parsing, thinking trace removal, and tool call extraction live in
+``llm.parse``. This module handles only HTTP communication and the global
+provider instance + interaction state.
+"""
+
 from __future__ import annotations
 
 import contextlib
 import json
 import logging
-import re
 import threading
 import time
 from collections.abc import Iterator, Mapping, Sequence
@@ -13,160 +19,35 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from . import config
+from .llm.parse import (
+    extract_answer_from_reasoning,
+    message_content_text,
+    strip_thinking_trace,
+    to_nonnegative_int,
+    unwrap_think_tags,
+)
 
 log = logging.getLogger(__name__)
 
 _RETRYABLE_HTTP_STATUSES: Final = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
 _EMPTY_MAPPING: Final[Mapping[str, object]] = {}
-_THINKING_ANSWER_MARKERS: Final = (
-    "Final Output:",
-    "Output:",
-    "Answer:",
-    "Final Answer:",
-    "Response:",
-)
-_THINK_BLOCK_RE: Final = re.compile(r"<think>.*?</think>", re.IGNORECASE | re.DOTALL)
-_THINK_CODE_BLOCK_RE: Final = re.compile(
-    r"```(?:thinking|thought|reasoning)[\s\S]*?```", re.IGNORECASE
-)
-# Qwen 3 sometimes outputs asterisk-prefixed reasoning without <think> tags
-_ASTERISK_THOUGHT_RE: Final = re.compile(r"^\s*\*[^*\n]+\*?\s*$", re.MULTILINE)
-_SEMANTIC_MARKER_RE: Final = re.compile(r"\[semantic/[^\]]*\][^\n]*\n?", re.IGNORECASE)
+
+__all__ = [
+    "ChatResult",
+    "LLMProvider",
+    "StreamChunk",
+    "default_provider",
+    "interaction_active",
+    "interaction_in_progress",
+    "llm_semaphore_idle",
+    "supports_thinking",
+]
 
 
 class StreamChunk(NamedTuple):
-    """A single streaming chunk with content and reasoning deltas."""
+    """A single streaming text chunk from the agentic loop."""
 
     content: str
-    reasoning: str
-
-
-def _normalize_schema_notation(text: str) -> str:
-    """Coerce common model schema-template patterns into valid JSON."""
-    text = re.sub(r':\s*"\.\.\."', ': ""', text)
-    text = re.sub(r'\{\s*"\.\.\."(?:\s*,)?\s*', "{", text)
-    text = re.sub(r",\s*\.\.\.\s*(?=[}\]])", "", text)
-    text = re.sub(r"(?<=[{,\[])\s*\.\.\.\s*(?=[,}\]])", "", text)
-    text = re.sub(r',\s*\.\.\.\s*(?=")', ", ", text)
-    text = re.sub(r'"\s*\.\.\.\s*(?=")', '", ', text)
-    text = re.sub(r"\s+\.\.\.\s*(?=[}\]])", "", text)
-    text = re.sub(r"\[\s*\.\.\.\s*\]", "[]", text)
-    text = re.sub(r":\s*<float>", ": 0.5", text)
-    text = re.sub(r":\s*<string>", ': ""', text)
-    text = re.sub(r":\s*<int>", ": 0", text)
-    text = re.sub(r'"([^"]+)"\s*(?:\|\s*"[^"]*"\s*)+', r'"\1"', text)
-    text = re.sub(r":\s*([A-Z_]+)\s*(?:\|\s*[A-Z_]+\s*)+(?=[,}\s])", r': "\1"', text)
-    text = re.sub(r'"([^"]+)"\s*(?:or\s+"[^"]*"\s*)+', r'"\1"', text)
-    text = re.sub(r'"([^"/]+)(?:/[^"/]+)+"', r'"\1"', text)
-    text = re.sub(r":\s*\bfloat\b", ": 0.5", text)
-    text = re.sub(r":\s*\bint\b", ": 0", text)
-    text = re.sub(r":\s*\bbool\b", ": false", text)
-    text = re.sub(r":\s*\bstring\b", ': ""', text)
-    text = re.sub(r":\s*\bnull\b\s*(?=[,}])", ": null", text)
-    text = re.sub(r'"[-+]?\d+\.?\d*\s*(?:to|-)\s*[-+]?\d+\.?\d*"', '"0.5"', text)
-    text = re.sub(r":\s*[-+]?\d+\.?\d*\s*(?:to|-)\s*[-+]?\d+\.?\d*(?=[,}\s])", ": 0.5", text)
-    text = re.sub(r"(\d)\.\.\.", r"\1", text)
-    text = re.sub(r":\s*\.\.\.\s*(?=[,}])", ": 0.0", text)
-    return text
-
-
-def extract_last_json_object(text: str) -> dict[str, object] | None:
-    """Find the largest (by character span) valid JSON object in text."""
-    stripped = text.strip()
-    cleaned = stripped.replace("```json", "").replace("```", "").strip()
-    cleaned = re.sub(r":\s*\+(\d)", r": \1", cleaned)
-    decoder = json.JSONDecoder()
-
-    def _try_parse(source: str) -> dict[str, object] | None:
-        candidates: list[tuple[int, int, dict[str, object]]] = []
-        i = 0
-        while i < len(source):
-            if source[i] != "{":
-                i += 1
-                continue
-            try:
-                obj, end = decoder.raw_decode(source, i)
-                if isinstance(obj, dict):
-                    candidates.append((i, end, obj))
-                i = end
-            except json.JSONDecodeError:
-                i += 1
-        return max(candidates, key=lambda c: c[1] - c[0])[2] if candidates else None
-
-    result = _try_parse(cleaned)
-    if result is not None:
-        return result
-    normalized = _normalize_schema_notation(cleaned)
-    if normalized != cleaned and (result := _try_parse(normalized)) is not None:
-        return result
-    try:
-        arr = json.loads(cleaned)
-        if isinstance(arr, list) and arr and all(isinstance(x, int) for x in arr):
-            return {"ranking": arr}
-    except json.JSONDecodeError:
-        pass
-    return None
-
-
-def _extract_answer_from_reasoning(reasoning: str) -> str:
-    """Extract answer from thinking model reasoning_content field."""
-    cleaned = strip_thinking_trace(reasoning)
-    for marker in _THINKING_ANSWER_MARKERS:
-        idx = cleaned.lower().rfind(marker.lower())
-        if idx != -1 and (answer := cleaned[idx + len(marker) :].strip()):
-            return answer
-    for opener, closer in (("{", "}"), ("[", "]")):
-        end = cleaned.rfind(closer)
-        if end != -1:
-            depth = 0
-            for i in range(end, -1, -1):
-                if cleaned[i] == closer:
-                    depth += 1
-                elif cleaned[i] == opener:
-                    depth -= 1
-                    if depth == 0 and len(candidate := cleaned[i : end + 1].strip()) > 2:
-                        return candidate
-    for line in reversed(cleaned.strip().splitlines()):
-        if line.strip():
-            return line.strip()
-    return ""
-
-
-def strip_thinking_trace(text: str) -> str:
-    """Remove chain-of-thought traces from model-visible output."""
-    result = _THINK_BLOCK_RE.sub("", text)
-    result = _THINK_CODE_BLOCK_RE.sub("", result)
-    result = _ASTERISK_THOUGHT_RE.sub("", result)
-    result = _SEMANTIC_MARKER_RE.sub("", result)
-    return result.strip()
-
-
-def _message_content_text(message: object) -> str:
-    if isinstance(message, str):
-        return message
-    if not isinstance(message, list):
-        return ""
-    parts: list[str] = []
-    for item in message:
-        if isinstance(item, str):
-            parts.append(item)
-        elif (
-            isinstance(item, dict)
-            and item.get("type") == "text"
-            and isinstance(item.get("text"), str)
-        ):
-            parts.append(item["text"])
-    return "".join(parts)
-
-
-def _to_nonnegative_int(value: object) -> int:
-    if isinstance(value, bool):
-        return 0
-    if isinstance(value, int):
-        return max(value, 0)
-    if isinstance(value, float):
-        return max(int(value), 0)
-    return 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,13 +63,8 @@ class ChatResult:
 class LLMProvider:
     """LLM provider with per-instance config and semaphore.
 
-    Each instance has its own:
-    - base_url, api_key, timeout configuration
-    - threading.Semaphore for serializing calls (single-GPU servers)
-
-    Usage:
-        provider = LLMProvider("https://api.openai.com/v1", "sk-...")
-        result = provider.chat_completion(model="gpt-4", messages=[...], max_tokens=1000)
+    Each instance has its own base_url, api_key, timeout, and a
+    threading.Semaphore for serializing calls (single-GPU servers).
     """
 
     def __init__(self, base_url: str, api_key: str = "", timeout: int = 300) -> None:
@@ -198,7 +74,7 @@ class LLMProvider:
         self._semaphore = threading.Semaphore(config.LLM_CONCURRENCY)
 
     def _post_json(self, path: str, payload: Mapping[str, object]) -> dict[str, object]:
-        """POST JSON to the provider with retries."""
+        """POST JSON to the provider with retries on transient failures."""
         body = json.dumps(payload).encode("utf-8")
         normalized = path if path.startswith("/") else f"/{path}"
         url = f"{self.base_url}{normalized}"
@@ -207,7 +83,8 @@ class LLMProvider:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
         log.debug("POST %s (%d bytes)", normalized, len(body))
-        for attempt in range(1, 4):
+        max_attempts = config.LLM_MAX_RETRIES
+        for attempt in range(1, max_attempts + 1):
             request = Request(url, data=body, headers=headers, method="POST")
             t0 = time.time()
             try:
@@ -220,15 +97,9 @@ class LLMProvider:
                 raise RuntimeError("Provider returned a non-object JSON payload")
             except HTTPError as exc:
                 elapsed = time.time() - t0
-                if attempt < 3 and int(exc.code) in _RETRYABLE_HTTP_STATUSES:
-                    log.warning(
-                        "POST %s HTTP %d (attempt %d/3, %.1fs), retrying",
-                        normalized,
-                        exc.code,
-                        attempt,
-                        elapsed,
-                    )
-                    time.sleep(config.LLM_BACKOFF_BASE**attempt)
+                retryable = int(exc.code) in _RETRYABLE_HTTP_STATUSES
+                if retryable and attempt < max_attempts:
+                    self._retry_wait(normalized, f"HTTP {exc.code}", attempt, max_attempts, elapsed)
                     continue
                 detail = exc.read().decode("utf-8") if exc.fp else ""
                 log.error(
@@ -239,39 +110,41 @@ class LLMProvider:
                 elapsed = time.time() - t0
                 reason = getattr(exc, "reason", None)
                 if isinstance(reason, TimeoutError):
-                    log.error("POST %s timeout after %.1fs", normalized, elapsed)
-                    raise RuntimeError(f"Provider timeout: {reason}") from exc
+                    raise RuntimeError(f"Provider timeout after {elapsed:.1f}s") from exc
                 reason_str = str(reason) if reason else str(exc)
                 if "name resolution" in reason_str.lower():
-                    log.error("POST %s DNS failure: %s", normalized, reason_str)
-                    raise RuntimeError(f"Provider network error: {exc}") from exc
-                if attempt < 3:
-                    log.warning(
-                        "POST %s network error (attempt %d/3, %.1fs): %s",
-                        normalized,
-                        attempt,
-                        elapsed,
-                        reason_str,
+                    raise RuntimeError(f"Provider DNS failure: {reason_str}") from exc
+                if attempt < max_attempts:
+                    self._retry_wait(
+                        normalized, f"network: {reason_str}", attempt, max_attempts, elapsed
                     )
-                    time.sleep(config.LLM_BACKOFF_BASE**attempt)
                     continue
-                log.error("POST %s network error after 3 attempts: %s", normalized, reason_str)
-                raise RuntimeError(f"Provider network error: {exc}") from exc
+                raise RuntimeError(f"Provider network error: {reason_str}") from exc
             except (TimeoutError, ConnectionError, OSError) as exc:
                 elapsed = time.time() - t0
-                if attempt < 3:
-                    log.warning(
-                        "POST %s transport error (attempt %d/3, %.1fs): %s",
-                        normalized,
-                        attempt,
-                        elapsed,
-                        exc,
+                if attempt < max_attempts:
+                    self._retry_wait(
+                        normalized, f"transport: {exc}", attempt, max_attempts, elapsed
                     )
-                    time.sleep(config.LLM_BACKOFF_BASE**attempt)
                     continue
-                log.error("POST %s transport error after 3 attempts: %s", normalized, exc)
                 raise RuntimeError(f"Provider transport error: {exc}") from exc
         raise RuntimeError("Provider request failed after retries")
+
+    @staticmethod
+    def _retry_wait(
+        path: str, reason: str, attempt: int, max_attempts: int, elapsed: float
+    ) -> None:
+        wait = config.LLM_BACKOFF_BASE**attempt
+        log.warning(
+            "POST %s %s (attempt %d/%d, %.1fs), retrying in %.1fs",
+            path,
+            reason,
+            attempt,
+            max_attempts,
+            elapsed,
+            wait,
+        )
+        time.sleep(wait)
 
     def chat_completion(
         self,
@@ -282,7 +155,6 @@ class LLMProvider:
         temperature: float = -1.0,
         tools: Sequence[Mapping[str, object]] = (),
         tool_choice: str | Mapping[str, object] = _EMPTY_MAPPING,
-        enable_thinking: bool = False,
     ) -> ChatResult:
         """Synchronous chat completion with semaphore protection."""
         log.info(
@@ -295,9 +167,9 @@ class LLMProvider:
         )
         payload: dict[str, object] = {
             "model": model,
-            "messages": [dict(m) for m in messages],
+            "messages": [{k: v for k, v in m.items() if not k.startswith("_")} for m in messages],
             "max_tokens": max_tokens,
-            "chat_template_kwargs": {"enable_thinking": enable_thinking},
+            "chat_template_kwargs": {"enable_thinking": supports_thinking(model)},
         }
         if temperature >= 0.0:
             payload["temperature"] = temperature
@@ -317,30 +189,65 @@ class LLMProvider:
         if isinstance(choices, list) and choices:
             first = choices[0]
             if isinstance(first, dict) and isinstance(message := first.get("message"), dict):
-                raw_content = _message_content_text(message.get("content", ""))
-                raw_reasoning = message.get("reasoning_content", "")
+                raw_content = message_content_text(message.get("content", ""))
+                raw_reasoning = message.get("reasoning_content") or message.get("reasoning") or ""
+                if isinstance(raw_reasoning, list):
+                    raw_reasoning = " ".join(
+                        str(x.get("text", x)) if isinstance(x, dict) else str(x)
+                        for x in raw_reasoning
+                    )
+                elif not isinstance(raw_reasoning, str):
+                    raw_reasoning = str(raw_reasoning) if raw_reasoning else ""
                 log.debug(
                     "LLM_RAW content=%d chars, reasoning=%d chars, finish=%s",
                     len(raw_content),
-                    len(raw_reasoning) if raw_reasoning else 0,
+                    len(raw_reasoning),
                     first.get("finish_reason", "unknown"),
                 )
                 text = strip_thinking_trace(raw_content)
-                if not text and isinstance(raw_reasoning, str) and raw_reasoning:
-                    log.debug("LLM_RAW extracting from reasoning_content (content was empty)")
-                    text = _extract_answer_from_reasoning(raw_reasoning)
+                if not text and raw_content.strip():
+                    unwrapped = unwrap_think_tags(raw_content)
+                    text = extract_answer_from_reasoning(unwrapped)
+                    if text:
+                        log.info("Recovered %d chars from thinking-wrapped content", len(text))
+                    else:
+                        log.warning(
+                            "Failed to extract from thinking-wrapped content (%d raw, %d unwrapped)",
+                            len(raw_content),
+                            len(unwrapped),
+                        )
+                if not text and raw_reasoning:
+                    text = extract_answer_from_reasoning(raw_reasoning)
+                    if text:
+                        log.info("Recovered %d chars from reasoning_content", len(text))
+                    else:
+                        log.warning(
+                            "Failed to extract from reasoning_content (%d chars)",
+                            len(raw_reasoning),
+                        )
 
         usage = raw.get("usage")
         input_tokens = output_tokens = 0
         if isinstance(usage, dict):
-            input_tokens = _to_nonnegative_int(
+            input_tokens = to_nonnegative_int(
                 usage.get("prompt_tokens", usage.get("input_tokens", 0))
             )
-            output_tokens = _to_nonnegative_int(
+            output_tokens = to_nonnegative_int(
                 usage.get("completion_tokens", usage.get("output_tokens", 0))
             )
 
         elapsed = time.time() - t0
+        has_tool_calls = bool(
+            isinstance(choices, list)
+            and choices
+            and isinstance(choices[0], dict)
+            and isinstance(choices[0].get("message"), dict)
+            and choices[0]["message"].get("tool_calls")
+        )
+        if not text and output_tokens > 100 and not has_tool_calls:
+            log.warning(
+                "LLM %s: %d output tokens produced no extractable text", model, output_tokens
+            )
         log.info(
             "LLM done: in=%d out=%d text=%d elapsed=%.1fs",
             input_tokens,
@@ -361,11 +268,22 @@ class LLMProvider:
         return False
 
 
-# --- Default provider instance for sonality modules ---
+# --- Default provider instance ---
 default_provider: LLMProvider = LLMProvider(
     config.BASE_URL, config.API_KEY, config.LLM_REQUEST_TIMEOUT
 )
 
+# Models known to support extended thinking (Ollama: chat_template_kwargs enable_thinking).
+# Patterns must match llama.cpp GGUF filenames — note gemma-4 (hyphen) vs Ollama gemma4.
+_THINKING_MODELS: Final = frozenset({"qwq", "qwen3", "deepseek-r1", "gemma4", "gemma-4", "glm-4.7"})
+
+
+def supports_thinking(model: str) -> bool:
+    """Return True if the model supports enable_thinking=True."""
+    return any(name in model.lower() for name in _THINKING_MODELS)
+
+
+# --- Interaction state (global; used by semantic worker to defer during user turns) ---
 _interaction_event = threading.Event()
 
 interaction_in_progress = _interaction_event.is_set
@@ -383,113 +301,3 @@ def interaction_active() -> Iterator[None]:
 def llm_semaphore_idle() -> bool:
     """Return True if the default LLM semaphore is free AND no interaction is active."""
     return not interaction_in_progress() and default_provider.semaphore_idle()
-
-
-_ANALYSIS_COMPLETE_RE: Final = re.compile(r"<analysis>[\s\S]*?</analysis>", re.IGNORECASE)
-_ANALYSIS_UNCLOSED_RE: Final = re.compile(r"<analysis>[\s\S]*$", re.IGNORECASE)
-
-
-def _strip_analysis_block(text: str) -> str:
-    """Strip <analysis>...</analysis> scratchpad blocks from LLM output."""
-    text = _ANALYSIS_COMPLETE_RE.sub("", text)
-    text = _ANALYSIS_UNCLOSED_RE.sub("", text)
-    return text.strip()
-
-
-def decode_llm_json(text: str) -> dict[str, object] | list[object]:
-    """Extract JSON (object or array) from LLM response text.
-
-    Strips markdown fences and <analysis> blocks, attempts whole-text parse
-    first (preserving bare arrays), then falls back to extract_last_json_object
-    for messy output. Raises ValueError if no JSON can be extracted.
-    """
-    cleaned = _strip_analysis_block(text)
-    cleaned = cleaned.replace("```json", "").replace("```", "").strip()
-    if not cleaned:
-        raise ValueError("Empty LLM response")
-    try:
-        parsed = json.loads(cleaned)
-        if isinstance(parsed, (dict, list)):
-            return parsed
-    except json.JSONDecodeError:
-        pass
-    # Fix double-escaped quotes: \\" → " inside JSON strings
-    if '\\"' in cleaned:
-        try:
-            fixed = cleaned.replace('\\"', '"')
-            parsed = json.loads(fixed)
-            if isinstance(parsed, (dict, list)):
-                return parsed
-        except json.JSONDecodeError:
-            pass
-    obj = extract_last_json_object(cleaned)
-    if obj is not None:
-        return obj
-    raise ValueError(f"No valid JSON in LLM response: {text[:120]!r}")
-
-
-def parse_json_object(text: str) -> dict[str, object]:
-    """Extract a JSON object from LLM response text; returns {} on failure."""
-    try:
-        result = decode_llm_json(text)
-        return result if isinstance(result, dict) else {}
-    except ValueError:
-        return {}
-
-
-class ParsedToolCall(NamedTuple):
-    """Parsed tool call from an LLM chat-completion payload."""
-
-    name: str
-    args: dict[str, object]
-    id: str
-
-
-def _get_raw_tool_calls(raw: Mapping[str, object]) -> list[dict[str, object]]:
-    """Navigate choices[0].message.tool_calls safely, returning raw dicts."""
-    choices = raw.get("choices")
-    if not isinstance(choices, list) or not choices:
-        return []
-    first = choices[0]
-    if not isinstance(first, dict):
-        return []
-    message = first.get("message")
-    if not isinstance(message, dict):
-        return []
-    calls = message.get("tool_calls")
-    return [c for c in calls if isinstance(c, dict)] if isinstance(calls, list) else []
-
-
-def extract_tool_calls(raw: Mapping[str, object]) -> list[ParsedToolCall]:
-    """Parse all tool calls from a raw LLM completion payload."""
-    parsed: list[ParsedToolCall] = []
-    for call in _get_raw_tool_calls(raw):
-        func = call.get("function")
-        if not isinstance(func, dict):
-            continue
-        name = str(func.get("name", ""))
-        raw_args = func.get("arguments", "{}")
-        args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
-        if not isinstance(args, dict):
-            args = {}
-        parsed.append(ParsedToolCall(name=name, args=args, id=str(call.get("id", ""))))
-    return parsed
-
-
-def extract_tool_call_arguments(
-    raw_payload: Mapping[str, object], function_name: str
-) -> dict[str, object]:
-    """Extract arguments for a specific tool call by function name."""
-    for call in _get_raw_tool_calls(raw_payload):
-        func = call.get("function")
-        if not isinstance(func, dict) or func.get("name") != function_name:
-            continue
-        arguments = func.get("arguments")
-        if isinstance(arguments, dict):
-            return dict(arguments)
-        if isinstance(arguments, str):
-            with contextlib.suppress(json.JSONDecodeError):
-                parsed = json.loads(arguments)
-                if isinstance(parsed, dict):
-                    return dict(parsed)
-    return {}
