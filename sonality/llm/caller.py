@@ -7,6 +7,7 @@ models in parallel, then merge results for higher-confidence decisions.
 from __future__ import annotations
 
 import logging
+import random
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -191,8 +192,20 @@ def llm_call[T: BaseModel](
         except RuntimeError as exc:
             last_error = f"Provider: {exc}"
             error_str = str(exc).lower()
+            # Terminal errors: DNS/network failures and HTTP 4xx client errors
             is_terminal = any(
-                s in error_str for s in ("name resolution", "network error", "transport error")
+                s in error_str
+                for s in (
+                    "name resolution",
+                    "dns failure",
+                    "network error",
+                    "transport error",
+                    "http 400",
+                    "http 401",
+                    "http 403",
+                    "http 404",
+                    "http 422",
+                )
             )
             if is_terminal:
                 log.warning(
@@ -200,7 +213,9 @@ def llm_call[T: BaseModel](
                 )
                 break
             if attempt < max_retries:
-                wait = config.LLM_BACKOFF_BASE**attempt
+                base_wait = config.LLM_BACKOFF_BASE**attempt
+                jitter = random.uniform(0, base_wait * 0.5)
+                wait = base_wait + jitter
                 log.warning(
                     "llm_call %d/%d schema=%s: %s; retry in %.1fs",
                     attempt,
@@ -323,6 +338,37 @@ _QUORUM_ROLES: Final[tuple[tuple[str, str], ...]] = (
 )
 
 
+class SubstantiveJudgement(BaseModel):
+    """LLM judgement of whether tool output contains substantive content."""
+
+    substantive: bool = False
+    reason: str = ""
+
+
+def judge_substantive(tool_content: str, task_summary: str) -> bool:
+    """Judge whether tool output contains substantive content worth critiquing.
+
+    Uses FAST_MODEL for quick binary classification. Returns True if the content
+    contains meaningful information that warrants cross-checking (facts, claims,
+    data), False for trivial outputs (errors, empty results, confirmations).
+    """
+    result = llm_call(
+        prompt=(
+            "Decide if this tool output contains SUBSTANTIVE content worth cross-checking.\n\n"
+            f"Task context: {task_summary[:200]}\n\n"
+            f"Tool output:\n{tool_content[:1500]}\n\n"
+            "Substantive = contains facts, claims, data, or answers that could be wrong.\n"
+            "NOT substantive = errors, empty results, confirmations, action acknowledgments.\n\n"
+            '{"substantive": true/false, "reason": "one sentence"}'
+        ),
+        response_model=SubstantiveJudgement,
+        fallback=SubstantiveJudgement(substantive=len(tool_content) > 200),
+        model=config.FAST_MODEL,
+    )
+    log.debug("judge_substantive: %s (%s)", result.value.substantive, result.value.reason)
+    return result.value.substantive
+
+
 class _CritiqueSchema(BaseModel):
     """Single critique from one quorum role."""
 
@@ -381,7 +427,9 @@ def quorum_critique(context: str) -> str:
     if not outputs:
         return ""
 
-    parts = [f"{name.upper()}: {text}" for name, text in outputs.items()]
+    # Ensure deterministic order: analyst → challenger → strategist
+    role_order = ["analyst", "challenger", "strategist"]
+    parts = [f"{name.upper()}: {outputs[name]}" for name in role_order if name in outputs]
     r = llm_call(
         prompt=(
             "\n\n".join(parts) + "\n\nSynthesize into one clear, actionable insight — "

@@ -107,13 +107,22 @@ AGENT_TEMPERATURE: Final = env_float("SONALITY_AGENT_TEMPERATURE", 0.6)
 # Token budget — single max_tokens for all LLM calls (set high to never constrain)
 # ---------------------------------------------------------------------------
 
-LLM_MAX_TOKENS: Final = env_int("SONALITY_LLM_MAX_TOKENS", 16384)
+LLM_MAX_TOKENS: Final = env_int("SONALITY_LLM_MAX_TOKENS", 8192)
+
+# ---------------------------------------------------------------------------
+# Agent loop parameters
+# ---------------------------------------------------------------------------
+
+AGENT_LOOP_HARD_CEILING: Final = env_int("SONALITY_AGENT_LOOP_HARD_CEILING", 12)
+AGENT_COMPRESS_THRESHOLD: Final = env_int("SONALITY_AGENT_COMPRESS_THRESHOLD", 12)
+AGENT_COMPRESS_KEEP_TAIL: Final = env_int("SONALITY_AGENT_COMPRESS_KEEP_TAIL", 4)
 
 # ---------------------------------------------------------------------------
 # Limits, timeouts, and retry behavior
 # ---------------------------------------------------------------------------
 
 EPISODE_CONTENT_LIMIT: Final = env_int("SONALITY_EPISODE_CONTENT_LIMIT", 300)
+BELIEF_PROMPT_WINDOW: Final = env_int("SONALITY_BELIEF_PROMPT_WINDOW", 15)
 ESS_TIMEOUT: Final = env_int("SONALITY_ESS_TIMEOUT", 300)
 FORGETTING_CANDIDATE_LIMIT: Final = env_int("SONALITY_FORGETTING_CANDIDATE_LIMIT", 10)
 

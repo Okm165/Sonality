@@ -121,7 +121,10 @@ async def split_retrieve(
     if len(sub_queries) <= 1:
         results = await store.vector_search(query, top_k=n_per_sub)
         episode_uids = list({h.episode_uid for h in results})
-        return await graph.get_episodes(episode_uids)
+        episodes = await graph.get_episodes(episode_uids)
+        if episodes:
+            await graph.update_episode_access([ep.uid for ep in episodes])
+        return episodes
 
     sem = asyncio.Semaphore(4)
 
@@ -136,4 +139,7 @@ async def split_retrieve(
                 return []
 
     sub_results = await asyncio.gather(*(search_one(sq) for sq in sub_queries))
-    return _aggregate(sub_results, strategy)
+    aggregated = _aggregate(sub_results, strategy)
+    if aggregated:
+        await graph.update_episode_access([ep.uid for ep in aggregated])
+    return aggregated

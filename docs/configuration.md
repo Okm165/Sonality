@@ -56,7 +56,7 @@ Embeddings are computed locally using **FastEmbed** with the `BAAI/bge-large-en-
 | Variable | Default | Notes |
 |----------|---------|-------|
 | `SONALITY_AGENT_TEMPERATURE` | `0.6` | Response temperature |
-| `SONALITY_LLM_MAX_TOKENS` | `6000` | Max output tokens |
+| `SONALITY_LLM_MAX_TOKENS` | `8192` | Max output tokens per LLM call |
 | `SONALITY_LLM_TIMEOUT` | `600` | HTTP request timeout (seconds) |
 | `SONALITY_ASYNC_TIMEOUT` | `3000` | Async operation timeout (seconds) |
 | `SONALITY_FAST_MODEL` | Same as `SONALITY_MODEL` | Model for fast scoring / lightweight tasks |

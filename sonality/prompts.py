@@ -78,6 +78,19 @@ vague modifiers hurt; if the topic is niche, broadening slightly finds adjacent 
 
 Output JSON only: {{"queries":["improved query 1","improved query 2"]}}"""
 
+QUERY_EXPANSION_PROMPT: Final = """\
+Generate search query variants that will find relevant web results.
+
+Original query: {query}
+Research context: {context}
+
+Generate 2–3 diverse, concrete search queries that:
+- Make key entities, dates, or locations explicit
+- Cover different angles (broader context, specific claims, alternative phrasings)
+- Are independently useful — not just word substitutions
+
+Keep queries under 200 characters. Output JSON only: {{"queries":["...","..."]}}"""
+
 LOOP_HANDOFF_PROMPT: Final = """\
 Assess whether research is complete or needs more work.
 
@@ -212,6 +225,13 @@ opinion_direction: supports (affirms a claim), opposes (challenges a claim), neu
 
 knowledge_density: high (multiple verifiable facts), moderate (a few claims with context), \
 low (opinion without evidence), none (purely social).
+
+summary: One-sentence third-person summary of the user's assertion in concrete terms. \
+State the claim directly (e.g. "The study found X" rather than "User discusses X").
+
+source_reliability: How trustworthy is the source? \
+high (peer-reviewed, established news, official records), medium (credible but unverified, expert blog), \
+low (anonymous, unattributed, social media rumor), unknown (cannot assess).
 
 belief_update_recommended: true when the content contains substantive sourced claims worth integrating.
 urgency: immediate (time-sensitive breaking events) | standard | low (evergreen)."""

@@ -53,9 +53,16 @@ class SearchResponse:
     """Complete search response from Firecrawl /v1/search.
 
     results is an immutable tuple of SearchResult (each with Playwright-rendered markdown).
+    error: non-empty string if the search failed (vs legitimately empty results).
     """
 
     results: tuple[SearchResult, ...]
+    error: str = ""
+
+    @property
+    def failed(self) -> bool:
+        """True if search failed due to error (not just empty results)."""
+        return bool(self.error)
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,9 +131,15 @@ class WebSearchClient:
                 resp.raise_for_status()
                 raw = resp.json()
                 self._call_count += 1
-        except Exception:
-            log.warning("Firecrawl search failed for query=%.80s", query, exc_info=True)
-            return SearchResponse(results=())
+        except httpx.TimeoutException as exc:
+            log.warning("Firecrawl search timeout for query=%.80s", query)
+            return SearchResponse(results=(), error=f"Search timeout: {exc}")
+        except httpx.HTTPStatusError as exc:
+            log.warning("Firecrawl HTTP %d for query=%.80s", exc.response.status_code, query)
+            return SearchResponse(results=(), error=f"HTTP {exc.response.status_code}")
+        except Exception as exc:
+            log.warning("Firecrawl search failed for query=%.80s: %s", query, exc)
+            return SearchResponse(results=(), error=str(exc))
 
         elapsed_ms = (time.monotonic() - t0) * 1000
         items = raw.get("data", []) if isinstance(raw, dict) else []

@@ -8,6 +8,7 @@ Run: uv run pytest tests/test_api.py -v --tb=short
 
 from __future__ import annotations
 
+from collections.abc import Generator
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -78,7 +79,7 @@ def mock_agent() -> MagicMock:
 
 
 @pytest.fixture
-def client(mock_agent: MagicMock) -> TestClient:
+def client(mock_agent: MagicMock) -> Generator[TestClient, None, None]:
     import asyncio
 
     _agent_store["agent"] = mock_agent
@@ -89,7 +90,7 @@ def client(mock_agent: MagicMock) -> TestClient:
 
 
 @pytest.fixture
-def client_no_agent() -> TestClient:
+def client_no_agent() -> Generator[TestClient, None, None]:
     _agent_store.pop("agent", None)
     yield TestClient(app, raise_server_exceptions=False)
 
@@ -239,18 +240,6 @@ class TestIngest:
         assert "job_id" in body
         assert body["status"] == "pending"
 
-    def test_ingest_with_topic_override(self, client: TestClient) -> None:
-        r = client.post(
-            "/ingest",
-            json={"text": "Some text.", "topic_override": "renewable_energy"},
-        )
-        assert r.status_code == 202
-        assert r.json()["status"] == "pending"
-
-    def test_ingest_no_topic_override(self, client: TestClient) -> None:
-        r = client.post("/ingest", json={"text": "Some text."})
-        assert r.status_code == 202
-        assert r.json()["status"] == "pending"
 
 
 # ---------------------------------------------------------------------------

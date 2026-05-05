@@ -26,7 +26,7 @@ from pydantic import BaseModel, model_validator
 
 from . import config
 from .ess import ESSResult, classifier_exception_fallback, classify
-from .llm.caller import llm_call, quorum_critique
+from .llm.caller import judge_substantive, llm_call, quorum_critique
 from .llm.parse import (
     ParsedToolCall,
     coerce_string_fields,
@@ -55,7 +55,6 @@ from .memory import (
 )
 from .memory.consolidation import maybe_consolidate_segment
 from .memory.graph import (
-    BELIEF_PROMPT_WINDOW,
     BeliefNode,
     EpisodeNode,
     PersonalitySnapshot,
@@ -105,13 +104,6 @@ from .tools.reflect import run_forgetting
 from .web import get_client
 
 log = logging.getLogger(__name__)
-
-_HARD_CEILING: Final = 12  # pure safety circuit breaker — resource exhaustion guard
-_COMPRESS_THRESHOLD: Final = (
-    12  # compress when message count exceeds this; folding is the primary mechanism
-)
-_COMPRESS_KEEP_TAIL: Final = 4  # always keep the most recent N messages intact
-_FOLD_MIN_CHARS: Final = 300  # only fold tool results longer than this
 _FOLD_PREFIX: Final = "[Folded]"  # marker for folded tool output summaries
 _QUORUM_CRITIQUE: Final = "quorum_critique"  # internal-only step, not a ToolName member
 
@@ -665,7 +657,7 @@ class SonalityAgent:
             if msg.get("role") != ChatRole.TOOL:
                 continue
             raw = str(msg.get("content", ""))
-            if len(raw) <= _FOLD_MIN_CHARS or raw.startswith(_FOLD_PREFIX):
+            if len(raw) <= config.EPISODE_CONTENT_LIMIT or raw.startswith(_FOLD_PREFIX):
                 continue
             step_n = msg.get("_step_n")
             if isinstance(step_n, int) and step_n in step_map:
@@ -824,12 +816,13 @@ class SonalityAgent:
         This compression targets assistant reasoning and system messages that have
         accumulated beyond the threshold. Preserves head (system + user) and tail.
         """
-        if len(llm_messages) <= _COMPRESS_THRESHOLD:
+        if len(llm_messages) <= config.AGENT_COMPRESS_THRESHOLD:
             return llm_messages
 
         preserve_head = llm_messages[:2]
-        compress_section = llm_messages[2:-_COMPRESS_KEEP_TAIL]
-        preserve_tail = llm_messages[-_COMPRESS_KEEP_TAIL:]
+        keep_tail = config.AGENT_COMPRESS_KEEP_TAIL
+        compress_section = llm_messages[2:-keep_tail]
+        preserve_tail = llm_messages[-keep_tail:]
 
         history = "\n\n".join(
             f"[{msg.get('role', 'unknown')}]: {str(msg.get('content', ''))[:600]}"
@@ -1049,7 +1042,7 @@ class SonalityAgent:
         completion = ChatResult(text="", input_tokens=0, output_tokens=0, raw={})
 
         t_loop_start = time.perf_counter()
-        for iteration in range(_HARD_CEILING):
+        for iteration in range(config.AGENT_LOOP_HARD_CEILING):
             t_iter = time.perf_counter()
             recent_calls: set[tuple[str, str]] = set()
             yield AgentEvent(type=THINKING, iteration=iteration, detail="Analyzing...")
@@ -1110,6 +1103,16 @@ class SonalityAgent:
                 yield StreamChunk(clean)
                 return
 
+            calls_to_run = self._dedup_tool_calls(tool_calls, recent_calls)
+            if not calls_to_run:
+                # All calls deduplicated; append assistant message WITHOUT tool_calls
+                # to avoid leaving dangling tool_calls without results.
+                llm_messages.append({
+                    "role": ChatRole.ASSISTANT,
+                    "content": completion.text or "",
+                })
+                continue
+
             assistant_msg: dict[str, object] = {
                 "role": ChatRole.ASSISTANT,
                 "content": completion.text or "",
@@ -1118,9 +1121,6 @@ class SonalityAgent:
             if raw_tc:
                 assistant_msg["tool_calls"] = raw_tc
             llm_messages.append(assistant_msg)
-            calls_to_run = self._dedup_tool_calls(tool_calls, recent_calls)
-            if not calls_to_run:
-                continue
 
             for tc in calls_to_run:
                 yield AgentEvent(
@@ -1148,66 +1148,42 @@ class SonalityAgent:
             )
             self._fold_prior_tool_results(llm_messages, batch_start)
 
-            # Run quorum critique when tool results contain substantive content.
-            # Skip for: trivial results (empty recalls, errors), synthesize output
-            # (already a distilled evaluation), or integrate_knowledge (action, not info).
+            # Quorum critique for substantive tool results (skip action-only tools).
             batch_tools = {tc.name for tc in calls_to_run}
-            skip_critique_tools = {ToolName.SYNTHESIZE, ToolName.INTEGRATE_KNOWLEDGE}
-            tool_content = "\n".join(
-                str(m.get("content", ""))[:600]
-                for m in llm_messages[batch_start:]
-                if m.get("role") == ChatRole.TOOL
-            )
-            substantive = (
-                len(tool_content) > 200
-                and "no relevant" not in tool_content.lower()
-                and not batch_tools.issubset(skip_critique_tools)
-            )
-            if substantive:
-                yield AgentEvent(
-                    type=REVIEWING, iteration=iteration, detail="Cross-checking evidence..."
+            action_only = batch_tools.issubset({ToolName.SYNTHESIZE, ToolName.INTEGRATE_KNOWLEDGE})
+            if not action_only:
+                tool_content = "\n".join(
+                    str(m.get("content", ""))[:600]
+                    for m in llm_messages[batch_start:]
+                    if m.get("role") == ChatRole.TOOL
                 )
-                original_task = next(
-                    (
-                        str(m.get("content", ""))[:200]
-                        for m in conv
-                        if m.get("role") == ChatRole.USER
-                    ),
+                task_summary = next(
+                    (str(m.get("content", ""))[:200] for m in conv if m.get("role") == ChatRole.USER),
                     "",
                 )
-                critique = quorum_critique(
-                    f"Original task: {original_task}\n\n"
-                    f"Recent tool outputs:\n{tool_content}\n\n"
-                    "What's missing, contradictory, or assumed without evidence? "
-                    "Stay focused on the original task."
-                )
-                if critique:
-                    llm_messages.append(
-                        {
-                            "role": ChatRole.SYSTEM,
-                            "content": f"[Reasoning advisor]: {critique}",
-                        }
+                if judge_substantive(tool_content, task_summary):
+                    yield AgentEvent(
+                        type=REVIEWING, iteration=iteration, detail="Cross-checking evidence..."
                     )
-                    step_n = len(self._step_log) + 1
-                    self._step_log.append(
-                        _LoopStep(
-                            n=step_n,
-                            tool=_QUORUM_CRITIQUE,
-                            query="critique",
-                            summary=critique[:150],
-                            brief=critique[:400],
+                    critique = quorum_critique(
+                        f"Original task: {task_summary}\n\nRecent tool outputs:\n{tool_content}\n\n"
+                        "What's missing, contradictory, or assumed without evidence?"
+                    )
+                    if critique:
+                        llm_messages.append(
+                            {"role": ChatRole.SYSTEM, "content": f"[Reasoning advisor]: {critique}"}
                         )
-                    )
-                    log.info("Step %d | quorum_critique: %s", step_n, critique[:100])
-            else:
-                if batch_tools.issubset(skip_critique_tools):
-                    log.info(
-                        "Skipping quorum_critique: action tools only (%s)", ", ".join(batch_tools)
-                    )
-                else:
-                    log.info(
-                        "Skipping quorum_critique: trivial output (%d chars)", len(tool_content)
-                    )
+                        step_n = len(self._step_log) + 1
+                        self._step_log.append(
+                            _LoopStep(
+                                n=step_n,
+                                tool=_QUORUM_CRITIQUE,
+                                query="critique",
+                                summary=critique[:150],
+                                brief=critique[:400],
+                            )
+                        )
+                        log.info("Step %d | quorum_critique: %s", step_n, critique[:100])
 
             t_meta = time.perf_counter()
             self._update_knowledge(iteration)
@@ -1236,7 +1212,7 @@ class SonalityAgent:
                     }
                 )
 
-        log.warning("Agentic loop: hard ceiling reached (%d steps)", _HARD_CEILING)
+        log.warning("Agentic loop: hard ceiling reached (%d steps)", config.AGENT_LOOP_HARD_CEILING)
         clean = strip_markdown(completion.text)
         self._last_assistant_msg = clean
         yield StreamChunk(clean)
@@ -1264,7 +1240,7 @@ class SonalityAgent:
         """Load snapshot and beliefs once (sorted by |valence|, same window as prompt formatting)."""
         snapshot = await self._graph.get_personality_snapshot()
         all_beliefs = await self._graph.get_all_beliefs()
-        window = all_beliefs[:BELIEF_PROMPT_WINDOW]
+        window = all_beliefs[:config.BELIEF_PROMPT_WINDOW]
         beliefs_text = format_beliefs_for_prompt_from_nodes(window)
         return IdentityBundle(
             snapshot_text=snapshot.text,

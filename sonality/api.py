@@ -11,6 +11,7 @@ Poll /ingest/{job_id} for status and result.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import time
@@ -128,23 +129,29 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     log.info("Shutting down Sonality agent")
     if _ingest_worker_task:
         _ingest_worker_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await _ingest_worker_task
     agent = _agent_store.pop("agent", None)
     if agent is not None:
         agent.shutdown()
 
 
 async def _ingest_worker() -> None:
-    """Background worker: processes ingest jobs one at a time, serialized."""
+    """Background worker: processes ingest jobs one at a time, serialized.
+
+    Acquires the agent lock to prevent concurrent mutation with chat requests.
+    """
     assert _ingest_queue is not None
     while True:
         job = await _ingest_queue.get()
         job.status = _JobStatus.RUNNING
         log.info("Ingest worker: starting job=%s chars=%d", job.job_id[:8], len(job.text))
         try:
-            agent = _get_agent()
-            ess = await asyncio.to_thread(
-                partial(agent.ingest, job.text, topic_override=job.topic_override)
-            )
+            async with _get_lock():
+                agent = _get_agent()
+                ess = await asyncio.to_thread(
+                    partial(agent.ingest, job.text, topic_override=job.topic_override)
+                )
             job.result = ess
             job.status = _JobStatus.DONE
             log.info("Ingest worker: job=%s done ess=%.2f", job.job_id[:8], ess.score)
@@ -176,7 +183,7 @@ app.add_middleware(RequestIDMiddleware)
 
 class ChatMessage(BaseModel):
     role: ChatRole = Field(..., description="Role: system, user, or assistant")
-    content: str = Field(..., description="Message content")
+    content: str = Field(..., description="Message content", max_length=100_000)
 
 
 class ChatCompletionRequest(BaseModel):
@@ -373,8 +380,8 @@ async def simple_chat(request: SimpleChatRequest) -> SimpleChatResponse:
 
 
 class IngestRequest(BaseModel):
-    text: str = Field(..., description="Content to ingest")
-    topic_override: str = Field(default="")
+    text: str = Field(..., description="Content to ingest", max_length=500_000)
+    topic_override: str = Field(default="", max_length=200)
 
 
 class IngestResponse(BaseModel):

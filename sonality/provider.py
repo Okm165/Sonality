@@ -10,6 +10,7 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import random
 import threading
 import time
 from collections.abc import Iterator, Mapping, Sequence
@@ -89,7 +90,18 @@ class LLMProvider:
             t0 = time.time()
             try:
                 with urlopen(request, timeout=self.timeout) as response:
-                    parsed = json.loads(response.read().decode("utf-8"))
+                    raw_bytes = response.read()
+                    try:
+                        parsed = json.loads(raw_bytes.decode("utf-8"))
+                    except (json.JSONDecodeError, UnicodeDecodeError) as decode_exc:
+                        elapsed = time.time() - t0
+                        log.error(
+                            "POST %s decode failed after %.1fs: %s",
+                            normalized,
+                            elapsed,
+                            decode_exc,
+                        )
+                        raise RuntimeError(f"Provider response decode error: {decode_exc}") from decode_exc
                 elapsed = time.time() - t0
                 if isinstance(parsed, dict):
                     log.debug("POST %s OK in %.1fs", normalized, elapsed)
@@ -134,7 +146,9 @@ class LLMProvider:
     def _retry_wait(
         path: str, reason: str, attempt: int, max_attempts: int, elapsed: float
     ) -> None:
-        wait = config.LLM_BACKOFF_BASE**attempt
+        base_wait = config.LLM_BACKOFF_BASE**attempt
+        jitter = random.uniform(0, base_wait * 0.5)
+        wait = base_wait + jitter
         log.warning(
             "POST %s %s (attempt %d/%d, %.1fs), retrying in %.1fs",
             path,

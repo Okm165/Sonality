@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field, model_validator
 from .. import config
 from ..llm.caller import consensus_call, llm_call
 from ..memory.forgetting import assess_and_forget
-from ..memory.graph import BELIEF_PROMPT_WINDOW, BeliefNode, format_beliefs_for_prompt_from_nodes
+from ..memory.graph import BeliefNode, format_beliefs_for_prompt_from_nodes
 from ..prompts import REFLECTION_DEEP_PROMPT, REFLECTION_WEB_SECTION
 from ..request_identity import get_request_identity
 from . import ToolContext
@@ -245,11 +245,11 @@ def _select_relevant_beliefs(
         )
         selected = [
             all_beliefs[r.index - 1] for r in above_cutoff if 0 < r.index <= len(all_beliefs)
-        ][:BELIEF_PROMPT_WINDOW]
+        ][:config.BELIEF_PROMPT_WINDOW]
         if selected:
             return selected
 
-    return all_beliefs[:BELIEF_PROMPT_WINDOW]
+    return all_beliefs[:config.BELIEF_PROMPT_WINDOW]
 
 
 def execute_reflect_inner(

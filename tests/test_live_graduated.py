@@ -272,7 +272,6 @@ class TestL2StructuredParsing:
     def test_ess_strong_argument_scores_high(self) -> None:
         """A well-reasoned empirical argument should produce ESS > 0.4."""
         from sonality.ess import classify
-        from sonality.memory.graph import SEED_SNAPSHOT
 
         t = time.perf_counter()
         result = classify(
@@ -281,7 +280,6 @@ class TestL2StructuredParsing:
                 "exercise reduces all-cause mortality by 31% and improves cognitive function "
                 "scores by 22% in adults over 50. The effect size was robust across subgroups."
             ),
-            snapshot_text=SEED_SNAPSHOT,
         )
         elapsed = _elapsed(t)
 
@@ -299,12 +297,10 @@ class TestL2StructuredParsing:
     def test_ess_weak_message_scores_low(self) -> None:
         """A contentless filler message should produce ESS < 0.2."""
         from sonality.ess import classify
-        from sonality.memory.graph import SEED_SNAPSHOT
 
         t = time.perf_counter()
         result = classify(
             user_message="ok cool",
-            snapshot_text=SEED_SNAPSHOT,
         )
         elapsed = _elapsed(t)
 
@@ -319,7 +315,6 @@ class TestL2StructuredParsing:
     def test_ess_debunked_claim_scores_near_zero(self) -> None:
         """Conclusively-debunked conspiracy theory must score ≤ 0.07 as debunked_claim."""
         from sonality.ess import ReasoningType, classify
-        from sonality.memory.graph import SEED_SNAPSHOT
 
         t = time.perf_counter()
         result = classify(
@@ -328,7 +323,6 @@ class TestL2StructuredParsing:
                 "temperature data. Multiple independent analysts confirmed the fraud. "
                 "You can't trust any of their warming projections."
             ),
-            snapshot_text=SEED_SNAPSHOT,
         )
         elapsed = _elapsed(t)
 
@@ -494,6 +488,7 @@ class TestL3MemoryPrimitives:
         elapsed = _elapsed(t)
         assert results, "Inserted point not found on read-back"
         point = results[0]
+        assert point.payload is not None, "Point payload is None"
         print(f"\n  text={point.payload['text']!r}  ({elapsed})")
 
     def test_embedding_semantic_ordering(self) -> None:
@@ -545,11 +540,12 @@ class TestL3MemoryPrimitives:
         ]
         client.upsert(collection_name="derivatives", points=points)
 
-        results = client.search(
+        results = client.query_points(
             collection_name="derivatives",
-            query_vector=("dense", query_vec),
+            query=query_vec,
+            using="dense",
             limit=2,
-        )
+        ).points
 
         for uid, _, _ in docs:
             client.delete(collection_name="derivatives", points_selector=[uid])
@@ -751,11 +747,10 @@ class TestL3xMemoryStoreRetrieve:
     pytestmark = pytest.mark.live
 
     def test_derivative_chunker_produces_embeddings(self) -> None:
-        """DerivativeChunker.chunk_and_embed returns ≥1 derivatives with correct dim."""
-        from sonality.memory.derivatives import DerivativeChunker
+        """chunk_and_embed returns ≥1 derivatives with correct dim."""
+        from sonality.memory.derivatives import chunk_and_embed
 
         embedder = Embedder()
-        chunker = DerivativeChunker(embedder)
 
         t = time.perf_counter()
         text = (
@@ -764,7 +759,7 @@ class TestL3xMemoryStoreRetrieve:
             "Agent: The numbers are compelling. The CO2 figures are well-documented, "
             "and France's track record does challenge the safety narrative."
         )
-        results = chunker.chunk_and_embed(text, episode_uid="test-ep-chunk-001")
+        results = chunk_and_embed(embedder, text, episode_uid="test-ep-chunk-001")
         elapsed = _elapsed(t)
 
         first_chunk_text = results[0].node.text[:50] if results else ""
@@ -787,11 +782,10 @@ class TestL3xMemoryStoreRetrieve:
         from qdrant_client import QdrantClient
         from qdrant_client.models import PointStruct
 
-        from sonality.memory.derivatives import DerivativeChunker
+        from sonality.memory.derivatives import chunk_and_embed
         from sonality.memory.embedder import Embedder
 
         embedder = Embedder()
-        chunker = DerivativeChunker(embedder)
 
         ep_uid = f"test-store-{uuid.uuid4().hex[:8]}"
         content = (
@@ -802,7 +796,7 @@ class TestL3xMemoryStoreRetrieve:
         query = "surface code qubit overhead error correction"
 
         t = time.perf_counter()
-        derivatives = chunker.chunk_and_embed(content, episode_uid=ep_uid)
+        derivatives = chunk_and_embed(embedder, content, episode_uid=ep_uid)
 
         client = QdrantClient(url=qdrant_url)
 
@@ -822,11 +816,12 @@ class TestL3xMemoryStoreRetrieve:
         client.upsert(collection_name="derivatives", points=points)
 
         query_vec = embedder.embed_query(query)
-        results = client.search(
+        results = client.query_points(
             collection_name="derivatives",
-            query_vector=("dense", query_vec),
+            query=query_vec,
+            using="dense",
             limit=3,
-        )
+        ).points
 
         client.delete(
             collection_name="derivatives",
@@ -840,13 +835,16 @@ class TestL3xMemoryStoreRetrieve:
             f"\n  stored={len(derivatives)} derivatives  query_results={len(results)}  ({elapsed})"
         )
         for r in results:
+            assert r.payload is not None, "Result payload is None"
             print(
                 f"    score={r.score:.4f}  ep={r.payload['episode_uid']}  text={r.payload['text'][:60]!r}"
             )
 
         assert results, "Vector search returned no results"
-        assert results[0].payload["episode_uid"] == ep_uid, (
-            f"Top result is ep={results[0].payload['episode_uid']!r}, expected {ep_uid!r}. Score={results[0].score:.4f}"
+        top_payload = results[0].payload
+        assert top_payload is not None, "Top result payload is None"
+        assert top_payload["episode_uid"] == ep_uid, (
+            f"Top result is ep={top_payload['episode_uid']!r}, expected {ep_uid!r}. Score={results[0].score:.4f}"
         )
         assert results[0].score >= 0.6, (
             f"Top score {results[0].score:.4f} too low — retrieval quality concern"

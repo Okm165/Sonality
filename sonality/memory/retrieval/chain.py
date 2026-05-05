@@ -99,6 +99,7 @@ async def chain_retrieve(
                 iteration,
                 sufficiency.confidence,
             )
+            await graph.update_episode_access([ep.uid for ep in all_episodes])
             return all_episodes
 
         if sufficiency.suggested_refinement:
@@ -107,4 +108,6 @@ async def chain_retrieve(
             break
 
     log.info("Chain retrieval exhausted: %d episodes", len(all_episodes))
+    if all_episodes:
+        await graph.update_episode_access([ep.uid for ep in all_episodes])
     return all_episodes
