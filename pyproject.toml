@@ -1,45 +1,32 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["sonality", "chat"]
+
 [project]
 name = "sonality"
 version = "0.1.0"
 description = "Stateless LLM agent with self-evolving personality backed by Neo4j and Qdrant"
 readme = "README.md"
-requires-python = ">=3.12,<3.14"
+requires-python = ">=3.12"
 dependencies = [
     "fastembed>=0.3.0",
     "fastapi>=0.115.0",
+    "httpx>=0.28.0",
     "neo4j>=5.0.0",
     "pydantic>=2.0.0",
     "python-dotenv>=1.0.0",
     "qdrant-client>=1.12.0",
     "uvicorn>=0.34.0",
-    "httpx>=0.28.0",
 ]
 
-[dependency-groups]
-scripts = [
-    "openai>=2.29.0",
-    "httpx>=0.28.1",
-    "rich>=14.0.0",
-    "rich-stepper>=0.1.0",
-    "feedparser>=6.0.0",
-    "gnews>=0.4.0",
-    "aiogram>=3.26.0",
-]
-dev = [
-    "ruff>=0.8.0",
-    "pytest>=8.0.0",
-    "pytest-timeout>=2.3.0",
-    "mypy>=1.0.0",
-    "playwright>=1.58.0",
-    "testcontainers[neo4j,qdrant]>=4.0.0",
-]
-docs = [
-    "zensical>=0.0.24",
-]
-
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+[project.optional-dependencies]
+chat = ["aiogram>=3.26.0", "rich>=14.0.0"]
+scripts = ["feedparser>=6.0.0", "gnews>=0.4.0", "rich>=14.0.0"]
+dev = ["mypy>=1.0.0", "pyright>=1.1.0", "pytest>=8.0.0", "pytest-timeout>=2.3.0", "ruff>=0.8.0"]
+bench = ["openai>=2.29.0", "rich>=14.0.0"]
 
 [project.scripts]
 sonality = "sonality.cli:main"
@@ -57,27 +44,35 @@ select = ["E", "F", "W", "I", "N", "UP", "B", "SIM", "RUF"]
 ignore = ["E501", "RUF001", "RUF002"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["sonality"]
+known-first-party = ["sonality", "chat"]
+
+[tool.ruff.lint.per-file-ignores]
+"benches/**/*.py" = ["E501"]
 
 [tool.mypy]
 python_version = "3.12"
+plugins = ["pydantic.mypy"]
 strict = true
-warn_return_any = true
-warn_unused_configs = true
 
 [[tool.mypy.overrides]]
-module = ["aiogram", "aiogram.*"]
+module = ["aiogram", "aiogram.*", "fastembed", "fastembed.*", "feedparser", "feedparser.*", "gnews", "gnews.*", "rich_stepper", "rich_stepper.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = ["chat.telegram"]
 disallow_untyped_decorators = false
 
+[tool.pyright]
+pythonVersion = "3.12"
+typeCheckingMode = "standard"
+reportArgumentType = "warning"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+addopts = "-v --tb=short -m 'not live and not bench'"
 timeout = 1800
 markers = [
-    "live: tests/benches that require external model API access",
-    "bench: evaluation benchmark suites",
+    "live: tests/benches requiring external model API access",
+    "bench: evaluation benchmark suites (run: make bench-*)",
 ]

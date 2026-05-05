@@ -1,7 +1,13 @@
-# Sonality Docker Compose - Production-Ready Configuration
+# Sonality Docker Compose — local development stack
 #
-# Services: Neo4j (graph + state), Qdrant (vectors), Speaches (STT/TTS),
-# Firecrawl (web search + scrape: API + Playwright + SearXNG + Redis + RabbitMQ + Postgres)
+# Services:
+#   sonality   — FastAPI agent server (port 8000)
+#   neo4j      — graph DB for episodes, beliefs, snapshots
+#   qdrant     — vector DB for derivative embeddings and semantic features
+#   speaches   — STT/TTS server (Whisper + Kokoro)
+#   firecrawl  — web search + scrape (API + Playwright + SearXNG + Redis + RabbitMQ + Postgres)
+#
+# Note: default passwords are for local dev only. Override in .env for deployment.
 
 x-logging: &default-logging
   driver: json-file
@@ -11,6 +17,7 @@ x-logging: &default-logging
     compress: "true"
 
 services:
+  # --- Sonality API Server ---
   sonality:
     build: .
     ports:

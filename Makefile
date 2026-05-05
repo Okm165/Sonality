@@ -45,10 +45,10 @@ help: ## Show available commands
 
 .PHONY: install install-dev
 install: ## Install dependencies with uv (creates local .venv)
-	uv sync --no-group dev
+	uv sync
 
 install-dev: ## Install with dev dependencies (ruff, pytest, mypy)
-	uv sync
+	uv sync --all-extras
 
 # --- Database ---
 
@@ -82,29 +82,21 @@ serve: ## Start the Sonality API server (OpenAI-compatible at /v1/chat/completio
 	uv run sonality-server --host 0.0.0.0 --port 8000 $(ARGS)
 
 chat: ## Interactive terminal chat with Sonality
-	uv run --group scripts sonality-chat
+	uv run --extra chat sonality-chat
 
 telegram: ## Start Telegram bot (requires CHAT_TELEGRAM_TOKEN)
-	uv run --group scripts sonality-telegram
+	uv run --extra chat sonality-telegram
 
 # GNEWS_LIMIT=10 RSS_ENTRIES=10 FEED_THROTTLE=5 make feed
 feed: ## Feed news articles to Sonality for belief formation
-	uv run --group scripts python scripts/feed.py
+	uv run --extra scripts python scripts/feed.py
 
 # X_FEED_MAX_RESULTS=10 X_FEED_SORT_ORDER=relevancy make x-feed
 x-feed: ## Feed X (Twitter) posts to Sonality for belief formation
-	uv run --group scripts python scripts/x_feed.py
+	uv run --extra scripts python scripts/x_feed.py
 
 preflight-live: ## Validate live API config and selected models
-	@uv run python -c "from sonality import config; import sys; missing=list(config.missing_live_api_config()); \
-	(missing and (print('Missing required config: ' + ', '.join(missing)) or sys.exit(1))) or None; \
-	print('Live config OK'); \
-	print('  Base URL:   ' + config.BASE_URL); \
-	print('  Model:      ' + config.MODEL); \
-	print('  ESS model:  ' + config.ESS_MODEL); \
-	(config.MODEL == config.ESS_MODEL) and print('  Warning: main and ESS model are identical; set SONALITY_ESS_MODEL to reduce self-judge coupling'); \
-	print('  Tip: ensure SONALITY_MODEL matches your OpenAI-compatible endpoint'); \
-	print('  Tip: run make preflight-live-probe to verify live endpoint access with a tiny request')"
+	@uv run python -c "exec('''from sonality import config\nimport sys\nimport json\nfrom urllib.request import Request, urlopen\nfrom urllib.error import URLError, HTTPError\n\nmissing = list(config.missing_live_api_config())\nif missing:\n    print(\"Missing required config: \" + \", \".join(missing))\n    sys.exit(1)\n\nprint(\"Live config OK\")\nprint(\"  Base URL:   \" + config.BASE_URL)\nprint(\"  Model:      \" + config.MODEL)\nprint(\"  Structured: \" + config.STRUCTURED_MODEL)\n\nif config.MODEL == config.STRUCTURED_MODEL:\n    print(\"  Note: main and structured model are the same\")\n\n# Check provider availability\nbase = config.BASE_URL.rstrip(\"/\")\nbase_root = base.rsplit(\"/v1\", 1)[0] if base.endswith(\"/v1\") else base\navailable_models = []\ntry:\n    # Try Ollama API first (uses root URL, not /v1)\n    req = Request(base_root + \"/api/tags\", method=\"GET\")\n    with urlopen(req, timeout=10) as resp:\n        data = json.loads(resp.read())\n        available_models = [m[\"name\"] for m in data.get(\"models\", [])]\nexcept (URLError, HTTPError, json.JSONDecodeError, KeyError):\n    try:\n        # Try OpenAI-compatible /v1/models\n        models_url = base + \"/models\" if base.endswith(\"/v1\") else base + \"/v1/models\"\n        req = Request(models_url, method=\"GET\")\n        if config.API_KEY:\n            req.add_header(\"Authorization\", \"Bearer \" + config.API_KEY)\n        with urlopen(req, timeout=10) as resp:\n            data = json.loads(resp.read())\n            available_models = [m[\"id\"] for m in data.get(\"data\", [])]\n    except (URLError, HTTPError, json.JSONDecodeError, KeyError):\n        pass\n\nif available_models:\n    print(\"  Provider OK (\" + str(len(available_models)) + \" models available)\")\n    model_ok = any(config.MODEL in m or m in config.MODEL for m in available_models)\n    structured_ok = any(config.STRUCTURED_MODEL in m or m in config.STRUCTURED_MODEL for m in available_models)\n    if not model_ok:\n        print(\"  ERROR: Model '\" + config.MODEL + \"' not found on provider\")\n        print(\"  Available: \" + \", \".join(available_models[:5]) + (\"...\" if len(available_models) > 5 else \"\"))\n        sys.exit(1)\n    if not structured_ok:\n        print(\"  ERROR: Structured model '\" + config.STRUCTURED_MODEL + \"' not found on provider\")\n        sys.exit(1)\n    print(\"  Models verified on provider\")\nelse:\n    print(\"  Warning: Could not list models from provider; run make preflight-live-probe to verify\")\n\nprint(\"  Tip: run make preflight-live-probe to verify live endpoint access with a tiny request\")\n''')"
 
 preflight-live-probe: preflight-live ## Run a tiny live call to verify endpoint/model/policy access
 	@uv run python -c "exec('''import json\nimport sys\nfrom sonality import config\nfrom sonality.provider import default_provider\n\ntry:\n    result = default_provider.chat_completion(\n        model=config.MODEL,\n        max_tokens=8,\n        messages=({\"role\": \"user\", \"content\": \"Reply with OK only.\"},),\n        temperature=0.0,\n    )\n    text = result.text.strip()\n    print(\"Live probe OK\")\n    print(\"  Probe model: \" + config.MODEL)\n    print(\"  Probe response preview: \" + (text[:40] if text else \"<empty>\"))\nexcept Exception as exc:\n    print(f\"Live probe failed: {exc.__class__.__name__}\")\n    print(f\"  {exc}\")\n    if isinstance(exc, RuntimeError):\n        print(\"  Hint: verify SONALITY_BASE_URL, SONALITY_API_KEY, and model IDs.\")\n    sys.exit(1)\n''')"
@@ -122,8 +114,9 @@ format: ## Format code (ruff format)
 format-check: ## Check formatting without writing changes (CI parity)
 	uv run ruff format --check sonality/ chat/ tests/ benches/
 
-typecheck: ## Type-check code (mypy)
+typecheck: ## Type-check code (mypy + pyright)
 	uv run mypy sonality/ chat/
+	uv run pyright sonality/ chat/
 
 test: ## Run tests (pytest, skip live API tests)
 	uv run pytest tests -m "not live" -v -s
