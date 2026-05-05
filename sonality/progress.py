@@ -1,8 +1,9 @@
 """Agent progress events for real-time UX streaming.
 
-Events are emitted during the agentic loop to give the caller visibility
-into what the agent is doing. The SSE layer and chat clients consume
-these to render progress UI.
+Events are emitted during the agentic loop (agent.py) and serialized as
+SSE events by the API (api.py). Chat clients (terminal.py, telegram.py)
+consume them to render live progress: which tool is running, when the
+agent is thinking, when quorum critique reviews evidence, etc.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ TOOL_CALL = EventType.TOOL_CALL
 TOOL_RESULT = EventType.TOOL_RESULT
 CONTEXT_BUILD = EventType.CONTEXT_BUILD
 SUMMARIZING = EventType.SUMMARIZING
+REVIEWING = EventType.REVIEWING
 DONE = EventType.DONE
 
 

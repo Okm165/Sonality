@@ -3,6 +3,9 @@
 Provides HTTP endpoints for data ingestion, belief querying, and
 OpenAI-compatible chat completions. Uses a singleton SonalityAgent with
 an async lock to prevent concurrent mutation.
+
+/ingest is fire-and-forget: returns 202 immediately with a job_id.
+Poll /ingest/{job_id} for status and result.
 """
 
 from __future__ import annotations
@@ -14,6 +17,7 @@ import time
 import uuid
 from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import asynccontextmanager
+from enum import StrEnum
 from functools import partial
 from typing import Final
 
@@ -26,7 +30,7 @@ from starlette.responses import Response
 
 from . import __version__, config
 from .agent import SonalityAgent
-from .ess import ReasoningType, UrgencyLevel
+from .ess import ESSResult, ReasoningType, UrgencyLevel
 from .memory.graph import BeliefNode
 from .progress import AgentEvent
 from .provider import StreamChunk
@@ -40,6 +44,35 @@ log = logging.getLogger(__name__)
 _agent_store: dict[str, SonalityAgent] = {}
 _agent_lock: asyncio.Lock | None = None
 _startup_time: float = 0.0
+
+# --- Ingest job queue ---
+
+
+class _JobStatus(StrEnum):
+    PENDING = "pending"
+    RUNNING = "running"
+    DONE = "done"
+    FAILED = "failed"
+
+
+class _IngestJob:
+    """Tracks lifecycle of one queued ingest request."""
+
+    __slots__ = ("error", "job_id", "result", "started_at", "status", "text", "topic_override")
+
+    def __init__(self, job_id: str, text: str, topic_override: str) -> None:
+        self.job_id = job_id
+        self.status: _JobStatus = _JobStatus.PENDING
+        self.text = text
+        self.topic_override = topic_override
+        self.result: ESSResult | None = None
+        self.error: str = ""
+        self.started_at: float = time.time()
+
+
+_ingest_jobs: dict[str, _IngestJob] = {}
+_ingest_queue: asyncio.Queue[_IngestJob] | None = None
+_ingest_worker_task: asyncio.Task[None] | None = None
 
 _api_key_header = APIKeyHeader(name="Authorization", auto_error=False)
 
@@ -68,6 +101,7 @@ async def verify_api_key(request: Request, api_key: str | None = Depends(_api_ke
 
 
 def _get_lock() -> asyncio.Lock:
+    """Return the singleton asyncio lock, creating on first access."""
     global _agent_lock
     if _agent_lock is None:
         _agent_lock = asyncio.Lock()
@@ -83,15 +117,48 @@ def _get_agent() -> SonalityAgent:
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
-    global _startup_time
+    """App startup: create agent + ingest worker. Shutdown: cancel worker + close agent."""
+    global _startup_time, _ingest_queue, _ingest_worker_task
     _startup_time = time.time()
     log.info("Initializing Sonality agent for API server")
     _agent_store["agent"] = SonalityAgent()
+    _ingest_queue = asyncio.Queue(maxsize=256)
+    _ingest_worker_task = asyncio.create_task(_ingest_worker())
     yield
     log.info("Shutting down Sonality agent")
+    if _ingest_worker_task:
+        _ingest_worker_task.cancel()
     agent = _agent_store.pop("agent", None)
     if agent is not None:
         agent.shutdown()
+
+
+async def _ingest_worker() -> None:
+    """Background worker: processes ingest jobs one at a time, serialized."""
+    assert _ingest_queue is not None
+    while True:
+        job = await _ingest_queue.get()
+        job.status = _JobStatus.RUNNING
+        log.info("Ingest worker: starting job=%s chars=%d", job.job_id[:8], len(job.text))
+        try:
+            agent = _get_agent()
+            ess = await asyncio.to_thread(
+                partial(agent.ingest, job.text, topic_override=job.topic_override)
+            )
+            job.result = ess
+            job.status = _JobStatus.DONE
+            log.info("Ingest worker: job=%s done ess=%.2f", job.job_id[:8], ess.score)
+        except Exception as exc:
+            job.error = str(exc)
+            job.status = _JobStatus.FAILED
+            log.exception("Ingest worker: job=%s failed", job.job_id[:8])
+        finally:
+            _ingest_queue.task_done()
+        # Evict jobs older than 2 hours to prevent unbounded memory growth
+        cutoff = time.time() - 7200
+        stale = [jid for jid, j in _ingest_jobs.items() if j.started_at < cutoff]
+        for jid in stale:
+            _ingest_jobs.pop(jid, None)
 
 
 app = FastAPI(
@@ -181,6 +248,9 @@ async def chat_completions(
 
         async def generate() -> AsyncIterator[str]:
             async with _get_lock():
+                # Build the stream iterator in a thread (agent setup is synchronous),
+                # then consume items via to_thread so each blocking LLM/tool step
+                # doesn't block the asyncio event loop.
                 loop = asyncio.get_event_loop()
                 stream_iter = await loop.run_in_executor(
                     None,
@@ -191,7 +261,12 @@ async def chat_completions(
                         temperature=request.temperature,
                     ),
                 )
-                for item in stream_iter:
+                it = iter(stream_iter)
+                _sentinel = object()
+                while True:
+                    item = await asyncio.to_thread(next, it, _sentinel)
+                    if item is _sentinel:
+                        break
                     if isinstance(item, AgentEvent):
                         yield sse_event(
                             item.type,
@@ -204,15 +279,8 @@ async def chat_completions(
                                 "sources_count": item.sources_count,
                             },
                         )
-                    elif isinstance(item, StreamChunk):
-                        content, reasoning = item
-                        delta = {
-                            k: v
-                            for k, v in [("content", content), ("reasoning_content", reasoning)]
-                            if v
-                        }
-                        if delta:
-                            yield sse_chunk(delta)
+                    elif isinstance(item, StreamChunk) and item.content:
+                        yield sse_chunk({"content": item.content})
             yield sse_chunk({}, "stop")
             yield "data: [DONE]\n\n"
 
@@ -252,6 +320,7 @@ async def chat_completions(
 
 @app.get("/v1/models", response_model=ModelsResponse)
 async def list_models() -> ModelsResponse:
+    """List available models (OpenAI-compatible)."""
     return ModelsResponse(
         data=[ModelInfo(id=MODEL_ID, created=int(time.time()), owned_by=MODEL_ID)]
     )
@@ -259,6 +328,7 @@ async def list_models() -> ModelsResponse:
 
 @app.get("/v1/models/{model_id}", response_model=ModelInfo)
 async def get_model(model_id: str) -> ModelInfo:
+    """Retrieve a single model by ID (OpenAI-compatible)."""
     if model_id != MODEL_ID:
         raise HTTPException(status_code=404, detail=f"Model {model_id} not found")
     return ModelInfo(id=MODEL_ID, created=int(time.time()), owned_by=MODEL_ID)
@@ -317,6 +387,19 @@ class IngestResponse(BaseModel):
     summary: str
 
 
+class IngestAccepted(BaseModel):
+    job_id: str
+    status: str = "pending"
+    queue_depth: int = 0
+
+
+class IngestJobStatus(BaseModel):
+    job_id: str
+    status: str
+    result: IngestResponse | None = None
+    error: str = ""
+
+
 class BeliefResponse(BaseModel):
     topic: str
     valence: float
@@ -344,23 +427,45 @@ class HealthResponse(BaseModel):
     version: str = ""
 
 
-@app.post("/ingest", response_model=IngestResponse)
-async def ingest(request: IngestRequest) -> IngestResponse:
+@app.post("/ingest", response_model=IngestAccepted, status_code=202)
+async def ingest(request: IngestRequest) -> IngestAccepted:
+    """Fire-and-forget ingest. Returns 202 immediately with job_id.
+
+    Poll GET /ingest/{job_id} for status and result.
+    The ingest queue serializes jobs so the agent processes one at a time.
+    """
+    assert _ingest_queue is not None
     log.info("HTTP /ingest chars=%d", len(request.text))
-    agent = _get_agent()
-    async with _get_lock():
-        ess = await asyncio.to_thread(
-            partial(agent.ingest, request.text, topic_override=request.topic_override)
+    job_id = uuid.uuid4().hex
+    job = _IngestJob(job_id, request.text, request.topic_override)
+    _ingest_jobs[job_id] = job
+    try:
+        _ingest_queue.put_nowait(job)
+    except asyncio.QueueFull:
+        _ingest_jobs.pop(job_id, None)
+        raise HTTPException(status_code=429, detail="Ingest queue full — try again later") from None
+    return IngestAccepted(job_id=job_id, status="pending", queue_depth=_ingest_queue.qsize())
+
+
+@app.get("/ingest/{job_id}", response_model=IngestJobStatus)
+async def ingest_status(job_id: str) -> IngestJobStatus:
+    """Poll ingest job status. Returns result when done."""
+    job = _ingest_jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+    result = None
+    if job.status == _JobStatus.DONE and job.result is not None:
+        ess = job.result
+        result = IngestResponse(
+            success=True,
+            score=ess.score,
+            reasoning_type=ess.reasoning_type,
+            belief_update_recommended=ess.belief_update_recommended,
+            urgency=ess.urgency,
+            topics=list(ess.topics),
+            summary=ess.summary,
         )
-    return IngestResponse(
-        success=True,
-        score=ess.score,
-        reasoning_type=ess.reasoning_type,
-        belief_update_recommended=ess.belief_update_recommended,
-        urgency=ess.urgency,
-        topics=list(ess.topics),
-        summary=ess.summary,
-    )
+    return IngestJobStatus(job_id=job_id, status=job.status, result=result, error=job.error)
 
 
 @app.get("/beliefs", response_model=list[BeliefResponse])
@@ -383,6 +488,7 @@ async def get_belief_endpoint(topic: str) -> BeliefResponse:
 @app.get("/health", response_model=HealthResponse)
 @app.get("/v1/health", response_model=HealthResponse, include_in_schema=False)
 async def health() -> HealthResponse:
+    """Return agent health: belief count, snapshot version, uptime."""
     agent = _get_agent()
     belief_count, snapshot_version = await asyncio.to_thread(agent.get_health)
     uptime = time.time() - _startup_time if _startup_time > 0 else 0.0
@@ -398,7 +504,6 @@ def serve() -> None:
     """CLI entry point: ``sonality-server``."""
     import argparse
     import os
-    import signal
 
     import uvicorn
 
@@ -413,15 +518,6 @@ def serve() -> None:
         level=getattr(logging, log_level.upper()),
         format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
     )
-
-    shutdown_event = asyncio.Event()
-
-    def handle_signal(signum: int, frame: object) -> None:
-        log.info("Received signal %d, initiating shutdown...", signum)
-        shutdown_event.set()
-
-    signal.signal(signal.SIGTERM, handle_signal)
-    signal.signal(signal.SIGINT, handle_signal)
 
     uvicorn.run(
         "sonality.api:app",

@@ -70,8 +70,8 @@ def main() -> None:
         format="%(levelname)s %(name)s: %(message)s",
     )
     parser = argparse.ArgumentParser(prog="sonality", description="Interactive Sonality REPL")
-    parser.add_argument("--model", default=config.MODEL, help="Main response model ID.")
-    parser.add_argument("--ess-model", default=config.ESS_MODEL, help="ESS model ID.")
+    parser.add_argument("--model", default=config.AGENT_MODEL, help="Agentic loop model ID.")
+    parser.add_argument("--ess-model", default=config.STRUCTURED_MODEL, help="ESS model ID.")
     args = parser.parse_args()
     missing = config.missing_live_api_config()
     if missing:
