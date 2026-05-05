@@ -96,8 +96,11 @@ async def assess_and_forget(
         if uid not in candidate_uids:
             log.warning("Ignoring forgetting decision for unknown UID: %s", uid)
             continue
-        decisions.append(_Decision(uid=uid, action=d.action, reason=d.reason.strip()))
+        if uid in seen:
+            log.debug("Ignoring duplicate forgetting decision for UID: %s", uid)
+            continue
         seen.add(uid)
+        decisions.append(_Decision(uid=uid, action=d.action, reason=d.reason.strip()))
     for ep in candidates:
         if ep.uid not in seen:
             decisions.append(_Decision(uid=ep.uid, reason="Missing decision; default keep"))
@@ -111,15 +114,27 @@ async def assess_and_forget(
         try:
             if decision.action is _Action.ARCHIVE:
                 await graph.archive_episode(decision.uid)
-                await store.archive_derivatives(decision.uid)
+                try:
+                    await store.archive_derivatives(decision.uid)
+                except Exception:
+                    log.exception(
+                        "Qdrant archive failed for episode %s; graph already archived",
+                        decision.uid[:8],
+                    )
             else:
                 await graph.delete_episode(decision.uid)
-                await store.delete_derivatives(decision.uid)
+                try:
+                    await store.delete_derivatives(decision.uid)
+                except Exception:
+                    log.exception(
+                        "Qdrant delete failed for episode %s; graph already deleted (orphan vectors may remain)",
+                        decision.uid[:8],
+                    )
             removed += 1
             log.info("%s episode %s: %s", decision.action.value, decision.uid[:8], decision.reason)
         except Exception:
             log.exception(
-                "Failed to %s episode %s", decision.action.value.lower(), decision.uid[:8]
+                "Failed to %s episode %s in graph", decision.action.value.lower(), decision.uid[:8]
             )
             kept += 1
 

@@ -62,12 +62,33 @@ def estimate_tokens_utf8(text: str) -> int:
     return len(text.encode("utf-8")) // 4 + 1
 
 
-def _estimate_messages_tokens(messages: Sequence[dict[str, str]]) -> int:
-    """Sum :func:`estimate_tokens_utf8` over each message's string ``content`` field."""
+def _extract_text_from_content(content: object) -> str:
+    """Extract text from message content, handling both string and multipart formats."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif (
+                isinstance(item, dict)
+                and item.get("type") == "text"
+                and isinstance(item.get("text"), str)
+            ):
+                parts.append(item["text"])
+        return " ".join(parts)
+    return ""
+
+
+def _estimate_messages_tokens(messages: Sequence[dict[str, object] | dict[str, str]]) -> int:
+    """Sum :func:`estimate_tokens_utf8` over each message's content field.
+
+    Handles both string content and multipart content (list of text/image blocks).
+    """
     return sum(
-        estimate_tokens_utf8(m.get("content", ""))
+        estimate_tokens_utf8(_extract_text_from_content(m.get("content", "")))
         for m in messages
-        if isinstance(m.get("content", ""), str)
     )
 
 

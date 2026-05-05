@@ -138,10 +138,10 @@ def _rss(source: str, url: str, topic: str, limit: int) -> Iterator[Article]:
         feed = feedparser.parse(url)
         for entry in feed.entries[:limit]:
             yield Article(
-                title=entry.get("title", ""),
-                description=entry.get("summary", entry.get("description", "")),
+                title=str(entry.get("title") or ""),
+                description=str(entry.get("summary") or entry.get("description") or ""),
                 source=source,
-                link=entry.get("link", ""),
+                link=str(entry.get("link") or ""),
                 topic=topic,
             )
     except Exception as exc:

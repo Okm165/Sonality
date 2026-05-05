@@ -8,7 +8,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import math
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, Protocol, runtime_checkable
 
 from .. import config
 
@@ -16,6 +16,15 @@ if TYPE_CHECKING:
     from fastembed import TextEmbedding
 
 log = logging.getLogger(__name__)
+
+
+@runtime_checkable
+class EmbedderProtocol(Protocol):
+    """Protocol for embedding implementations, enabling type-safe test doubles."""
+
+    def embed_documents(self, documents: list[str]) -> list[list[float]]:
+        """Batch embed documents."""
+        ...
 
 _DENSE_MODEL: Final = "BAAI/bge-large-en-v1.5"
 

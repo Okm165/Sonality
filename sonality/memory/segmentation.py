@@ -87,10 +87,14 @@ class EventBoundaryDetector:
                 segment_id=self._current_segment_id,
             )
 
-        recent_context = "\n".join(self._recent_messages)
+        # Escape braces to prevent .format() crashes on {}/{{}} in user messages
+        def escape_braces(s: str) -> str:
+            return s.replace("{", "{{").replace("}", "}}")
+
+        recent_context = "\n".join(escape_braces(m) for m in self._recent_messages)
         prompt = BOUNDARY_DETECTION_PROMPT.format(
             recent_context=recent_context,
-            current_message=message,
+            current_message=escape_braces(message),
         )
         result = llm_call(
             prompt=prompt,

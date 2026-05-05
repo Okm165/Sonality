@@ -272,13 +272,18 @@ def message_content_text(message: object) -> str:
 
 
 def to_nonnegative_int(value: object) -> int:
-    """Parse a non-negative integer from various types."""
+    """Parse a non-negative integer from various types including numeric strings."""
     if isinstance(value, bool):
         return 0
     if isinstance(value, int):
         return max(value, 0)
     if isinstance(value, float):
         return max(int(value), 0)
+    if isinstance(value, str):
+        try:
+            return max(int(float(value)), 0)
+        except (ValueError, TypeError):
+            return 0
     return 0
 
 

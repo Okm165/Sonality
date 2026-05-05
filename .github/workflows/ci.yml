@@ -25,16 +25,16 @@ jobs:
         uses: astral-sh/setup-uv@v4
 
       - name: Install dependencies
-        run: uv sync --group dev
+        run: uv sync --all-extras
 
       - name: Check formatting
-        run: uv run ruff format --check sonality tests benches
+        run: uv run ruff format --check sonality chat tests benches
 
       - name: Lint
-        run: uv run ruff check sonality tests benches
+        run: uv run ruff check sonality chat tests benches
 
-      - name: Type-check runtime package
-        run: uv run mypy sonality
+      - name: Type-check runtime packages
+        run: uv run mypy sonality chat
 
       - name: Run unit tests
         run: uv run pytest tests -m "not live" -q

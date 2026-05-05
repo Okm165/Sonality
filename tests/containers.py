@@ -78,13 +78,16 @@ async def _init_qdrant_schema(url: str) -> None:
 
 def _init_neo4j_schema(url: str, auth: tuple[str, str]) -> None:
     """Initialize Neo4j schema for testing."""
+    from typing import cast
+
     from neo4j import GraphDatabase
+    from neo4j._typing import LiteralString
 
     driver = GraphDatabase.driver(url, auth=auth)
     try:
         with driver.session() as session:
             for stmt in NEO4J_SCHEMA_STATEMENTS:
-                session.run(stmt)
+                session.run(cast(LiteralString, stmt))
     finally:
         driver.close()
     log.info("Neo4j schema initialized")
@@ -95,7 +98,7 @@ def qdrant_container() -> Generator[str, None, None]:
     """Start a Qdrant container and return connection URL."""
     import asyncio
 
-    from testcontainers.qdrant import QdrantContainer
+    from testcontainers.qdrant import QdrantContainer  # type: ignore[import-not-found]
 
     log.info("Starting Qdrant container...")
     container = QdrantContainer(image="qdrant/qdrant:latest")
@@ -111,7 +114,7 @@ def qdrant_container() -> Generator[str, None, None]:
 @contextmanager
 def neo4j_container() -> Generator[tuple[str, str, str], None, None]:
     """Start a Neo4j container and return (url, user, password)."""
-    from testcontainers.neo4j import Neo4jContainer
+    from testcontainers.neo4j import Neo4jContainer  # type: ignore[import-not-found]
 
     log.info("Starting Neo4j container...")
     container = Neo4jContainer(image="neo4j:5")

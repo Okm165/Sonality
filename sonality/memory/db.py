@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from typing import cast
 
 from neo4j import AsyncDriver, AsyncGraphDatabase
+from neo4j._typing import LiteralString
 from qdrant_client import AsyncQdrantClient
 
 from .. import config
@@ -43,7 +45,7 @@ class DatabaseConnections:
 
         async with self.neo4j_driver.session(database=config.NEO4J_DATABASE) as session:
             for stmt in NEO4J_SCHEMA_STATEMENTS:
-                await session.run(stmt)
+                await session.run(cast(LiteralString, stmt))
         log.info("Neo4j schema initialized")
 
         log.info("Connecting to Qdrant at %s", config.QDRANT_URL)

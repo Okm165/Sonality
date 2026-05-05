@@ -13,8 +13,10 @@ import asyncio
 import logging
 import sys
 from dataclasses import dataclass, field
+from typing import cast
 
 from neo4j import AsyncGraphDatabase
+from neo4j._typing import LiteralString
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.models import FieldCondition, Filter, MatchValue
 
@@ -78,7 +80,7 @@ async def run_diagnostics() -> DiagnosticsReport:
                 ("Topic", "neo4j_topics"),
                 ("Belief", "neo4j_beliefs"),
             ]:
-                result = await session.run(f"MATCH (n:{label}) RETURN count(n) AS cnt")
+                result = await session.run(cast(LiteralString, f"MATCH (n:{label}) RETURN count(n) AS cnt"))
                 record = await result.single()
                 setattr(report, attr, record["cnt"] if record else 0)
 

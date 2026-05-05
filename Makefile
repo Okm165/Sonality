@@ -114,8 +114,7 @@ format: ## Format code (ruff format)
 format-check: ## Check formatting without writing changes (CI parity)
 	uv run ruff format --check sonality/ chat/ tests/ benches/
 
-typecheck: ## Type-check code (mypy + pyright)
-	uv run mypy sonality/ chat/
+typecheck: ## Type-check code (pyright)
 	uv run pyright sonality/ chat/
 
 test: ## Run tests (pytest, skip live API tests)

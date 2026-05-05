@@ -11,7 +11,7 @@ import os
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import Final
+from typing import Final, cast
 
 import httpx
 from _helpers import connect_or_exit, fetch_and_show_beliefs, queue_ingest
@@ -101,7 +101,7 @@ def _get(client: httpx.Client, path: str, params: dict[str, str | int]) -> dict[
         time.sleep(wait)
         r = client.get(f"{X_API}{path}", params=params)
     r.raise_for_status()
-    return r.json()  # type: ignore[no-any-return]
+    return cast(dict[str, object], r.json())
 
 
 def _search(

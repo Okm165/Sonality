@@ -12,9 +12,10 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Final
+from typing import Final, cast
 
 from neo4j import AsyncDriver, AsyncManagedTransaction
+from neo4j._typing import LiteralString
 
 from .. import config
 
@@ -26,7 +27,7 @@ def format_episode_line(
     created_at: str,
     summary: str,
     content: str,
-    content_limit: int = 300,
+    content_limit: int = config.EPISODE_CONTENT_LIMIT,
 ) -> str:
     """Render one compact context line for retrieval/reflection."""
     date_text = created_at[:10] if created_at else "?"
@@ -37,7 +38,7 @@ def format_episode_block(
     *,
     created_at: str,
     content: str,
-    content_limit: int = 500,
+    content_limit: int = config.EPISODE_CONTENT_LIMIT,
 ) -> str:
     """Render one dated episode content block for summarization prompts."""
     date_text = created_at[:10] if created_at else "?"
@@ -45,7 +46,6 @@ def format_episode_block(
 
 
 _DEFAULT_SESSION_ID: Final = "default"
-BELIEF_PROMPT_WINDOW: Final = 15
 
 
 class EdgeType(StrEnum):
@@ -232,9 +232,12 @@ class MemoryGraph:
         )
         if prev_uid:
             await tx.run(
-                "MATCH (prev:Episode {uid: $prev_uid}) "
-                "MATCH (curr:Episode {uid: $curr_uid}) "
-                f"CREATE (prev)-[:{EdgeType.TEMPORAL_NEXT}]->(curr)",
+                cast(
+                    LiteralString,
+                    "MATCH (prev:Episode {uid: $prev_uid}) "
+                    "MATCH (curr:Episode {uid: $curr_uid}) "
+                    f"CREATE (prev)-[:{EdgeType.TEMPORAL_NEXT}]->(curr)",
+                ),
                 prev_uid=prev_uid,
                 curr_uid=episode.uid,
             )
@@ -258,7 +261,7 @@ class MemoryGraph:
     ) -> None:
         for d in derivatives:
             await tx.run(
-                f"""
+                cast(LiteralString, f"""
                 CREATE (d:Derivative {{
                     uid: $uid, source_episode_uid: $source_uid,
                     text: $text, key_concept: $key_concept,
@@ -267,7 +270,7 @@ class MemoryGraph:
                 WITH d
                 MATCH (e:Episode {{uid: $episode_uid}})
                 CREATE (d)-[:{EdgeType.DERIVED_FROM}]->(e)
-                """,
+                """),
                 uid=d.uid,
                 source_uid=d.source_episode_uid,
                 text=d.text,
@@ -279,15 +282,15 @@ class MemoryGraph:
     @staticmethod
     async def _link_topic_tx(tx: AsyncManagedTransaction, episode_uid: str, topic: str) -> None:
         await tx.run(
-            f"""
+            cast(LiteralString, f"""
             MERGE (t:Topic {{name: $topic}})
             ON CREATE SET t.episode_count = 1, t.first_seen_at = datetime()
             ON MATCH SET t.episode_count = t.episode_count + 1
             SET t.last_seen_at = datetime()
             WITH t
             MATCH (e:Episode {{uid: $uid}})
-            CREATE (e)-[:{EdgeType.DISCUSSES}]->(t)
-            """,
+            MERGE (e)-[:{EdgeType.DISCUSSES}]->(t)
+            """),
             topic=topic.strip().lower(),
             uid=episode_uid,
         )
@@ -300,7 +303,7 @@ class MemoryGraph:
         label: str,
     ) -> None:
         await tx.run(
-            f"""
+            cast(LiteralString, f"""
             MERGE (s:Segment {{segment_id: $segment_id}})
             ON CREATE SET s.label = $label, s.start_time = datetime(),
                           s.episode_count = 1, s.consolidated = false
@@ -311,8 +314,8 @@ class MemoryGraph:
                             THEN $label ELSE s.label END
             WITH s
             MATCH (e:Episode {{uid: $uid}})
-            CREATE (e)-[:{EdgeType.BELONGS_TO_SEGMENT}]->(s)
-            """,
+            MERGE (e)-[:{EdgeType.BELONGS_TO_SEGMENT}]->(s)
+            """),
             segment_id=segment_id,
             label=label,
             uid=episode_uid,
@@ -351,7 +354,7 @@ class MemoryGraph:
         reasoning: str,
     ) -> None:
         await tx.run(
-            f"""
+            cast(LiteralString, f"""
             MATCH (b:Belief {{topic: $topic}})
             SET b.evidence_count = coalesce(b.evidence_count, 0) + 1,
                 b.last_updated = datetime()
@@ -360,7 +363,7 @@ class MemoryGraph:
             CREATE (e)-[:{edge_type} {{
                 strength: $strength, reasoning: $reasoning, created_at: datetime()
             }}]->(b)
-            """,
+            """),
             topic=topic.strip().lower(),
             uid=episode_uid,
             strength=strength,
@@ -368,7 +371,10 @@ class MemoryGraph:
         )
 
     async def get_episodes(self, uids: list[str]) -> list[EpisodeNode]:
-        """Fetch multiple non-archived episodes by UID."""
+        """Fetch multiple non-archived episodes by UID, preserving input order.
+
+        Maintains the original UID ordering (important for vector ranking scores).
+        """
         if not uids:
             return []
         async with self._driver.session(database=_DB) as session:
@@ -376,8 +382,12 @@ class MemoryGraph:
                 "MATCH (e:Episode) WHERE e.uid IN $uids AND NOT e.archived RETURN e",
                 uids=uids,
             )
-            records = [record async for record in result]
-            return [_record_to_episode(r["e"]) for r in records]
+            by_uid: dict[str, EpisodeNode] = {}
+            async for record in result:
+                ep = _record_to_episode(record["e"])
+                by_uid[ep.uid] = ep
+            # Return in original UID order, skipping any not found
+            return [by_uid[uid] for uid in uids if uid in by_uid]
 
     async def _keyword_episode_search(
         self, cypher: str, query: str, limit: int
@@ -387,7 +397,7 @@ class MemoryGraph:
         if not keywords:
             return []
         async with self._driver.session(database=_DB) as session:
-            result = await session.run(cypher, keywords=keywords[:8], limit=limit)
+            result = await session.run(cast(LiteralString, cypher), keywords=keywords[:8], limit=limit)
             return [_record_to_episode(r["e"]) async for r in result]
 
     async def find_belief_related_episodes(
@@ -430,7 +440,7 @@ class MemoryGraph:
         """Retrieve temporally adjacent non-archived episodes for context expansion."""
         async with self._driver.session(database=_DB) as session:
             result = await session.run(
-                f"""
+                cast(LiteralString, f"""
                 MATCH (focal:Episode {{uid: $uid}})
                 OPTIONAL MATCH path_before = (prev:Episode)-[:{EdgeType.TEMPORAL_NEXT}*1..{before}]->(focal)
                   WHERE NOT prev.archived
@@ -440,7 +450,7 @@ class MemoryGraph:
                      COLLECT(DISTINCT prev) AS befores,
                      COLLECT(DISTINCT next) AS afters
                 RETURN befores, focal, afters
-                """,
+                """),
                 uid=episode_uid,
             )
             record = await result.single()
@@ -453,6 +463,27 @@ class MemoryGraph:
             for node in record["afters"]:
                 episodes.append(_record_to_episode(node))
             return episodes
+
+    async def update_episode_access(self, episode_uids: list[str]) -> None:
+        """Update access_count and last_accessed for retrieved episodes.
+
+        Called after episodes are retrieved to maintain accurate forgetting signals.
+        Increments access_count and updates utility_score based on recent retrieval.
+        """
+        if not episode_uids:
+            return
+        async with self._driver.session(database=_DB) as session:
+            await session.run(
+                """
+                UNWIND $uids AS uid
+                MATCH (e:Episode {uid: uid})
+                SET e.access_count = COALESCE(e.access_count, 0) + 1,
+                    e.last_accessed = datetime(),
+                    e.utility_score = COALESCE(e.utility_score, 0.0) + 0.1
+                """,
+                uids=episode_uids,
+            )
+        log.debug("Updated access stats for %d episodes", len(episode_uids))
 
     async def archive_episode(self, episode_uid: str) -> None:
         """Soft-archive an episode (set archived=True)."""
@@ -470,11 +501,11 @@ class MemoryGraph:
         """Hard-delete an episode and its derivative nodes."""
         async with self._driver.session(database=_DB) as session:
             await session.run(
-                f"""
+                cast(LiteralString, f"""
                 MATCH (e:Episode {{uid: $uid}})
                 OPTIONAL MATCH (d:Derivative)-[:{EdgeType.DERIVED_FROM}]->(e)
                 DETACH DELETE d, e
-                """,
+                """),
                 uid=episode_uid,
             )
         log.warning("GRAPH delete_episode uid=%s", episode_uid[:8])
@@ -483,11 +514,11 @@ class MemoryGraph:
         """Get all episodes in a segment, ordered by creation time."""
         async with self._driver.session(database=_DB) as session:
             result = await session.run(
-                f"""
+                cast(LiteralString, f"""
                 MATCH (e:Episode)-[:{EdgeType.BELONGS_TO_SEGMENT}]->(s:Segment {{segment_id: $seg_id}})
                 WHERE NOT e.archived
                 RETURN e ORDER BY e.created_at
-                """,
+                """),
                 seg_id=segment_id,
             )
             records = [record async for record in result]
@@ -542,9 +573,9 @@ class MemoryGraph:
                 """
                 MATCH (e:Episode)
                 WHERE NOT e.archived AND e.consolidation_level = 1
-                  AND e.created_at < datetime() - duration({minutes: $min_age_minutes})
+                  AND datetime(e.created_at) < datetime() - duration({minutes: $min_age_minutes})
                 RETURN e
-                ORDER BY e.utility_score ASC, e.created_at ASC
+                ORDER BY e.utility_score ASC, datetime(e.created_at) ASC
                 LIMIT $limit
                 """,
                 limit=limit,
@@ -592,11 +623,11 @@ class MemoryGraph:
         )
         for source_uid in source_uids:
             await tx.run(
-                f"""
+                cast(LiteralString, f"""
                 MATCH (s:Summary {{uid: $summary_uid}})
                 MATCH (e:Episode {{uid: $source_uid}})
                 CREATE (s)-[:{EdgeType.CONSOLIDATES}]->(e)
-                """,
+                """),
                 summary_uid=uid,
                 source_uid=source_uid,
             )
@@ -689,7 +720,7 @@ class MemoryGraph:
             return None
         return _record_to_belief(record["b"])
 
-    async def get_top_beliefs(self, n: int = BELIEF_PROMPT_WINDOW) -> list[BeliefNode]:
+    async def get_top_beliefs(self, n: int = 15) -> list[BeliefNode]:
         """Fetch strongest beliefs ordered by absolute valence."""
         async with self._driver.session(database=_DB) as session:
             result = await session.run(

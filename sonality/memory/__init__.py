@@ -3,7 +3,7 @@
 Re-exports from:
   graph        — Neo4j episode/belief/snapshot storage
   dual_store   — Neo4j + Qdrant transactional episode lifecycle
-  embedder     — text embedding via sentence-transformers
+  embedder     — text embedding via FastEmbed (ONNX)
   retrieval/   — LLM-driven query routing, chain/split retrieval, reranking
   segmentation — conversation boundary detection
   semantic_features — background feature extraction worker

@@ -15,7 +15,7 @@ from pydantic import BaseModel, model_validator
 from ..llm.caller import llm_call
 from ..llm.parse import normalize_llm_list_response
 from ..prompts import CHUNKING_PROMPT
-from .embedder import Embedder
+from .embedder import EmbedderProtocol
 from .graph import DerivativeNode
 
 log = logging.getLogger(__name__)
@@ -56,7 +56,7 @@ class DerivativeWithEmbedding:
 
 
 def chunk_and_embed(
-    embedder: Embedder, text: str, episode_uid: str
+    embedder: EmbedderProtocol, text: str, episode_uid: str
 ) -> list[DerivativeWithEmbedding]:
     """Split text into semantic chunks and embed each one.
 

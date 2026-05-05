@@ -433,7 +433,9 @@ def classify(
     Uses a separate LLM call with tool_use to extract structured ESS metadata.
     ESS is a pure text signal classifier — only the message content matters.
     """
-    prompt = ESS_CLASSIFICATION_PROMPT.format(user_message=user_message)
+    # Escape braces in user message to prevent .format() crashes on {}/{{}} in content
+    safe_message = user_message.replace("{", "{{").replace("}", "}}")
+    prompt = ESS_CLASSIFICATION_PROMPT.format(user_message=safe_message)
     log.info("ESS classifying message (%d chars)", len(user_message))
 
     with ThreadPoolExecutor(max_workers=1) as executor:

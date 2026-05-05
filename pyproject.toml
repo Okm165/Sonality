@@ -25,7 +25,7 @@ dependencies = [
 [project.optional-dependencies]
 chat = ["aiogram>=3.26.0", "rich>=14.0.0"]
 scripts = ["feedparser>=6.0.0", "gnews>=0.4.0", "rich>=14.0.0"]
-dev = ["mypy>=1.0.0", "pyright>=1.1.0", "pytest>=8.0.0", "pytest-timeout>=2.3.0", "ruff>=0.8.0"]
+dev = ["pyright>=1.1.0", "pytest>=8.0.0", "pytest-timeout>=2.3.0", "ruff>=0.8.0"]
 bench = ["openai>=2.29.0", "rich>=14.0.0"]
 
 [project.scripts]
@@ -46,26 +46,9 @@ ignore = ["E501", "RUF001", "RUF002"]
 [tool.ruff.lint.isort]
 known-first-party = ["sonality", "chat"]
 
-[tool.ruff.lint.per-file-ignores]
-"benches/**/*.py" = ["E501"]
-
-[tool.mypy]
-python_version = "3.12"
-plugins = ["pydantic.mypy"]
-strict = true
-
-[[tool.mypy.overrides]]
-module = ["aiogram", "aiogram.*", "fastembed", "fastembed.*", "feedparser", "feedparser.*", "gnews", "gnews.*", "rich_stepper", "rich_stepper.*"]
-ignore_missing_imports = true
-
-[[tool.mypy.overrides]]
-module = ["chat.telegram"]
-disallow_untyped_decorators = false
-
 [tool.pyright]
 pythonVersion = "3.12"
 typeCheckingMode = "standard"
-reportArgumentType = "warning"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -10,8 +10,8 @@ from sonality.memory.derivatives import ChunkingResponse, ChunkItem
 class _FakeEmbedder:
     """Stub embedder returning fixed-dimension vectors."""
 
-    def embed_documents(self, texts: list[str]) -> list[list[float]]:
-        return [[0.1] * 4 for _ in texts]
+    def embed_documents(self, documents: list[str]) -> list[list[float]]:
+        return [[0.1] * 4 for _ in documents]
 
 
 class TestChunkingResponseNormalization:
@@ -77,7 +77,7 @@ class TestChunkingResponseFallbackPath:
 
         monkeypatch.setattr("sonality.memory.derivatives.llm_call", failing_call)
 
-        results = chunk_and_embed(_FakeEmbedder(), "Some long text about science.", "ep-001")  # type: ignore[arg-type]
+        results = chunk_and_embed(_FakeEmbedder(), "Some long text about science.", "ep-001")
 
         assert len(results) == 1
         assert results[0].node.key_concept == "full_content"
@@ -97,15 +97,15 @@ class TestChunkingResponseFallbackPath:
                 ChunkItem(text="  ", key_concept="whitespace"),
             ]
         )
-        mock_result = LLMCallResult(
-            value=payload,  # type: ignore[arg-type]
+        mock_result = LLMCallResult[ChunkingResponse](
+            value=payload,
             success=True,
             attempts=1,
             raw_text="",
         )
 
         with patch("sonality.memory.derivatives.llm_call", return_value=mock_result):
-            results = chunk_and_embed(_FakeEmbedder(), "Some text.", "ep-002")  # type: ignore[arg-type]
+            results = chunk_and_embed(_FakeEmbedder(), "Some text.", "ep-002")
 
         assert len(results) == 1
         assert results[0].node.text == "Real content"
