@@ -1,5 +1,6 @@
-from __future__ import annotations
+"""LLM integration layer: structured calls, JSON parsing, tool call extraction.
 
-from .caller import LLMCallResult, llm_call, llm_call_text
-
-__all__ = ["LLMCallResult", "llm_call", "llm_call_text"]
+Submodules:
+  caller — llm_call / consensus_call / quorum_critique with retry and JSON repair.
+  parse  — pure functions for JSON extraction, thinking trace removal, tool parsing.
+"""
