@@ -16,7 +16,7 @@ from ... import config
 from ...llm.caller import llm_call
 from ...prompts import SUFFICIENCY_PROMPT
 from ..dual_store import DualEpisodeStore
-from ..graph import EpisodeNode, MemoryGraph
+from ..graph import EpisodeNode, MemoryGraph, format_episode_line
 
 log = logging.getLogger(__name__)
 
@@ -46,7 +46,12 @@ async def chain_retrieve(
     query: str,
     base_n: int = 10,
 ) -> list[EpisodeNode]:
-    """Iteratively search and refine until sufficient results found."""
+    """Iteratively search and refine until sufficient results found.
+
+    Each iteration: vector search → LLM sufficiency check → optional query
+    refinement. Stops when sufficient, no new results, or RETRIEVAL_MAX_ITERATIONS
+    reached. Accumulates unique episodes across all iterations.
+    """
     all_uids: set[str] = set()
     all_episodes: list[EpisodeNode] = []
     current_query = query
@@ -72,16 +77,19 @@ async def chain_retrieve(
             break
 
         context = "\n\n".join(
-            f"[{ep.created_at}] {ep.summary or ep.content[:200]}" for ep in all_episodes
+            format_episode_line(
+                created_at=ep.created_at,
+                summary=ep.summary,
+                content=ep.content,
+                content_limit=200,
+            )
+            for ep in all_episodes
         )
         _suf = await asyncio.to_thread(
             llm_call,
             prompt=SUFFICIENCY_PROMPT.format(query=query, context=context),
             response_model=_SufficiencyResponse,
             fallback=_SufficiencyResponse(),
-            max_tokens=config.STRUCTURED_JSON_MAX_TOKENS,
-            max_retries=1,
-            assistant_prefix='{"sufficiency_decision": "',
         )
         sufficiency = _suf.value
 
@@ -98,5 +106,5 @@ async def chain_retrieve(
         else:
             break
 
-    log.info("Chain retrieval done: %d iterations, %d episodes", iteration, len(all_episodes))
+    log.info("Chain retrieval exhausted: %d episodes", len(all_episodes))
     return all_episodes

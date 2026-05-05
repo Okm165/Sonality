@@ -8,18 +8,32 @@ from __future__ import annotations
 
 import logging
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from ... import config
 from ...llm.caller import llm_call
 from ...prompts import RERANK_PROMPT
-from ..graph import EpisodeNode
+from ..graph import EpisodeNode, format_episode_line
 
 log = logging.getLogger(__name__)
 
 
 class _RerankResponse(BaseModel):
     ranking: list[int]
+
+    @field_validator("ranking", mode="before")
+    @classmethod
+    def flatten_ranking(cls, v: object) -> list[int]:
+        """Flatten nested arrays and filter to integers — handles model quirks."""
+        if isinstance(v, list):
+            flat: list[int] = []
+            for item in v:
+                if isinstance(item, int):
+                    flat.append(item)
+                elif isinstance(item, list):
+                    flat.extend(x for x in item if isinstance(x, int))
+            return flat
+        return []
 
 
 def rerank_episodes(
@@ -28,8 +42,9 @@ def rerank_episodes(
 ) -> list[EpisodeNode]:
     """Rerank candidate episodes using LLM Listwise approach.
 
-    Returns all candidates in LLM-determined relevance order.
-    Callers should slice the result to their desired count.
+    Only the first MAX_RERANK_CANDIDATES are ranked — extras are dropped
+    to avoid context overflow. Callers should slice the result to their
+    desired count.
     """
     if not candidates:
         return []
@@ -42,8 +57,7 @@ def rerank_episodes(
 
     # Format numbered candidates
     numbered = "\n\n".join(
-        f"[{i + 1}] ({ep.created_at[:10] if ep.created_at else 'unknown'}) "
-        f"{ep.summary or ep.content[:300]}"
+        f"[{i + 1}] {format_episode_line(created_at=ep.created_at, summary=ep.summary, content=ep.content)}"
         for i, ep in enumerate(to_rank)
     )
 
@@ -52,9 +66,6 @@ def rerank_episodes(
         prompt=prompt,
         response_model=_RerankResponse,
         fallback=_RerankResponse(ranking=list(range(1, len(to_rank) + 1))),
-        max_tokens=config.RERANK_MAX_TOKENS,
-        max_retries=1,
-        assistant_prefix='{"ranking": [',
     )
 
     if result.success:

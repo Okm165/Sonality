@@ -1,7 +1,7 @@
 """LLM-based event boundary detection for conversation segmentation.
 
-Replaces cosine-distance threshold approaches with LLM contextual analysis
-to identify topic shifts, goal changes, and explicit transitions.
+Uses contextual analysis to identify topic shifts, goal changes, and
+explicit transitions between conversation segments.
 """
 
 from __future__ import annotations
@@ -21,11 +21,15 @@ log = logging.getLogger(__name__)
 
 
 class BoundaryDecision(StrEnum):
+    """Whether the current message starts a new conversation segment."""
+
     BOUNDARY = "BOUNDARY"
     CONTINUE = "CONTINUE"
 
 
 class BoundaryDetectionResponse(BaseModel):
+    """LLM-returned boundary classification."""
+
     boundary_decision: BoundaryDecision = BoundaryDecision.CONTINUE
     confidence: float = 0.0
     boundary_type: str = "none"
@@ -35,6 +39,11 @@ class BoundaryDetectionResponse(BaseModel):
 
 @dataclass(frozen=True, slots=True)
 class BoundaryResult:
+    """Result of boundary check: decision + current segment identifier.
+
+    label is only populated when boundary_decision is BOUNDARY.
+    """
+
     boundary_decision: BoundaryDecision
     segment_id: str
     label: str = ""
@@ -87,8 +96,7 @@ class EventBoundaryDetector:
             prompt=prompt,
             response_model=BoundaryDetectionResponse,
             fallback=BoundaryDetectionResponse(),
-            max_tokens=config.STRUCTURED_JSON_MAX_TOKENS,
-            assistant_prefix='{"boundary_decision": "',
+            model=config.STRUCTURED_MODEL,
         )
         if not result.success:
             log.warning(

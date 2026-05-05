@@ -190,7 +190,11 @@ class DualEpisodeStore:
         query: str,
         top_k: int = 20,
     ) -> list[SearchHit]:
-        """Search Qdrant for similar derivatives using dense vectors."""
+        """Search Qdrant for similar derivatives using dense vectors.
+
+        Returns SearchHit tuples sorted by cosine similarity score (highest first).
+        Only non-archived derivatives are searched.
+        """
         query_embedding = await asyncio.to_thread(self._embedder.embed_query, query)
         response = await self._qdrant.query_points(
             collection_name=Collection.DERIVATIVES,

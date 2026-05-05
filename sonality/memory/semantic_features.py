@@ -24,6 +24,7 @@ from qdrant_client.models import FieldCondition, Filter, MatchValue, PointStruct
 
 from .. import config
 from ..llm.caller import llm_call
+from ..llm.parse import normalize_llm_list_response
 from ..prompts import FEATURE_CONSOLIDATION_PROMPT, FEATURE_EXTRACTION_PROMPT, FEATURE_TAGS
 from ..provider import interaction_in_progress, llm_semaphore_idle
 from ..schema import DENSE_VECTOR, Collection, SemanticCategory
@@ -35,31 +36,62 @@ SEMANTIC_CATEGORIES: list[SemanticCategory] = list(SemanticCategory)
 
 
 class FeatureCommandType(StrEnum):
+    """Operations the LLM can request on semantic features."""
+
     ADD = "add"
     UPDATE = "update"
     DELETE = "delete"
 
 
 class FeatureConsolidationDecision(StrEnum):
+    """Whether duplicate/overlapping features should be merged."""
+
     CONSOLIDATE = "CONSOLIDATE"
     SKIP = "SKIP"
 
 
+_VALID_FEATURE_TAGS: frozenset[str] = frozenset(
+    tag.strip().lower().replace(" ", "_")
+    for tags_str in FEATURE_TAGS.values()
+    for tag in tags_str.split(",")
+)
+
+
 class FeatureCommand(BaseModel):
     command: FeatureCommandType
-    tag: str
+    tag: str = ""
     feature: str
     value: str = ""
     confidence: float = 0.5
     reason: str = ""
 
+    @field_validator("command", mode="before")
+    @classmethod
+    def normalize_command(cls, v: object) -> object:
+        if isinstance(v, str):
+            return v.lower()
+        return v
+
+    @field_validator("tag", mode="before")
+    @classmethod
+    def normalize_tag(cls, v: object) -> str:
+        return v.strip().lower().replace(" ", "_") if isinstance(v, str) else ""
+
+    @field_validator("feature", "reason", mode="before")
+    @classmethod
+    def truncate_text(cls, v: object) -> str:
+        return str(v)[:150] if v is not None else ""
+
     @field_validator("value", mode="before")
     @classmethod
-    def strip_inline_conf(cls, v: object) -> object:
-        """Strip trailing '(conf=X.XX)' that LLMs sometimes append to value strings."""
+    def coerce_value(cls, v: object) -> str:
         if isinstance(v, str):
-            return re.sub(r"\s*\(conf=[\d.]+\)\s*$", "", v).strip()
-        return v
+            result = re.sub(r"\s*\(conf=[\d.]+\)\s*$", "", v).strip()
+            return result[:200]
+        if isinstance(v, dict):
+            first = next(iter(v.values()), "")
+            return str(first)[:200] if isinstance(first, (str, int, float)) else ""
+        return ""
 
 
 class FeatureExtractionResponse(BaseModel):
@@ -68,19 +100,21 @@ class FeatureExtractionResponse(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def normalize_commands(cls, data: object) -> object:
-        if isinstance(data, list):
-            return {"commands": data}
-        if isinstance(data, dict) and "command" in data and "commands" not in data:
-            return {"commands": [data]}
-        if isinstance(data, dict) and "commands" in data:
-            # Drop malformed/empty command dicts the LLM emits as "no features" signals.
-            cmds = data.get("commands", [])
-            if isinstance(cmds, list):
-                data = {
-                    **data,
-                    "commands": [c for c in cmds if isinstance(c, dict) and c.get("command")],
-                }
-        return data
+        return normalize_llm_list_response(
+            data,
+            list_key="commands",
+            item_required_key="command",
+        )
+
+    @model_validator(mode="after")
+    def validate_tags(self) -> FeatureExtractionResponse:
+        """Filter out commands with unrecognised tags — silently discard rather than repair."""
+        before = len(self.commands)
+        self.commands = [cmd for cmd in self.commands if cmd.tag and cmd.tag in _VALID_FEATURE_TAGS]
+        dropped = before - len(self.commands)
+        if dropped:
+            log.debug("feature_extraction: dropped %d command(s) with unknown tags", dropped)
+        return self
 
 
 class FeatureConsolidationAction(BaseModel):
@@ -91,15 +125,42 @@ class FeatureConsolidationAction(BaseModel):
     canonical_value: str = ""
     reason: str = ""
 
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_uid_keys(cls, data: object) -> object:
+        """LLM sometimes returns variant key names for source/target UIDs."""
+        if isinstance(data, dict):
+            for alt, canonical in (
+                ("from", "source_uid"),
+                ("source_id", "source_uid"),
+                ("source", "source_uid"),
+                ("to", "target_uid"),
+                ("target_id", "target_uid"),
+                ("target", "target_uid"),
+            ):
+                if alt in data and canonical not in data:
+                    data[canonical] = data.pop(alt)
+        return data
+
 
 class FeatureConsolidationResponse(BaseModel):
     consolidation_decision: FeatureConsolidationDecision = FeatureConsolidationDecision.SKIP
     reasoning: str = ""
     actions: list[FeatureConsolidationAction] = Field(default_factory=list)
 
+    @field_validator("consolidation_decision", mode="before")
+    @classmethod
+    def normalize_decision(cls, v: object) -> object:
+        """Normalize case: models return 'skip'/'consolidate' but enum is uppercase."""
+        if isinstance(v, str):
+            return v.upper()
+        return v
+
 
 @dataclass(frozen=True, slots=True)
 class SemanticFeatureRow:
+    """Read-only view of a semantic feature from Qdrant."""
+
     uid: str
     tag: str
     feature_name: str
@@ -185,6 +246,7 @@ class SemanticIngestionWorker:
         content: str,
         categories: tuple[SemanticCategory, ...] = (),
     ) -> None:
+        """Queue an episode for feature extraction. Empty categories = all."""
         self._queue.put((episode_uid, content, categories))
 
     def _run(self) -> None:
@@ -276,24 +338,17 @@ class SemanticIngestionWorker:
             existing_features=existing,
         )
 
-        # 2-4 short commands; 256-512 tokens is ample. Keeping it small caps the semaphore
-        # hold time to ~60s on a 35B model, reducing foreground latency spikes.
-        # max_retries=1: if server is busy, skip this episode rather than blocking further.
         result = llm_call(
             prompt=prompt,
             response_model=FeatureExtractionResponse,
             fallback=FeatureExtractionResponse(),
-            max_tokens=config.EXTRACTION_MAX_TOKENS,
-            max_retries=1,
-            assistant_prefix='{"commands": [',
+            model=config.STRUCTURED_MODEL,
         )
         if not result.success:
             log.debug("Feature extraction failed: %s", result.error)
             return
 
         response = result.value
-        if len(response.commands) > 4:
-            response.commands = response.commands[:4]
 
         seen_tags: dict[str, int] = {}
         for i, cmd in enumerate(response.commands):
@@ -398,9 +453,7 @@ class SemanticIngestionWorker:
             prompt=FEATURE_CONSOLIDATION_PROMPT.format(category=category, features=features_text),
             response_model=FeatureConsolidationResponse,
             fallback=FeatureConsolidationResponse(),
-            max_tokens=config.STRUCTURED_JSON_MAX_TOKENS,
-            max_retries=1,
-            assistant_prefix='{"consolidation_decision": "',
+            model=config.STRUCTURED_MODEL,
         )
         if not result.success:
             log.debug("Feature consolidation LLM failed: %s", result.error)
@@ -409,7 +462,7 @@ class SemanticIngestionWorker:
         if response.consolidation_decision is FeatureConsolidationDecision.SKIP:
             return
         feature_uids = {f.uid for f in features}
-        for action in response.actions[:2]:
+        for action in response.actions:
             source_uid = action.source_uid
             target_uid = action.target_uid
             if (

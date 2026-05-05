@@ -3,8 +3,6 @@
 Extracts self-contained propositions from text via LLM, deduplicates against
 existing Qdrant store using embedding similarity, and persists new knowledge.
 Long texts use overlapping sliding windows with LLM context summaries.
-
-Called from agent._extract_knowledge when ESS knowledge_density > NONE.
 """
 
 from __future__ import annotations
@@ -15,18 +13,18 @@ import uuid
 from datetime import UTC, datetime
 from enum import StrEnum
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.models import FieldCondition, Filter, MatchValue, PointStruct
 
 from .. import config
 from ..llm.caller import llm_call
+from ..llm.parse import normalize_llm_list_response
 from ..prompts import (
     KNOWLEDGE_EXTRACTION_PROMPT,
     WINDOW_CONTEXT_SUMMARY_PROMPT,
 )
-from ..provider import default_provider
-from ..schema import DENSE_VECTOR, ChatRole, Collection, SemanticCategory
+from ..schema import DENSE_VECTOR, Collection, SemanticCategory
 from .embedder import Embedder, cosine_similarity
 
 log = logging.getLogger(__name__)
@@ -37,7 +35,15 @@ DEDUP_THRESHOLD_EXISTING = 0.78
 DEDUP_THRESHOLD_INTRABATCH = 0.82
 
 
+class _WindowSummarySchema(BaseModel):
+    """Structured window context summary for sliding-window extraction."""
+
+    summary: str = ""
+
+
 class PropositionType(StrEnum):
+    """Classification of an extracted knowledge proposition."""
+
     FACT = "fact"
     OPINION = "opinion"
     SPECULATION = "speculation"
@@ -45,41 +51,38 @@ class PropositionType(StrEnum):
 
 
 class ExtractedProposition(BaseModel):
+    """A single self-contained knowledge proposition extracted by LLM."""
+
     text: str
-    # Default to FACT: the extraction prompt tells the model to exclude noise items,
-    # so un-typed propositions (where the model omitted the field) should be treated
-    # as facts rather than silently discarded by the NOISE filter.
     type: PropositionType = PropositionType.FACT
     confidence: float = 0.5
     key_concepts: list[str] = Field(default_factory=list)
     negation: bool = False
 
+    @field_validator("type", mode="before")
+    @classmethod
+    def strip_type(cls, v: object) -> object:
+        if not isinstance(v, str):
+            return v
+        return v.strip().lower()
+
+    @field_validator("negation", mode="before")
+    @classmethod
+    def coerce_negation(cls, v: object) -> object:
+        if v is None:
+            return False
+        return v
+
 
 class ExtractionResponse(BaseModel):
+    """LLM response containing extracted propositions from a text window."""
+
     propositions: list[ExtractedProposition] = Field(default_factory=list)
 
     @model_validator(mode="before")
     @classmethod
     def normalize_response(cls, data: object) -> object:
-        """Handle bare-list and bare-dict LLM responses.
-
-        Covers three cases from truncated or malformed LLM output:
-        1. Bare list: model returned [{...}, {...}] instead of {"propositions": [...]}
-        2. Bare proposition dict: a single dict with "text" but no "propositions" key
-           (e.g. truncated outer wrapper) — wrap it as a one-element list.
-        3. Normal {"propositions": [...]} — filter empty objects and pass through.
-        """
-        if isinstance(data, list):
-            return {"propositions": [x for x in data if isinstance(x, dict) and "text" in x]}
-        if isinstance(data, dict) and "propositions" not in data and "text" in data:
-            # Bare proposition dict recovered from truncated output
-            return {"propositions": [data]}
-        if isinstance(data, dict) and "propositions" in data:
-            # Filter out empty proposition objects (LLM returns [{}] for no-content)
-            props = data["propositions"]
-            if isinstance(props, list):
-                data = {"propositions": [x for x in props if isinstance(x, dict) and "text" in x]}
-        return data
+        return normalize_llm_list_response(data, list_key="propositions", item_required_key="text")
 
 
 # ---------------------------------------------------------------------------
@@ -109,22 +112,13 @@ def _split_windows(text: str) -> list[tuple[str, str]]:
         windows.append((window_text, prev_summary))
         if start + WINDOW_SIZE_WORDS >= len(words):
             break
-        try:
-            result = default_provider.chat_completion(
-                model=config.FAST_LLM_MODEL,
-                messages=(
-                    {
-                        "role": ChatRole.USER,
-                        "content": WINDOW_CONTEXT_SUMMARY_PROMPT.format(text=window_text[:3000]),
-                    },
-                ),
-                max_tokens=config.STRUCTURED_JSON_MAX_TOKENS,
-                enable_thinking=False,
-            )
-            prev_summary = result.text.strip()
-        except Exception:
-            log.debug("Window summary failed; proceeding without context")
-            prev_summary = ""
+        r = llm_call(
+            prompt=WINDOW_CONTEXT_SUMMARY_PROMPT.format(text=window_text[:3000]),
+            response_model=_WindowSummarySchema,
+            fallback=_WindowSummarySchema(),
+            model=config.FAST_MODEL,
+        )
+        prev_summary = r.value.summary.strip()
     return windows
 
 
@@ -134,7 +128,7 @@ def _split_windows(text: str) -> list[tuple[str, str]]:
 
 
 def _extract_propositions(text: str, preceding_context: str = "") -> list[ExtractedProposition]:
-    """Run five-stage LLM extraction on a single window.
+    """Run LLM extraction on a single window.
 
     If preceding_context is provided (LLM summary of previous window),
     it's prepended so the LLM can resolve cross-window references.
@@ -152,18 +146,9 @@ def _extract_propositions(text: str, preceding_context: str = "") -> list[Extrac
         prompt=KNOWLEDGE_EXTRACTION_PROMPT.format(text=prompt_text),
         response_model=ExtractionResponse,
         fallback=ExtractionResponse(),
-        max_tokens=config.EXTRACTION_MAX_TOKENS,
-        max_retries=1,  # fail fast; retrying rarely helps prose-drift failures
-        assistant_prefix='{"propositions": [',  # prefill forces JSON output, bypasses prose drift
+        model=config.STRUCTURED_MODEL,
     )
     if not result.success:
-        # The model sometimes tries to output an empty array `[]` but corrupts the JSON
-        # when the assistant_prefix forces `[` — treat this as "nothing to extract".
-        raw = result.error.lower()
-        is_empty_attempt = any(kw in raw for kw in ('["]}', "[]", '"]}', '["'))
-        if is_empty_attempt:
-            log.debug("Knowledge extraction: model signalled empty list (no propositions)")
-            return []
         log.warning("Knowledge extraction parse failed: %s", result.error)
         return []
     return [
@@ -381,17 +366,17 @@ async def extract_and_store_knowledge(
     episode_uid: str,
     qdrant: AsyncQdrantClient,
     embedder: Embedder,
-) -> int:
-    """Full pipeline: window → extract → dedup → store.
+) -> tuple[int, int]:
+    """Full pipeline: window → extract → dedup → store. Returns (stored, evidence_boosted).
 
     Stages:
       0. Split into overlapping windows with LLM context summaries (SLIDE-inspired)
-      1. LLM extraction per window (five-step pipeline: select, extract, classify, score, format)
+      1. LLM extraction per window (select, extract, classify, score, format)
       2. Intra-batch deduplication (across windows)
       3. Dedup against existing + evidence accumulation (MMA 2025)
       4. Persist to semantic_features collection in Qdrant.
     """
-    windows = _split_windows(text)
+    windows = await asyncio.to_thread(_split_windows, text)
     log.debug("Knowledge pipeline: %d windows from %d chars", len(windows), len(text))
     all_propositions: list[ExtractedProposition] = []
     for i, (window_text, preceding_context) in enumerate(windows):
@@ -409,7 +394,7 @@ async def extract_and_store_knowledge(
 
     if not all_propositions:
         log.debug("No propositions extracted from any window")
-        return 0
+        return 0, 0
 
     texts_to_embed = [p.text for p in all_propositions]
     new_embeddings = await asyncio.to_thread(embedder.embed_documents, texts_to_embed)
@@ -438,7 +423,7 @@ async def extract_and_store_knowledge(
         evidence_boosted,
         stored,
     )
-    return stored
+    return stored, evidence_boosted
 
 
 # ---------------------------------------------------------------------------
@@ -451,13 +436,17 @@ async def retrieve_relevant_knowledge(
     qdrant: AsyncQdrantClient,
     embedder: Embedder,
     top_k: int = 8,
-    min_confidence: float = 0.3,
+    min_similarity: float = 0.3,
+    min_stored_confidence: float = 0.3,
 ) -> list[str]:
     """Retrieve stored knowledge propositions relevant to a query.
 
     Embeds the query, performs vector similarity search against the knowledge
     store, and returns formatted knowledge lines for system prompt injection.
     Returns empty list if embedding is unavailable (graceful degradation).
+
+    min_similarity: cosine similarity threshold for the ANN vector search.
+    min_stored_confidence: minimum LLM-assigned confidence for stored propositions.
     """
     try:
         query_embedding = await asyncio.to_thread(embedder.embed_query, query)
@@ -475,13 +464,13 @@ async def retrieve_relevant_knowledge(
             ]
         ),
         limit=top_k,
-        score_threshold=min_confidence,
+        score_threshold=min_similarity,
         with_payload=True,
     )
     results = response.points
 
     if not results:
-        log.debug("Knowledge retrieval: no matches for query (min_conf=%.2f)", min_confidence)
+        log.debug("Knowledge retrieval: no matches for query (min_sim=%.2f)", min_similarity)
         return []
 
     rows = [
@@ -492,7 +481,7 @@ async def retrieve_relevant_knowledge(
             float(p.score),
         )
         for p in results
-        if p.payload and float(p.payload.get("confidence") or 0) >= min_confidence
+        if p.payload and float(p.payload.get("confidence") or 0) >= min_stored_confidence
     ]
 
     if not rows:

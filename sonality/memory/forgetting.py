@@ -12,7 +12,9 @@ from enum import StrEnum
 
 from pydantic import BaseModel, model_validator
 
+from .. import config
 from ..llm.caller import llm_call
+from ..llm.parse import normalize_llm_list_response
 from ..prompts import BATCH_FORGETTING_PROMPT
 from .dual_store import DualEpisodeStore
 from .graph import EpisodeNode, MemoryGraph
@@ -21,28 +23,30 @@ log = logging.getLogger(__name__)
 
 
 class _Action(StrEnum):
+    """Forgetting disposition: KEEP retains, ARCHIVE soft-deletes, FORGET hard-deletes."""
+
     KEEP = "KEEP"
     ARCHIVE = "ARCHIVE"
     FORGET = "FORGET"
 
 
 class _Decision(BaseModel):
+    """LLM decision for a single forgetting candidate."""
+
     uid: str
     action: _Action = _Action.KEEP
     reason: str = ""
 
 
 class _BatchResponse(BaseModel):
+    """Batch of forgetting decisions from a single LLM call."""
+
     decisions: list[_Decision]
 
     @model_validator(mode="before")
     @classmethod
     def normalize(cls, data: object) -> object:
-        if isinstance(data, list):
-            return {"decisions": data}
-        if isinstance(data, dict) and "uid" in data and "decisions" not in data:
-            return {"decisions": [data]}
-        return data
+        return normalize_llm_list_response(data, list_key="decisions", item_required_key="uid")
 
 
 async def assess_and_forget(
@@ -74,8 +78,7 @@ async def assess_and_forget(
                 snapshot_excerpt=snapshot_excerpt or "No snapshot available",
             ),
             response_model=_BatchResponse,
-            assistant_prefix='{"decisions": [',
-            max_retries=1,
+            model=config.REASONING_MODEL,
             fallback=fallback,
         )
     )
@@ -99,7 +102,7 @@ async def assess_and_forget(
         if ep.uid not in seen:
             decisions.append(_Decision(uid=ep.uid, reason="Missing decision; default keep"))
 
-    archived = 0
+    removed = 0
     kept = 0
     for decision in decisions:
         if decision.action not in {_Action.ARCHIVE, _Action.FORGET}:
@@ -112,7 +115,7 @@ async def assess_and_forget(
             else:
                 await graph.delete_episode(decision.uid)
                 await store.delete_derivatives(decision.uid)
-            archived += 1
+            removed += 1
             log.info("%s episode %s: %s", decision.action.value, decision.uid[:8], decision.reason)
         except Exception:
             log.exception(
@@ -120,4 +123,4 @@ async def assess_and_forget(
             )
             kept += 1
 
-    log.info("Forgetting cycle: %d assessed, %d kept, %d archived", len(candidates), kept, archived)
+    log.info("Forgetting cycle: %d assessed, %d kept, %d removed", len(candidates), kept, removed)

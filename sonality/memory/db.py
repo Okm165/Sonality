@@ -41,7 +41,6 @@ class DatabaseConnections:
             await session.run("RETURN 1")
         log.info("Neo4j connected")
 
-        # Initialize Neo4j schema
         async with self.neo4j_driver.session(database=config.NEO4J_DATABASE) as session:
             for stmt in NEO4J_SCHEMA_STATEMENTS:
                 await session.run(stmt)
@@ -49,7 +48,6 @@ class DatabaseConnections:
 
         log.info("Connecting to Qdrant at %s", config.QDRANT_URL)
         self.qdrant = AsyncQdrantClient(url=config.QDRANT_URL)
-        # Verify Qdrant connectivity and initialize collections
         await init_qdrant_collections(self.qdrant)
         log.info("Qdrant connected and collections initialized")
 

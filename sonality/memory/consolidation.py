@@ -1,7 +1,8 @@
 """LLM-based segment consolidation.
 
 When a conversation segment closes, the LLM assesses readiness and generates
-a summary. Summaries supplement raw episodes (HEMA principle).
+a summary. Summaries supplement raw episodes — they do not replace them
+(Hierarchical Episodic Memory Architecture, HEMA).
 """
 
 from __future__ import annotations
@@ -16,19 +17,27 @@ from pydantic import BaseModel, field_validator
 from .. import config
 from ..llm.caller import llm_call
 from ..prompts import CONSOLIDATION_READINESS_PROMPT, CONSOLIDATION_SUMMARY_PROMPT
-from ..provider import default_provider
-from ..schema import ChatRole
 from .graph import EpisodeNode, MemoryGraph, format_episode_block, format_episode_line
 
 log = logging.getLogger(__name__)
 
 
 class _ReadinessDecision(StrEnum):
+    """Whether a segment has enough coherent material to summarize."""
+
     READY = "READY"
     NOT_READY = "NOT_READY"
 
 
+class _SummarySchema(BaseModel):
+    """Structured consolidation summary."""
+
+    summary: str = ""
+
+
 class _ReadinessResponse(BaseModel):
+    """LLM assessment of whether a segment is ready for consolidation."""
+
     readiness_decision: _ReadinessDecision = _ReadinessDecision.NOT_READY
     confidence: float = 0.0
     reasoning: str = ""
@@ -89,6 +98,7 @@ async def maybe_consolidate_segment(graph: MemoryGraph, segment_id: str) -> str:
 
 
 def _check_readiness(segment_id: str, episodes: list[EpisodeNode]) -> _ReadinessResponse:
+    """Ask the LLM whether a segment's episodes form a coherent unit worth summarizing."""
     episode_summaries = "\n".join(
         f"- {format_episode_line(created_at=ep.created_at, summary=ep.summary, content=ep.content, content_limit=150)}"
         for ep in episodes
@@ -104,8 +114,6 @@ def _check_readiness(segment_id: str, episodes: list[EpisodeNode]) -> _Readiness
         prompt=prompt,
         response_model=_ReadinessResponse,
         fallback=_ReadinessResponse(),
-        max_tokens=config.STRUCTURED_JSON_MAX_TOKENS,
-        assistant_prefix='{"readiness_decision": "',
     )
     if not result.success:
         log.warning("Consolidation readiness failed for segment=%s: %s", segment_id, result.error)
@@ -113,6 +121,7 @@ def _check_readiness(segment_id: str, episodes: list[EpisodeNode]) -> _Readiness
 
 
 def _generate_summary(episodes: list[EpisodeNode], focus: str) -> str:
+    """Generate a consolidation summary from episode content via LLM."""
     content = "\n\n".join(
         format_episode_block(created_at=ep.created_at, content=ep.content, content_limit=500)
         for ep in episodes
@@ -121,14 +130,12 @@ def _generate_summary(episodes: list[EpisodeNode], focus: str) -> str:
         episodes=content,
         focus_instruction=f"\nFocus on: {focus}" if focus else "",
     )
-    try:
-        completion = default_provider.chat_completion(
-            model=config.FAST_LLM_MODEL,
-            max_tokens=config.EXTRACTION_MAX_TOKENS,
-            messages=({"role": ChatRole.USER, "content": prompt},),
-            enable_thinking=False,
-        )
-        return completion.text.strip()
-    except Exception:
-        log.exception("Consolidation summary generation failed")
-        return ""
+    result = llm_call(
+        prompt=prompt,
+        response_model=_SummarySchema,
+        fallback=_SummarySchema(),
+        model=config.FAST_MODEL,
+    )
+    if not result.success:
+        log.warning("Consolidation summary generation failed: %s", result.error)
+    return result.value.summary.strip()

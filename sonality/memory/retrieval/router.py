@@ -12,7 +12,6 @@ from enum import StrEnum
 
 from pydantic import BaseModel
 
-from ... import config
 from ...llm.caller import llm_call
 from ...prompts import QUERY_ROUTING_PROMPT
 
@@ -20,6 +19,16 @@ log = logging.getLogger(__name__)
 
 
 class QueryCategory(StrEnum):
+    """Semantic category of a user query, determines retrieval strategy.
+
+    NONE: no memory retrieval needed (greetings, meta).
+    SIMPLE: single-topic lookup.
+    TEMPORAL: time-ordered retrieval (e.g. "what happened last week").
+    MULTI_ENTITY: comparison across entities, triggers split_retrieve.
+    AGGREGATION: summarize/count across episodes.
+    BELIEF_QUERY: queries about the agent's own beliefs.
+    """
+
     NONE = "NONE"
     SIMPLE = "SIMPLE"
     TEMPORAL = "TEMPORAL"
@@ -29,17 +38,23 @@ class QueryCategory(StrEnum):
 
 
 class RetrievalDepth(StrEnum):
+    """How many episodes to retrieve — maps to concrete counts via DEPTH_TO_COUNT."""
+
     MINIMAL = "MINIMAL"
     MODERATE = "MODERATE"
     DEEP = "DEEP"
 
 
 class TemporalExpansionDecision(StrEnum):
+    """Whether to expand results with temporally adjacent episodes."""
+
     EXPAND = "EXPAND"
     NO_EXPAND = "NO_EXPAND"
 
 
 class SemanticMemoryDecision(StrEnum):
+    """Whether to include semantic feature memory in retrieval context."""
+
     SEARCH = "SEARCH"
     SKIP = "SKIP"
 
@@ -62,6 +77,12 @@ class _RoutingResponse(BaseModel):
 
 @dataclass(frozen=True, slots=True)
 class RoutingDecision:
+    """Resolved retrieval strategy returned by route_query.
+
+    n_results: concrete episode count derived from depth via DEPTH_TO_COUNT.
+    should_decompose: if True, the query should be split into sub-queries.
+    """
+
     category: QueryCategory
     depth: RetrievalDepth
     n_results: int
@@ -85,9 +106,6 @@ def route_query(query: str) -> RoutingDecision:
         prompt=QUERY_ROUTING_PROMPT.format(query=query),
         response_model=_RoutingResponse,
         fallback=_RoutingResponse(),
-        max_tokens=config.STRUCTURED_JSON_MAX_TOKENS,
-        max_retries=1,
-        assistant_prefix='{"category": "',
     )
 
     if not result.success:

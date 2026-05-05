@@ -16,6 +16,7 @@ from pydantic import BaseModel, model_validator
 from .. import config
 from ..ess import ReasoningType, SourceReliability
 from ..llm.caller import llm_call
+from ..llm.parse import normalize_llm_list_response
 from ..prompts import BATCH_BELIEF_UPDATE_PROMPT, BELIEF_UPDATE_PROMPT, WEB_VERIFICATION_SECTION
 from .graph import BeliefNode, EdgeType, MemoryGraph
 
@@ -23,6 +24,12 @@ log = logging.getLogger(__name__)
 
 
 class _Response(BaseModel):
+    """LLM assessment of how evidence affects a single belief.
+
+    direction: positive = supports, negative = contradicts, 0 = neutral.
+    evidence_strength: 0-1 how strong the evidence is.
+    """
+
     topic: str = ""
     direction: float = 0.0
     evidence_strength: float = 0.5
@@ -30,16 +37,14 @@ class _Response(BaseModel):
 
 
 class _BatchResponse(BaseModel):
+    """Batch of belief assessments from a single LLM call."""
+
     assessments: list[_Response]
 
     @model_validator(mode="before")
     @classmethod
     def normalize_list(cls, data: object) -> object:
-        if isinstance(data, list):
-            return {"assessments": data}
-        if isinstance(data, dict) and "assessments" not in data and "topic" in data:
-            return {"assessments": [data]}
-        return data
+        return normalize_llm_list_response(data, list_key="assessments", item_required_key="topic")
 
 
 async def _record_provenance(
@@ -66,6 +71,7 @@ async def _record_provenance(
         )
     except Exception:
         log.exception("Failed to create belief provenance edge for %s", topic)
+        return
 
     log.debug(
         "Provenance: %s edge=%s str=%.2f dir=%+.2f",
@@ -108,8 +114,7 @@ async def _assess_single(
         prompt=prompt,
         response_model=_Response,
         fallback=_Response(direction=0.0, evidence_strength=0.0),
-        assistant_prefix='{"direction": ',
-        max_retries=1,
+        model=config.STRUCTURED_MODEL,
     )
     if not result.success:
         log.warning("Belief assessment failed for topic=%s: %s", topic, result.error)
@@ -192,9 +197,7 @@ async def assess_belief_evidence_batch(
         fallback=_BatchResponse(
             assessments=[_Response(topic=t, direction=0.0, evidence_strength=0.0) for t in topics]
         ),
-        max_tokens=min(config.LLM_MAX_TOKENS, max(128, len(topics) * 160)),
-        max_retries=1,
-        assistant_prefix='{"assessments": [',
+        model=config.STRUCTURED_MODEL,
     )
     if not result.success:
         error_lower = result.error.lower()

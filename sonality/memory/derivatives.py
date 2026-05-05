@@ -12,8 +12,8 @@ from dataclasses import dataclass
 
 from pydantic import BaseModel, model_validator
 
-from .. import config
 from ..llm.caller import llm_call
+from ..llm.parse import normalize_llm_list_response
 from ..prompts import CHUNKING_PROMPT
 from .embedder import Embedder
 from .graph import DerivativeNode
@@ -22,29 +22,29 @@ log = logging.getLogger(__name__)
 
 
 class ChunkItem(BaseModel):
+    """A single semantic chunk produced by LLM chunking."""
+
     text: str
     key_concept: str = ""
 
 
 class ChunkingResponse(BaseModel):
+    """LLM response containing semantic chunks for an episode."""
+
     chunks: list[ChunkItem]
 
     @model_validator(mode="before")
     @classmethod
     def normalize_chunks(cls, data: object) -> object:
-        if isinstance(data, list):
-            return {"chunks": [x for x in data if _is_valid_chunk(x)]}
-        if isinstance(data, dict) and "text" in data and "chunks" not in data:
-            return {"chunks": [data]}
-        if isinstance(data, dict) and "chunks" in data and isinstance(data["chunks"], list):
-            data = {"chunks": [x for x in data["chunks"] if _is_valid_chunk(x)]}
-        return data
-
-
-def _is_valid_chunk(x: object) -> bool:
-    if isinstance(x, ChunkItem):
-        return True
-    return isinstance(x, dict) and "text" in x
+        return normalize_llm_list_response(
+            data,
+            list_key="chunks",
+            item_required_key="text",
+            item_filter=lambda x: (
+                isinstance(x, (ChunkItem, dict))
+                and (isinstance(x, ChunkItem) or (isinstance(x, dict) and "text" in x))
+            ),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,14 +58,15 @@ class DerivativeWithEmbedding:
 def chunk_and_embed(
     embedder: Embedder, text: str, episode_uid: str
 ) -> list[DerivativeWithEmbedding]:
-    """Split text into semantic chunks and embed each one."""
+    """Split text into semantic chunks and embed each one.
+
+    Derivative UIDs are deterministic (uuid5 of episode_uid:index) so
+    re-processing the same episode produces identical UIDs.
+    """
     result = llm_call(
         prompt=CHUNKING_PROMPT.format(text=text),
         response_model=ChunkingResponse,
         fallback=ChunkingResponse(chunks=[]),
-        max_tokens=config.EXTRACTION_MAX_TOKENS,
-        max_retries=1,
-        assistant_prefix='{"chunks": [',
     )
     if result.success:
         chunks = [c for c in result.value.chunks if c.text.strip() and c.text.strip() != "..."]

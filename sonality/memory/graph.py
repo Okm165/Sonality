@@ -49,6 +49,8 @@ BELIEF_PROMPT_WINDOW: Final = 15
 
 
 class EdgeType(StrEnum):
+    """Neo4j relationship types between graph nodes."""
+
     DERIVED_FROM = "DERIVED_FROM"
     TEMPORAL_NEXT = "TEMPORAL_NEXT"
     DISCUSSES = "DISCUSSES"
@@ -111,6 +113,12 @@ SEED_SNAPSHOT: Final = (
 
 @dataclass(frozen=True, slots=True)
 class EpisodeNode:
+    """Single conversation episode stored in Neo4j.
+
+    Bi-temporal: created_at = wall-clock insert time, valid_at = event time.
+    consolidation_level: 1 = raw episode, 2+ = summarized/consolidated.
+    """
+
     uid: str
     content: str
     summary: str
@@ -132,6 +140,8 @@ class EpisodeNode:
 
 @dataclass(frozen=True, slots=True)
 class DerivativeNode:
+    """Semantic chunk derived from an episode for granular vector retrieval."""
+
     uid: str
     source_episode_uid: str
     text: str
@@ -372,6 +382,7 @@ class MemoryGraph:
     async def _keyword_episode_search(
         self, cypher: str, query: str, limit: int
     ) -> list[EpisodeNode]:
+        """Run a parameterized Cypher query using keywords extracted from the query string."""
         keywords = [t for t in re.split(r"[^a-z0-9]+", query.lower()) if len(t) > 2]
         if not keywords:
             return []
@@ -509,12 +520,12 @@ class MemoryGraph:
             records = [record async for record in result]
         return [
             format_episode_line(
-                created_at=str(record["created_at"]) if record["created_at"] else "",
-                summary=str(record["summary"]) if record["summary"] else "",
-                content=str(record["content"]) if record["content"] else "",
+                created_at=_str(r["created_at"]),
+                summary=_str(r["summary"]),
+                content=_str(r["content"]),
                 content_limit=config.EPISODE_CONTENT_LIMIT,
             )
-            for record in records
+            for r in records
         ]
 
     async def get_forgetting_candidates(
@@ -636,7 +647,12 @@ class MemoryGraph:
         evidence_count: int = -1,
         provenance: str = "",
     ) -> None:
-        """Create or update a Belief node (valence, confidence, uncertainty, evidence count)."""
+        """Create or update a Belief node (valence, confidence, uncertainty, evidence count).
+
+        Sentinel values: uncertainty=-1 and evidence_count=-1 mean "keep existing
+        or derive from confidence". This avoids requiring callers to fetch the
+        current belief just to preserve unchanged fields.
+        """
         topic = topic.strip().lower()
         async with self._driver.session(database=_DB) as session:
             await session.run(
@@ -726,54 +742,69 @@ class MemoryGraph:
             return max(counters, default=0)
 
 
+def _float(val: object, default: float = 0.0) -> float:
+    """Coerce a Neo4j property value to float (handles None, str, int)."""
+    if val is None:
+        return default
+    if isinstance(val, (int, float)):
+        return float(val)
+    try:
+        return float(str(val))
+    except (TypeError, ValueError):
+        return default
+
+
+def _int(val: object, default: int = 0) -> int:
+    """Coerce a Neo4j property value to int."""
+    if val is None:
+        return default
+    if isinstance(val, int):
+        return val
+    try:
+        return int(str(val))
+    except (TypeError, ValueError):
+        return default
+
+
+def _str(val: object) -> str:
+    """Coerce a Neo4j property value to str (None → empty string)."""
+    return str(val) if val is not None else ""
+
+
 def _record_to_belief(node: Mapping[str, object]) -> BeliefNode:
-    """Convert a Neo4j Belief node to a BeliefNode dataclass."""
+    """Convert a Neo4j Belief node record to a BeliefNode dataclass."""
     props = dict(node)
-    valence_raw = props.get("valence", 0.0) or 0.0
-    confidence_raw = props.get("confidence", 0.5) or 0.5
-    uncertainty_raw = props.get("uncertainty", 0.5) or 0.5
-    evidence_raw = props.get("evidence_count", 0) or 0
     return BeliefNode(
-        topic=str(props.get("topic", "")),
-        valence=float(valence_raw) if isinstance(valence_raw, (int, float, str)) else 0.0,
-        confidence=float(confidence_raw) if isinstance(confidence_raw, (int, float, str)) else 0.5,
-        uncertainty=float(uncertainty_raw)
-        if isinstance(uncertainty_raw, (int, float, str))
-        else 0.5,
-        evidence_count=int(evidence_raw) if isinstance(evidence_raw, (int, str)) else 0,
-        belief_text=str(props.get("belief_text", "") or ""),
-        provenance=str(props.get("provenance", "") or ""),
+        topic=_str(props.get("topic")),
+        valence=_float(props.get("valence")),
+        confidence=_float(props.get("confidence"), 0.5),
+        uncertainty=_float(props.get("uncertainty"), 0.5),
+        evidence_count=_int(props.get("evidence_count")),
+        belief_text=_str(props.get("belief_text")),
+        provenance=_str(props.get("provenance")),
     )
 
 
 def _record_to_episode(node: Mapping[str, object]) -> EpisodeNode:
-    """Convert a Neo4j node to an EpisodeNode dataclass."""
+    """Convert a Neo4j Episode node record to an EpisodeNode dataclass."""
     props = dict(node)
     topics_raw = props.get("topics", [])
-    topics = list(topics_raw) if isinstance(topics_raw, (list, tuple)) else []
-    ess_score = props.get("ess_score", 0.0)
-    utility_score = props.get("utility_score", 0.0)
-    access_count = props.get("access_count", 0)
-    consolidation_level = props.get("consolidation_level", 1)
-    expired_at_raw = props.get("expired_at")
-    segment_id_raw = props.get("segment_id")
     return EpisodeNode(
-        uid=str(props.get("uid", "")),
-        content=str(props.get("content", "")),
-        summary=str(props.get("summary", "")),
-        topics=topics,
-        ess_score=float(ess_score if isinstance(ess_score, (int, float, str)) else 0.0),
-        created_at=str(props.get("created_at", "")),
-        valid_at=str(props.get("valid_at", "")),
-        expired_at=str(expired_at_raw) if expired_at_raw is not None else "",
-        utility_score=float(utility_score if isinstance(utility_score, (int, float, str)) else 0.0),
-        access_count=int(access_count if isinstance(access_count, (int, str)) else 0),
-        last_accessed=str(props.get("last_accessed", "")),
-        segment_id=str(segment_id_raw) if segment_id_raw is not None else "",
-        consolidation_level=int(
-            consolidation_level if isinstance(consolidation_level, (int, str)) else 1
-        ),
+        uid=_str(props.get("uid")),
+        content=_str(props.get("content")),
+        summary=_str(props.get("summary")),
+        topics=list(topics_raw) if isinstance(topics_raw, (list, tuple)) else [],
+        ess_score=_float(props.get("ess_score")),
+        created_at=_str(props.get("created_at")),
+        valid_at=_str(props.get("valid_at")),
+        expired_at=_str(props.get("expired_at")),
+        utility_score=_float(props.get("utility_score")),
+        access_count=_int(props.get("access_count")),
+        last_accessed=_str(props.get("last_accessed")),
+        segment_id=_str(props.get("segment_id")),
+        consolidation_level=_int(props.get("consolidation_level"), 1),
         archived=bool(props.get("archived", False)),
-        user_message=str(props.get("user_message", "")),
-        agent_response=str(props.get("agent_response", "")),
+        user_message=_str(props.get("user_message")),
+        agent_response=_str(props.get("agent_response")),
+        reasoning_type=_str(props.get("reasoning_type")),
     )

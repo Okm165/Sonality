@@ -12,8 +12,8 @@ from enum import StrEnum
 
 from pydantic import BaseModel, model_validator
 
-from ... import config
 from ...llm.caller import llm_call
+from ...llm.parse import normalize_llm_list_response
 from ...prompts import DECOMPOSITION_PROMPT
 from ..dual_store import DualEpisodeStore
 from ..graph import EpisodeNode, MemoryGraph
@@ -34,28 +34,29 @@ class _DecompositionResponse(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def normalize_response(cls, data: object) -> object:
-        if isinstance(data, list):
-            data = {"sub_queries": data}
-        if isinstance(data, dict) and "sub_queries" in data:
-            raw = data["sub_queries"]
-            data["sub_queries"] = [
+        result = normalize_llm_list_response(
+            data,
+            list_key="sub_queries",
+            item_filter=lambda x: isinstance(x, (str, dict)),
+        )
+        if isinstance(result, dict) and "sub_queries" in result:
+            raw = result["sub_queries"]
+            result["sub_queries"] = [
                 str(x)
                 if isinstance(x, str)
                 else " ".join(v for v in x.values() if isinstance(v, str))
                 for x in raw
                 if isinstance(x, (str, dict))
             ]
-        return data
+        return result
 
 
 def _decompose(query: str) -> _DecompositionResponse:
+    """Decompose a complex query into independent sub-queries via LLM."""
     result = llm_call(
         prompt=DECOMPOSITION_PROMPT.format(query=query),
         response_model=_DecompositionResponse,
         fallback=_DecompositionResponse(sub_queries=[query]),
-        max_tokens=config.STRUCTURED_JSON_MAX_TOKENS,
-        max_retries=1,
-        assistant_prefix='{"sub_queries": [',
     )
     if not result.success:
         log.warning("Query decomposition failed: %s; using raw query", result.error)
@@ -74,6 +75,7 @@ def _decompose(query: str) -> _DecompositionResponse:
 
 
 def _dedupe(episodes: list[EpisodeNode]) -> list[EpisodeNode]:
+    """Deduplicate episodes by UID, preserving first occurrence order."""
     seen: dict[str, EpisodeNode] = {}
     for ep in episodes:
         seen.setdefault(ep.uid, ep)
@@ -83,6 +85,12 @@ def _dedupe(episodes: list[EpisodeNode]) -> list[EpisodeNode]:
 def _aggregate(
     sub_results: list[list[EpisodeNode]], strategy: _AggregationStrategy
 ) -> list[EpisodeNode]:
+    """Combine sub-query results using the chosen strategy.
+
+    COMPARE: interleave results for side-by-side analysis.
+    TIMELINE: sort by created_at for chronological narrative.
+    MERGE (default): simple deduped concatenation.
+    """
     if strategy is _AggregationStrategy.COMPARE:
         interleaved: list[EpisodeNode] = []
         max_len = max((len(batch) for batch in sub_results), default=0)

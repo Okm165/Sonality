@@ -1,3 +1,14 @@
+"""Public API for the memory subsystem.
+
+Re-exports from:
+  graph        — Neo4j episode/belief/snapshot storage
+  dual_store   — Neo4j + Qdrant transactional episode lifecycle
+  embedder     — text embedding via sentence-transformers
+  retrieval/   — LLM-driven query routing, chain/split retrieval, reranking
+  segmentation — conversation boundary detection
+  semantic_features — background feature extraction worker
+"""
+
 from __future__ import annotations
 
 from .belief_provenance import assess_belief_evidence_batch
