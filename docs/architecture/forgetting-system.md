@@ -24,16 +24,12 @@ WHERE NOT e.archived
   AND e.consolidation_level = 1
   AND e.created_at < datetime() - duration({minutes: 60})
 ORDER BY e.utility_score ASC
-LIMIT 20
+LIMIT $limit  -- default: FORGETTING_CANDIDATE_LIMIT (10)
 ```
 
 ## Decision Criteria
 
-| Signal | KEEP | ARCHIVE | FORGET |
-|--------|------|---------|--------|
-| ESS Score | > 0.5 | 0.1-0.5 | < 0.1 |
-| Access Count | > 2 | 1-2 | 0 |
-| Topic | Unique | Common | Redundant |
+Decisions are **LLM-driven** — the model receives candidate summaries alongside a personality snapshot excerpt and makes holistic judgments. There are no fixed numeric thresholds. The LLM considers epistemic value, access frequency, identity relevance, and redundancy when choosing KEEP, ARCHIVE, or FORGET for each candidate.
 
 ## Actions
 
@@ -44,10 +40,12 @@ LIMIT 20
 
 ## Integration
 
-Runs after reflection during `_apply_reflection()`:
+Runs from two entry points:
+1. **Post-bookkeeping** — `_bookkeep()` in `agent.py` calls `run_forgetting(ctx)` after provenance
+2. **During reflection** — `apply_reflection()` in `reflect.py` triggers forgetting after deep reflection
 
 ```python
-candidates = await graph.get_forgetting_candidates(limit=10)
+candidates = await graph.get_forgetting_candidates(limit=config.FORGETTING_CANDIDATE_LIMIT)
 if candidates:
     await assess_and_forget(candidates, graph, store, snapshot_excerpt)
 ```

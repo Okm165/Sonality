@@ -207,7 +207,7 @@ Set in `.env` (see `.env.example`):
 | `SONALITY_API_KEY` | *(empty — optional for local endpoints)* | API key; leave empty for local LLM servers |
 | `SONALITY_BASE_URL` | `https://api.openai.com/v1` | OpenAI-compatible chat endpoint |
 | `SONALITY_MODEL` | `gpt-4.1-mini` | Main reasoning model |
-| `SONALITY_ESS_MODEL` | same as `SONALITY_MODEL` | Model for ESS classification (separate model reduces self-judge bias) |
+| `SONALITY_STRUCTURED_MODEL` | same as `SONALITY_MODEL` | Model for structured output, classification, and ESS |
 | `SONALITY_LLM_MAX_TOKENS` | `8192` | Max tokens for main chat completion |
 | `SONALITY_ASYNC_TIMEOUT` | `1500` | Seconds to wait for async operations; increase for slow local LLMs |
 | `SONALITY_LOG_LEVEL` | `INFO` | Logging verbosity |

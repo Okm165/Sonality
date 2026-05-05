@@ -38,11 +38,11 @@ flowchart LR
 Iterative search with LLM sufficiency checking:
 
 ```
-for iteration in [1..3]:
+for iteration in [1..RETRIEVAL_MAX_ITERATIONS]:
     results = vector_search(query)
-    if sufficient(results, threshold=0.8):
+    if llm_sufficiency_decision(results) == SUFFICIENT:
         return results
-    query = refine(query)
+    query = llm_refine(query)
 ```
 
 ## Split Retrieval
@@ -66,6 +66,7 @@ Listwise reranking of up to 50 candidates:
 | Variable | Default |
 |----------|---------|
 | `RETRIEVAL_MAX_ITERATIONS` | 3 |
-| `RETRIEVAL_CONFIDENCE_THRESHOLD` | 0.8 |
 | `MAX_RERANK_CANDIDATES` | 50 |
 | `QDRANT_SEARCH_EF` | 128 |
+
+Sufficiency is determined by an LLM decision (SUFFICIENT / INSUFFICIENT), not a fixed confidence threshold.

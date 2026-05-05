@@ -12,9 +12,8 @@ interactions, and monitor whether personality evolution remains coherent and evi
    - `make run` for local REPL usage.
    - Optionally `make reset` before a new training cycle.
 3. Capture baseline state:
-   - `/health` to check snapshot version baseline.
+   - `/health` to check snapshot version and initial diagnostics.
    - `/beliefs` for structured stance baseline.
-   - `/health` for initial diagnostics.
 
 ## 2) Teach with evidence, not pressure
 
@@ -38,8 +37,8 @@ After each turn, inspect:
 Expected behavior:
 
 - Low-ESS chat should not alter beliefs.
-- High-ESS evidence may trigger reflection and belief updates.
-- Reflection consolidates insights without erasing identity.
+- High-ESS evidence triggers integrate_knowledge (store facts + update beliefs).
+- Knowledge integration consolidates insights without erasing identity.
 
 ## 4) Validate personality integrity
 
@@ -48,7 +47,7 @@ Use this monitoring checklist:
 - **Coherence:** beliefs and snapshot stay semantically aligned.
 - **Resistance:** disagreement rate does not collapse toward zero.
 - **Stability:** major shifts require repeated high-quality evidence.
-- **Specificity:** reflection output stays concrete (not generic assistant drift).
+- **Specificity:** integrate_knowledge output stays concrete (not generic assistant drift).
 
 Use `/beliefs`, `/health`, and historical snapshots in Neo4j `PersonalitySnapshot` nodes.
 
@@ -60,7 +59,7 @@ Before sharing changes:
 - `uv run pytest benches -m "bench and not live" -q`
 - `uv run --with zensical zensical build --clean` (docs build)
 
-CI mirrors these no-key checks in `.github/workflows/ci.yml`.
+CI runs lint + typecheck + tests in `.github/workflows/ci.yml`; docs build runs in `docs.yml`.
 
 ## 6) Escalate to benchmark suites when needed
 

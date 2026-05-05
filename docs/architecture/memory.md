@@ -40,8 +40,7 @@ flowchart LR
 | Collection | Purpose |
 |------------|---------|
 | `derivatives` | Episode chunks for retrieval |
-| `semantic_features` | Personality traits |
-| `knowledge` | SLIDE propositions |
+| `semantic_features` | Personality traits + knowledge propositions (distinguished by `category`) |
 
 Vectors: 1024d bge-large-en-v1.5, cosine, HNSW + INT8.
 
@@ -69,7 +68,8 @@ WHERE toLower(b.topic) CONTAINS $keyword
 MATCH (focal)-[:TEMPORAL_NEXT*1..2]->(next)
 
 -- Forgetting candidates
-MATCH (e:Episode) WHERE NOT e.archived AND e.utility_score < 0.3
+MATCH (e:Episode) WHERE NOT e.archived AND e.consolidation_level = 1
+ORDER BY e.utility_score ASC LIMIT $limit
 ```
 
 ## Background Workers

@@ -8,8 +8,13 @@ Configuration is environment-driven via `.env` (see `.env.example`).
 |----------|---------|-------|
 | `SONALITY_BASE_URL` | `https://api.openai.com/v1` | OpenAI-compatible endpoint (OpenAI, Ollama, vLLM, LM Studio, etc.) |
 | `SONALITY_MODEL` | `gpt-4.1-mini` | Main response model |
-| `SONALITY_ESS_MODEL` | Same as `SONALITY_MODEL` | ESS and reflection model |
+| `SONALITY_STRUCTURED_MODEL` | Same as `SONALITY_MODEL` | Structured output / ESS classification (**must support tool_choice**) |
+| `SONALITY_AGENT_MODEL` | Same as `SONALITY_MODEL` | Agentic loop model (**must support tool_choice**) |
 | `SONALITY_API_KEY` | `OPENAI_API_KEY` | API key (optional for local providers) |
+
+**Tool-capable models (Ollama):** qwen2.5, qwen3, llama3.1, llama3.2, mistral, mixtral
+
+**Non-tool models:** phi4, gemma, deepseek — use only for `SONALITY_FAST_MODEL` or `SONALITY_REASONING_MODEL`
 
 ## Database Variables
 
@@ -36,7 +41,6 @@ Embeddings are computed locally using **FastEmbed** with the `BAAI/bge-large-en-
 | Variable | Default | Notes |
 |----------|---------|-------|
 | `SONALITY_RETRIEVAL_MAX_ITERATIONS` | `3` | Max chain retrieval iterations |
-| `SONALITY_RETRIEVAL_CONFIDENCE_THRESHOLD` | `0.8` | Sufficiency confidence threshold |
 | `SONALITY_RETRIEVAL_OVER_FETCH_FACTOR` | `3` | Over-fetch multiplier for reranking |
 | `SONALITY_MAX_RERANK_CANDIDATES` | `50` | Max candidates for LLM reranking |
 
@@ -52,10 +56,10 @@ Embeddings are computed locally using **FastEmbed** with the `BAAI/bge-large-en-
 | Variable | Default | Notes |
 |----------|---------|-------|
 | `SONALITY_AGENT_TEMPERATURE` | `0.6` | Response temperature |
-| `SONALITY_LLM_MAX_TOKENS` | `8192` | Max output tokens |
-| `SONALITY_LLM_TIMEOUT` | `300` | HTTP request timeout (seconds) |
-| `SONALITY_ASYNC_TIMEOUT` | `1500` | Async operation timeout (seconds) |
-| `SONALITY_FAST_LLM_MODEL` | Same as `ESS_MODEL` | Model for fast scoring tasks |
+| `SONALITY_LLM_MAX_TOKENS` | `6000` | Max output tokens |
+| `SONALITY_LLM_TIMEOUT` | `600` | HTTP request timeout (seconds) |
+| `SONALITY_ASYNC_TIMEOUT` | `3000` | Async operation timeout (seconds) |
+| `SONALITY_FAST_MODEL` | Same as `SONALITY_MODEL` | Model for fast scoring / lightweight tasks |
 
 ## Runtime Artifacts
 
@@ -65,7 +69,7 @@ Embeddings are computed locally using **FastEmbed** with the `BAAI/bge-large-en-
 | `data/teaching_bench/` | Benchmark output artifacts |
 
 Graph data (episodes, beliefs, personality) is stored in **Neo4j**.
-Vector data (derivatives, semantic features, knowledge) is stored in **Qdrant**.
+Vector data (derivatives, semantic features — including knowledge propositions) is stored in **Qdrant**.
 
 ## Environment File Example
 
@@ -74,7 +78,7 @@ Vector data (derivatives, semantic features, knowledge) is stored in **Qdrant**.
 SONALITY_BASE_URL=https://api.openai.com/v1
 OPENAI_API_KEY=sk-...
 SONALITY_MODEL=gpt-4o
-SONALITY_ESS_MODEL=gpt-4o-mini
+SONALITY_STRUCTURED_MODEL=gpt-4o-mini
 
 # Database (use Docker Compose defaults)
 SONALITY_NEO4J_URL=bolt://localhost:7687
@@ -91,7 +95,7 @@ SONALITY_QDRANT_URL=http://localhost:6333
 | `SONALITY_WEB_CACHE_TTL` | `14400` | Search cache TTL in seconds (4h) |
 | `SONALITY_REFLECTION_WEB_QUERIES` | `3` | Max web queries per reflection enrichment step |
 
-The agent uses a unified agentic loop where the LLM decides ALL cognitive steps via tool calls: memory recall, web search, evidence assessment, reflection, knowledge storage, and consolidation. All tools are always available — there are no per-turn limits. The agent decides when to stop. Stall detection and deduplication prevent infinite loops. Web search and scrape are backed by Firecrawl (self-hosted via docker-compose), which uses Playwright for JavaScript rendering and SearXNG for search.
+The agent uses a unified agentic loop where the LLM decides ALL cognitive steps via tool calls: recall_memory, web_search, web_extract, synthesize, and integrate_knowledge. All tools are always available — there are no per-turn limits. Pipeline enforcement overrides premature "finish" handoffs when substantive recall/search was done but synthesize or integrate_knowledge was skipped. Stall detection and deduplication prevent infinite loops. Web search and scrape are backed by Firecrawl (self-hosted via docker-compose), which uses Playwright for JavaScript rendering and SearXNG for search.
 
 ## HTTP API Authentication
 
@@ -105,7 +109,7 @@ The agent uses a unified agentic loop where the LLM decides ALL cognitive steps 
 |----------|---------|-------|
 | `SONALITY_LOG_LEVEL` | `INFO` | Python log level (DEBUG for full pipeline visibility) |
 
-All logging uses structured `key=value` pairs with %-formatting for lazy evaluation.
+Log format uses `%(asctime)s | %(levelname)-8s | %(name)s | %(message)s` with %-style lazy evaluation.
 
 ## Docker Compose
 
@@ -116,6 +120,7 @@ docker compose up -d
 ```
 
 Services:
+- `sonality`: Agent API server (port 8000)
 - `neo4j`: Graph database (ports 7474, 7687)
 - `qdrant`: Vector database (ports 6333, 6334)
 - `firecrawl`: Web search + scrape API (port 3002)

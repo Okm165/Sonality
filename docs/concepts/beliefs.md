@@ -18,8 +18,8 @@ flowchart LR
     Episode --> Prov[Provenance Assessment]
     Prov -->|direction > 0| S[SUPPORTS_BELIEF]
     Prov -->|direction < 0| C[CONTRADICTS_BELIEF]
-    S & C --> Triage[Reflection Triage]
-    Triage -->|should_reflect| Deep[Deep Reflection]
+    S & C --> Integrate[integrate_knowledge]
+    Integrate --> Deep[Deep Reflection]
     Deep --> Update[Update valence/confidence]
 ```
 
@@ -35,19 +35,15 @@ flowchart LR
 
 ## ESS Quality Gating
 
-| ESS Score | Impact |
-|-----------|--------|
-| 0.0–0.3 | Unlikely to change beliefs |
-| 0.3–0.6 | May influence with reasoning |
-| 0.6–1.0 | Strong evidence for updates |
+Belief provenance only runs when `ess.belief_update_recommended` is `true` — a boolean flag set by the LLM classifier based on the overall epistemic significance of the input. There are no fixed numeric score thresholds.
 
 ## Anti-Manipulation
 
 | Protection | Mechanism |
 |------------|-----------|
-| ESS gating | Requires `score >= 0.25` |
-| Edge-only provenance | Values only change during reflection |
-| `debunked_claim` type | Score capped at 0.07 |
+| ESS gating | Requires `belief_update_recommended = true` |
+| Edge-only provenance | Values only change during integrate_knowledge |
+| LLM-driven assessment | Direction and strength evaluated per-topic by the LLM |
 
 ## API
 

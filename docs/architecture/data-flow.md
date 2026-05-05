@@ -23,14 +23,12 @@ flowchart TD
         LLM[LLM decides next action]
         Recall[recall_memory<br>episodes + knowledge]
         Web[web_search / web_extract<br>current information]
-        Assess[assess_evidence<br>evaluate findings]
-        Consol[consolidate<br>organize research]
-        Reflect[reflect<br>triage + belief updates]
-        Store[store_knowledge<br>persist verified facts]
+        Synth[synthesize<br>evaluate + structure findings]
+        Integrate[integrate_knowledge<br>store facts + update beliefs]
         Answer[Final text response]
 
-        LLM -->|tool_call| Recall & Web & Assess & Consol & Reflect & Store
-        Recall & Web & Assess & Consol & Reflect & Store -->|result| LLM
+        LLM -->|tool_call| Recall & Web & Synth & Integrate
+        Recall & Web & Synth & Integrate -->|result| LLM
         LLM -->|no tools| Answer
     end
 
@@ -61,7 +59,7 @@ flowchart TD
 
 ## Tool Availability
 
-All tools are always available when the web client is configured. There are no per-turn limits — the agent decides how many tools to use. Stall detection and deduplication prevent infinite loops.
+All tool schemas are always passed to the LLM. Memory and synthesis tools work unconditionally. Web tools (`web_search`, `web_extract`) require a configured Firecrawl instance and return an error message when unavailable. There are no per-turn limits — the agent decides how many tools to use. Stall detection and deduplication prevent infinite loops.
 
 ## Storage Split
 
@@ -84,7 +82,7 @@ Ingest: ESS.belief_update_recommended = true → full pipeline
 
 ## Bookkeeping
 
-After the agent responds, automatic bookkeeping runs silently. The agent handles all cognitive work (reflection, knowledge storage) via tools during the agentic loop.
+After the agent responds, automatic bookkeeping runs silently. The agent handles all cognitive work (synthesis, knowledge integration) via tools during the agentic loop.
 
 | Stage | Description |
 |-------|-------------|

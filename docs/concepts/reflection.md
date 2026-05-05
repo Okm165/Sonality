@@ -1,38 +1,22 @@
 # Reflection
 
-Transforms raw experience into coherent beliefs via two-tier LLM assessment.
+Transforms raw experience into coherent beliefs via deep LLM assessment.
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-    Interaction --> Triage{Tier 1: Triage}
-    Triage -->|should_reflect=false| Skip[Skip]
-    Triage -->|should_reflect=true| Deep[Tier 2: Deep]
+    Interaction --> Deep[Deep Reflection]
     Deep --> Beliefs[Update Beliefs]
     Deep --> Snapshot[Update Snapshot]
     Deep --> Forget[Forgetting Cycle]
 ```
 
-## Tier 1: Triage
+## Deep Reflection
 
-Lightweight LLM check per interaction. Decides if deeper reflection is warranted.
+Full context analysis triggered by `integrate_knowledge` tool.
 
-**Input:** Current beliefs, user message, ESS result  
-**Output:** `{"should_reflect": bool, "reason": str, "web_queries": list[str]}`
-
-**Criteria:**
-- Evidence that changes existing beliefs?
-- New topic requiring a stance?
-- Shift in reasoning patterns?
-
-Most interactions return `should_reflect=false` quickly.
-
-## Tier 2: Deep Reflection
-
-Full context analysis when triage approves.
-
-**Input:** Personality snapshot, beliefs, recent episodes (≤10), triggering interaction
+**Input:** Personality snapshot, beliefs, recent episodes (≤10), triggering evidence
 
 **Tasks:**
 1. **EVALUATE** — Which beliefs change?
@@ -46,6 +30,7 @@ class DeepReflectionResponse(BaseModel):
     new_beliefs: list[BeliefPatch]
     snapshot_revision: str
     snapshot_changed: bool
+    followup_queries: list[str]  # suggestions for further web research
 ```
 
 ## Application
@@ -66,9 +51,10 @@ await assess_and_forget(candidates, ...)
 
 ## Execution
 
-The agent invokes `reflect` as a tool during the agentic loop when evidence
-warrants belief evaluation. Triage + deep reflection run synchronously within
-the tool call. The agent is fully responsible for deciding when to reflect.
+The `integrate_knowledge` tool stores verified facts then runs deep reflection
+internally. This ensures knowledge storage and belief updates happen atomically.
+The agent calls `integrate_knowledge` as the final step of the gather → synthesize
+→ integrate pipeline.
 
 ## Research
 

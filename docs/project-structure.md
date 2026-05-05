@@ -13,22 +13,29 @@ sonality/
 │   ├── tools/             # Symmetric tool system
 │   │   ├── __init__.py    # ToolContext, dispatch_tool, get_definitions
 │   │   ├── web.py         # web_search, web_extract
-│   │   ├── memory.py      # recall_memory, store_knowledge
-│   │   ├── assess.py      # assess_evidence
-│   │   ├── reflect.py     # reflect tool + belief graph updates + forgetting
-│   │   └── consolidate.py # consolidate (mid-loop synthesis)
+│   │   ├── memory.py      # recall_memory, integrate_knowledge
+│   │   ├── synthesize.py  # synthesize (evaluate + structure research)
+│   │   └── reflect.py     # internal reflection logic + belief graph updates + forgetting
 │   ├── web/               # Web I/O (search client, formatting)
 │   │   ├── search.py      # WebSearchClient
 │   │   └── context.py     # sanitize, format web content
 │   └── memory/
-│       ├── graph.py       # Neo4j ops
-│       ├── dual_store.py  # Atomic storage
-│       ├── semantic_features.py
-│       ├── knowledge_extract.py
-│       ├── forgetting.py
-│       └── retrieval/     # router, chain, split, reranker
+│       ├── graph.py              # Neo4j ops (episodes, beliefs, snapshots)
+│       ├── dual_store.py         # Atomic Neo4j + Qdrant episode storage
+│       ├── belief_provenance.py  # Evidence assessment + provenance tracking
+│       ├── consolidation.py      # LLM-based segment consolidation (HEMA)
+│       ├── derivatives.py        # Chunking + embedding for episodes
+│       ├── segmentation.py       # Event boundary detection
+│       ├── semantic_features.py  # Feature extraction + ingestion worker
+│       ├── knowledge_extract.py  # Knowledge proposition extraction
+│       ├── forgetting.py         # LLM-based memory forgetting
+│       └── retrieval/            # router, chain, split, reranker
 ├── chat/                  # Clients
-│   ├── client.py          # SonalityClient
+│   ├── __init__.py        # Package exports
+│   ├── __main__.py        # CLI dispatcher (chat / telegram)
+│   ├── audio.py           # STT/TTS via Speaches API
+│   ├── client.py          # SonalityClient (streaming HTTP)
+│   ├── config.py          # Chat-specific env config
 │   ├── terminal.py        # Rich TUI REPL
 │   └── telegram.py        # Telegram + voice + sendMessageDraft streaming
 ├── scripts/               # Feed ingestion (RSS, X)

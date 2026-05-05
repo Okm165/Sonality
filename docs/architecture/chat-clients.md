@@ -17,14 +17,14 @@ Async HTTP client managing conversation history. Streams responses via SSE and y
 
 ```python
 client = SonalityClient(max_history=40)
-response = await client.chat("Hello")
-print(response.text)
+async for item in client.chat_stream("Hello"):
+    if isinstance(item, str):
+        print(item, end="")
 ```
 
 | Method | Purpose |
 |--------|---------|
-| `chat(message)` | Send message, return `ChatResponse` |
-| `chat_stream(message)` | Stream response, yield `str | ProgressEvent` |
+| `chat_stream(message)` | Stream response, yield `str \| ProgressEvent` |
 | `clear_history()` | Reset conversation history |
 | `health()` | Return `HealthStatus` (belief count, snapshot version) |
 | `beliefs()` | Return all `Belief` nodes |
@@ -40,6 +40,7 @@ During streaming, the agent emits `ProgressEvent` objects for each cognitive ste
 | `tool_call` | Agent invokes a tool (name + args in event) |
 | `tool_result` | Tool returns (summary + source count in event) |
 | `context_build` | Identity loaded, system prompt built |
+| `reviewing` | Quorum critique cross-checking evidence |
 | `summarizing` | Conversation history compressed |
 | `done` | Request fully complete |
 

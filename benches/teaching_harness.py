@@ -3490,7 +3490,7 @@ def _ess_default_flags(steps: list[StepResult]) -> ESSDefaultFlags:
             has_missing = True
             continue
         if not step.ess_defaulted_fields and step.ess_default_severity == "none":
-            # Conservative fallback for legacy traces where reasons are unavailable.
+            # Fallback for traces where reasons are unavailable.
             has_missing = True
     return ESSDefaultFlags(
         defaults_free=not has_defaults,
@@ -4936,7 +4936,7 @@ def _run_manifest_payload(
         "evaluation_scope": "benchmark_only_runtime_agnostic",
         "run_envelope": _manifest_run_envelope(packs),
         "profile": asdict(profile),
-        "model_lineage": {"model": config.MODEL, "ess_model": config.ESS_MODEL},
+        "model_lineage": {"model": config.MODEL, "structured_model": config.STRUCTURED_MODEL},
         "threshold_registry_version": THRESHOLD_REGISTRY_VERSION,
         "threshold_registry": [asdict(spec) for spec in THRESHOLD_REGISTRY],
         "threshold_registry_hash": threshold_registry_hash,
@@ -10334,7 +10334,7 @@ def _cost_line_item(
         "total_tokens": total_tokens,
         "token_accounting_mode": token_accounting_mode,
         "model": config.MODEL,
-        "ess_model": config.ESS_MODEL,
+        "structured_model": config.STRUCTURED_MODEL,
     }
 
 

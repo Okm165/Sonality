@@ -8,36 +8,20 @@ Start server: `make serve` → `http://localhost:8000`
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/v1/chat/completions` | Chat (supports `stream=true`) |
+| `POST` | `/v1/chat/completions` | Chat (supports `stream=true` with SSE progress events) |
 | `GET` | `/v1/models` | List models |
 
 ### Core
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/chat` | Chat → response + ESS |
-| `POST` | `/ingest` | Ingest content with ESS classification |
+| `POST` | `/ingest` | Queue content for asynchronous ingestion (returns 202) |
+| `GET` | `/ingest/{job_id}` | Check ingest job status |
 | `GET` | `/beliefs` | All beliefs |
 | `GET` | `/beliefs/{topic}` | Single belief |
 | `GET` | `/health` | Agent health |
 
 ## Schemas
-
-### POST /chat
-
-```json
-{"message": "...", "context": []}
-```
-
-Response:
-```json
-{
-  "response": "...",
-  "ess_score": 0.65,
-  "reasoning_type": "empirical_data",
-  "topics": ["climate"]
-}
-```
 
 ### POST /ingest
 
@@ -45,14 +29,24 @@ Response:
 {"text": "...", "topic_override": ""}
 ```
 
-Response:
+Response (202 Accepted):
 ```json
 {
-  "success": true,
+  "job_id": "abc123",
+  "queue_depth": 3
+}
+```
+
+### GET /ingest/{job_id}
+
+Response (completed):
+```json
+{
+  "status": "done",
   "score": 0.65,
   "reasoning_type": "empirical_data",
   "belief_update_recommended": true,
-  "urgency": "routine",
+  "urgency": "standard",
   "topics": ["climate"],
   "summary": "..."
 }
@@ -64,9 +58,11 @@ Response:
 {
   "model": "sonality",
   "messages": [{"role": "user", "content": "..."}],
-  "stream": false
+  "stream": true
 }
 ```
+
+When `stream=true`, SSE events include progress (`event: thinking`, `event: tool_call`, `event: tool_result`, `event: reviewing`, `event: done`) interleaved with standard `data:` content chunks.
 
 ### GET /beliefs
 

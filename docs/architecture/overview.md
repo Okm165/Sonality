@@ -12,7 +12,7 @@ flowchart LR
     API --> Agent[SonalityAgent]
     Agent --> Neo4j[(Neo4j)]
     Agent --> Qdrant[(Qdrant)]
-    Agent --> Background[SemanticWorker]
+    Agent --> Background[SemanticIngestionWorker]
 ```
 
 ## Agent Components
@@ -23,7 +23,7 @@ SonalityAgent
 ├── DualEpisodeStore (Neo4j + Qdrant)
 ├── Embedder (FastEmbed)
 ├── BoundaryDetector
-└── SemanticWorker (background)
+└── SemanticIngestionWorker (background)
 ```
 
 ## Response Pipeline
@@ -36,7 +36,7 @@ flowchart LR
     end
     Build --> Loop
     subgraph Loop[Agentic Loop]
-        LLM[LLM decides] --> Tools[recall / search / assess / reflect / store / consolidate]
+        LLM[LLM decides] --> Tools[recall_memory / web_search / web_extract / synthesize / integrate_knowledge]
         Tools --> LLM
     end
     Loop --> Bookkeep
@@ -49,7 +49,7 @@ flowchart LR
 
 1. Load personality snapshot + beliefs
 2. Trim conversation history to token budget
-3. Agentic loop: LLM autonomously calls tools (recall, search, assess, reflect, store, consolidate)
+3. Agentic loop: LLM autonomously calls tools (recall, search, synthesize, integrate_knowledge)
 4. Bookkeeping: ESS classify, boundary detection, store episode, provenance, semantic features, forgetting
 
 The agent handles all cognitive work via tools. Bookkeeping runs automatically and silently.
@@ -58,15 +58,17 @@ The agent handles all cognitive work via tools. Bookkeeping runs automatically a
 
 | Category | Strategy |
 |----------|----------|
+| NONE | Skip (chitchat) |
 | SIMPLE | Vector + topic search |
 | TEMPORAL | Chain with sufficiency |
 | MULTI_ENTITY | Query decomposition |
+| AGGREGATION | Cross-conversation synthesis |
 | BELIEF_QUERY | Belief edges + topic + vector |
 
 ## Ingestion (non-conversational)
 
 ```
-ESS classify → if update_recommended → store → provenance → semantic features → forgetting
+ESS classify → if belief_update_recommended → store → provenance → semantic features → forgetting
 ```
 
 ## Error Handling
