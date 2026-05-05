@@ -1,4 +1,10 @@
-"""Async Sonality API client with client-side conversation history."""
+"""Async Sonality API client with client-side conversation history.
+
+SonalityClient manages a sliding window of messages and streams responses
+via SSE from the /v1/chat/completions endpoint. Progress events (tool calls,
+thinking, reviewing) are yielded alongside content deltas so UIs can render
+real-time agent status.
+"""
 
 from __future__ import annotations
 
@@ -19,15 +25,29 @@ TOOL_LABELS: Final[dict[str, str]] = {
     "recall_memory": "Recalling",
     "web_search": "Searching web",
     "web_extract": "Reading page",
-    "store_knowledge": "Storing",
-    "reflect": "Reflecting",
-    "assess_evidence": "Assessing",
-    "consolidate": "Consolidating",
+    "integrate_knowledge": "Integrating",
+    "synthesize": "Synthesizing",
+    "quorum_critique": "Cross-checking",
 }
 
 
+def extract_tool_arg_summary(tool_args: str) -> str:
+    """Extract a concise human-readable summary from tool call arguments."""
+    if not tool_args:
+        return ""
+    try:
+        parsed = json.loads(tool_args)
+        raw = parsed.get(
+            "query",
+            parsed.get("url", parsed.get("focus", parsed.get("topic", parsed.get("text", "")))),
+        )
+        return str(raw)[:60] if raw else ""
+    except json.JSONDecodeError:
+        return tool_args[:60]
+
+
 def pipeline_summary(tool_names: list[str]) -> str:
-    """Build compact pipeline: recall > search x3 > reflect."""
+    """Build compact pipeline: recall > search x3 > integrate."""
     if not tool_names:
         return ""
     parts: list[str] = []
@@ -44,14 +64,9 @@ def pipeline_summary(tool_names: list[str]) -> str:
 
 
 @dataclass(frozen=True, slots=True)
-class ChatResponse:
-    text: str
-    ess_score: float
-    topics: tuple[str, ...]
-
-
-@dataclass(frozen=True, slots=True)
 class HealthStatus:
+    """Response from ``/health`` endpoint."""
+
     belief_count: int
     snapshot_version: int
     uptime_seconds: float = 0.0
@@ -60,6 +75,8 @@ class HealthStatus:
 
 @dataclass(frozen=True, slots=True)
 class Belief:
+    """Single belief from ``/beliefs`` endpoint."""
+
     topic: str
     valence: float
     confidence: float
@@ -117,27 +134,6 @@ class SonalityClient:
             for b in r.json()
         ]
 
-    async def chat(self, message: str) -> ChatResponse:
-        """Send message with full conversation history."""
-        self._history.append({"role": "user", "content": message})
-        self._trim_history()
-        try:
-            r = await self._client.post(
-                "/chat", json={"message": message, "context": self._history[:-1]}
-            )
-            r.raise_for_status()
-        except Exception:
-            self._history.pop()
-            raise
-        d = r.json()
-        response_text = d.get("response", "")
-        self._history.append({"role": "assistant", "content": response_text})
-        return ChatResponse(
-            text=response_text,
-            ess_score=float(d.get("ess_score", 0)),
-            topics=tuple(d.get("topics", [])),
-        )
-
     async def chat_stream(self, message: str) -> AsyncIterator[str | ProgressEvent]:
         """Stream chat response with full history via SSE.
 
@@ -177,7 +173,7 @@ class SonalityClient:
                     except json.JSONDecodeError:
                         continue
 
-                    if event_type and event_type not in ("", "message"):
+                    if event_type:
                         yield ProgressEvent(
                             type=event_type,
                             detail=data.get("detail", ""),

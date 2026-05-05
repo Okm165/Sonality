@@ -1,4 +1,10 @@
-"""Audio processing: STT/TTS via Speaches OpenAI-compatible API."""
+"""Audio processing: STT/TTS via Speaches OpenAI-compatible API.
+
+AudioProcessor wraps Speaches endpoints for speech-to-text (Whisper) and
+text-to-speech (Kokoro). TTS optimization rewrites agent responses into
+natural spoken prose via an LLM before synthesis. MP3→OGG Opus conversion
+uses ffmpeg for Telegram voice message compatibility.
+"""
 
 from __future__ import annotations
 
@@ -8,24 +14,39 @@ import re
 
 import httpx
 
+from sonality.provider import LLMProvider
+from sonality.schema import ChatRole
+
 from . import config
-from .llm import llm_call
 
 log = logging.getLogger(__name__)
 
+_provider = LLMProvider(
+    config.TTS_OPTIMIZE_BASE_URL, config.TTS_OPTIMIZE_API_KEY, int(config.TTS_OPTIMIZE_TIMEOUT)
+)
+
+
+async def llm_call(prompt: str, max_tokens: int, temperature: float) -> str:
+    """Async LLM completion using chat's provider."""
+    return await asyncio.to_thread(
+        lambda: (
+            _provider.chat_completion(
+                model=config.TTS_OPTIMIZE_MODEL,
+                messages=[{"role": ChatRole.USER, "content": prompt}],
+                max_tokens=max_tokens,
+                temperature=temperature,
+            ).text
+        )
+    )
+
+
 TTS_OPTIMIZATION_PROMPT = """\
-Rewrite the following text for natural speech synthesis.
+Rewrite this text for natural speech synthesis. The result should sound good \
+when read aloud — flowing prose with natural pauses, no formatting artifacts \
+(markdown, bullet points, headers, confidence scores, citations). Preserve \
+the exact information and meaning. Vary sentence openings.
 
-Requirements:
-- Remove all formatting artifacts (markdown, bullet points, headers)
-- Remove confidence scores and citation markers
-- Convert lists into flowing prose with natural transitions
-- Keep the exact same information and meaning
-- Use conversational phrasing that sounds good when read aloud
-- Add natural pauses with commas where appropriate
-- Avoid starting sentences with "I" repeatedly
-
-Output ONLY the rewritten text. No preamble, no explanation, no quotes.
+Output only the rewritten text.
 
 Original text:
 {text}"""
@@ -74,7 +95,11 @@ async def mp3_to_ogg_opus(mp3_data: bytes) -> bytes:
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    stdout, stderr = await proc.communicate(mp3_data)
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(mp3_data), timeout=30.0)
+    except TimeoutError:
+        proc.kill()
+        raise RuntimeError("ffmpeg conversion timed out after 30s") from None
     if proc.returncode != 0:
         log.error("ffmpeg conversion failed: %s", stderr.decode()[-500:])
         raise RuntimeError(f"ffmpeg failed with code {proc.returncode}")

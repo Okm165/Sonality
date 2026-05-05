@@ -9,6 +9,7 @@ import logging
 import signal
 import sys
 import time
+from dataclasses import dataclass, field
 from io import BytesIO
 
 from aiogram import Bot, Dispatcher, F, Router
@@ -18,7 +19,13 @@ from aiogram.types import BufferedInputFile, Message
 
 from . import config
 from .audio import AudioProcessor, chunk_text, mp3_to_ogg_opus, optimize_for_speech
-from .client import TOOL_LABELS, ProgressEvent, SonalityClient, pipeline_summary
+from .client import (
+    TOOL_LABELS,
+    ProgressEvent,
+    SonalityClient,
+    extract_tool_arg_summary,
+    pipeline_summary,
+)
 
 log = logging.getLogger(__name__)
 router = Router()
@@ -34,6 +41,7 @@ class ClientPool:
         self._lock = asyncio.Lock()
 
     async def get(self, user_id: int) -> SonalityClient:
+        """Return a client for *user_id*, creating one if needed."""
         async with self._lock:
             now = time.monotonic()
             if user_id not in self._clients:
@@ -41,6 +49,10 @@ class ClientPool:
                 log.debug("Created new client for user_id=%d", user_id)
             self._last_access[user_id] = now
             return self._clients[user_id]
+
+    def touch(self, user_id: int) -> None:
+        """Bump idle timer for *user_id* — call periodically during long streams."""
+        self._last_access[user_id] = time.monotonic()
 
     async def cleanup(self) -> int:
         async with self._lock:
@@ -81,21 +93,8 @@ async def _generate_voices(audio: AudioProcessor, chunks: list[str]) -> list[byt
     return [data for _, data in sorted(results)]
 
 
-async def _send_text_reply(msg: Message, text: str, audio: AudioProcessor) -> None:
-    chunks = chunk_text(text)
-    if not chunks:
-        return
-    voices = await _generate_voices(audio, chunks)
-    for i, (chunk, ogg) in enumerate(zip(chunks, voices, strict=True)):
-        await msg.answer(chunk)
-        if ogg:
-            try:
-                await msg.answer_voice(BufferedInputFile(ogg, f"voice_{i}.ogg"))
-            except Exception as e:
-                log.warning("Voice send failed chunk=%d: %s", i, e)
-
-
 async def _send_voice_reply(msg: Message, text: str, audio: AudioProcessor) -> None:
+    """Send text chunks as messages, then all TTS voice clips."""
     display_chunks = chunk_text(text)
     if not display_chunks:
         return
@@ -226,15 +225,11 @@ async def cmd_clear(msg: Message, pool: ClientPool) -> None:
 
 def _format_step(tool_name: str, args_summary: str) -> str:
     label = TOOL_LABELS.get(tool_name, tool_name.replace("_", " "))
-    if args_summary:
-        return f"{label}: {args_summary}"
-    return label
+    return f"{label}: {args_summary}" if args_summary else label
 
 
 def _format_status(steps: list[str], current: str, elapsed: float) -> str:
-    parts: list[str] = []
-    for s in steps[-5:]:
-        parts.append(f"[done] {s}")
+    parts = [f"[done] {s}" for s in steps[-5:]]
     if current:
         parts.append(f">> {current}")
     status = "\n".join(parts) or "Thinking..."
@@ -256,9 +251,146 @@ def _format_done_footer(detail: str, tool_names: list[str]) -> str | None:
         parts.append(f"{el}s")
     if ess := d.get("ess_score"):
         parts.append(f"ESS {ess}")
+    if rtype := d.get("reasoning_type"):
+        parts.append(f"({rtype})")
     if topics := d.get("topics"):
         parts.append(" ".join(f"#{t}" for t in topics[:3]))
     return " | ".join(parts) if parts else None
+
+
+@dataclass
+class _StreamResult:
+    """Accumulated state from consuming a chat_stream."""
+
+    text: str = ""
+    tool_names: list[str] = field(default_factory=list)
+    completed_steps: list[str] = field(default_factory=list)
+    done_footer: str | None = None
+
+
+async def _consume_stream(
+    msg: Message,
+    client: SonalityClient,
+    user_text: str,
+    t0: float,
+    *,
+    edit_throttle: float = 0.8,
+    stream_text: bool = False,
+    bot: Bot | None = None,
+    pool: ClientPool | None = None,
+    user_id: int = 0,
+) -> _StreamResult:
+    """Shared streaming consumer for both text and voice handlers.
+
+    Manages the status message lifecycle and accumulates results. When
+    stream_text is True and bot is provided, progressive draft streaming
+    is attempted for the text path.
+
+    If *pool* and *user_id* are provided, the client's idle timer is
+    bumped periodically to prevent cleanup during long streams.
+    """
+    status_msg: Message | None = None
+    current_step = ""
+    last_progress_edit = 0.0
+    last_text_edit = 0.0
+    result = _StreamResult()
+
+    draft_id = int(time.monotonic() * 1000) % 2147483647 or 1
+    use_draft = stream_text
+    draft_started = False
+
+    async for item in client.chat_stream(user_text):
+        now = time.monotonic()
+        elapsed = time.perf_counter() - t0
+
+        if pool and user_id:
+            pool.touch(user_id)
+
+        if isinstance(item, ProgressEvent):
+            if item.type == "done":
+                result.done_footer = _format_done_footer(item.detail, result.tool_names)
+                continue
+
+            if item.type == "tool_call":
+                args_summary = extract_tool_arg_summary(item.tool_args)[:50]
+                if item.tool_name:
+                    result.tool_names.append(item.tool_name)
+                current_step = _format_step(item.tool_name, args_summary)
+            elif item.type == "tool_result":
+                if current_step:
+                    detail = ""
+                    if item.sources_count:
+                        detail = f" ({item.sources_count} sources)"
+                    elif item.tool_result_summary:
+                        detail = f" - {item.tool_result_summary[:40]}"
+                    result.completed_steps.append(f"{current_step[:40]}{detail}")
+                current_step = ""
+            elif item.type == "thinking":
+                current_step = "Thinking..."
+            elif item.type == "reviewing":
+                current_step = item.detail or "Cross-checking evidence..."
+            elif item.type == "context_build":
+                current_step = item.detail or "Loading context..."
+            elif item.type == "summarizing":
+                current_step = item.detail or "Compressing context..."
+
+            status_text = _format_status(result.completed_steps, current_step, elapsed)
+            if status_msg is None:
+                status_msg = await msg.answer(status_text)
+                last_progress_edit = now
+            elif now - last_progress_edit > edit_throttle:
+                with contextlib.suppress(Exception):
+                    await status_msg.edit_text(status_text)
+                last_progress_edit = now
+
+        elif isinstance(item, str):
+            result.text += item
+
+            if stream_text and bot and now - last_text_edit >= 0.3:
+                if use_draft:
+                    try:
+                        if not draft_started and status_msg and result.completed_steps:
+                            summary = " | ".join(f"[done] {s}" for s in result.completed_steps[-3:])
+                            with contextlib.suppress(Exception):
+                                await status_msg.edit_text(summary)
+                            draft_started = True
+                        await bot.send_message_draft(
+                            chat_id=msg.chat.id,
+                            draft_id=draft_id,
+                            text=result.text + " |",
+                        )
+                    except Exception:
+                        log.info("sendMessageDraft unavailable, falling back to editMessageText")
+                        use_draft = False
+
+                if not use_draft and result.text:
+                    display = result.text + " |"
+                    if not draft_started:
+                        if status_msg and result.completed_steps:
+                            summary = " | ".join(f"[done] {s}" for s in result.completed_steps[-3:])
+                            with contextlib.suppress(Exception):
+                                await status_msg.edit_text(summary)
+                        draft_started = True
+                        status_msg = await msg.answer(display)
+                    else:
+                        with contextlib.suppress(Exception):
+                            if status_msg:
+                                await status_msg.edit_text(display)
+                last_text_edit = now
+
+    if status_msg and result.tool_names:
+        pipeline = pipeline_summary(result.tool_names)
+        if pipeline:
+            with contextlib.suppress(Exception):
+                await status_msg.edit_text(f"<i>{pipeline}</i>", parse_mode="HTML")
+        else:
+            with contextlib.suppress(Exception):
+                await status_msg.delete()
+    elif status_msg:
+        with contextlib.suppress(Exception):
+            await status_msg.delete()
+
+    return result
 
 
 @router.message(F.text)
@@ -273,124 +405,37 @@ async def handle_text(msg: Message, bot: Bot, pool: ClientPool, audio: AudioProc
 
     try:
         client = await pool.get(uid)
-        status_msg: Message | None = None
-        accumulated_text = ""
-        completed_steps: list[str] = []
-        tool_names_used: list[str] = []
-        current_step = ""
-        last_edit = 0.0
-        draft_id = int(time.monotonic() * 1000) % 2147483647 or 1
-        use_draft = True
-        draft_started = False
-        done_footer: str | None = None
+        result = await _consume_stream(
+            msg,
+            client,
+            text,
+            t0,
+            edit_throttle=0.8,
+            stream_text=True,
+            bot=bot,
+            pool=pool,
+            user_id=uid,
+        )
 
-        async for item in client.chat_stream(text):
-            now = time.monotonic()
-            elapsed = time.perf_counter() - t0
-
-            if isinstance(item, ProgressEvent):
-                if item.type == "done":
-                    done_footer = _format_done_footer(item.detail, tool_names_used)
-                    continue
-
-                if item.type == "tool_call":
-                    args_summary = ""
-                    if item.tool_args:
-                        try:
-                            parsed = json.loads(item.tool_args)
-                            args_summary = parsed.get("query", parsed.get("url", ""))[:50]
-                        except json.JSONDecodeError:
-                            args_summary = item.tool_args[:50]
-                    if item.tool_name:
-                        tool_names_used.append(item.tool_name)
-                    current_step = _format_step(item.tool_name, args_summary)
-                elif item.type == "tool_result":
-                    if current_step:
-                        short = current_step[:45]
-                        completed_steps.append(short)
-                    current_step = ""
-                elif item.type == "thinking":
-                    current_step = "Thinking..."
-                elif item.type == "context_build":
-                    current_step = item.detail if item.detail else "Loading context..."
-                elif item.type == "summarizing":
-                    current_step = "Compressing context..."
-
-                status_text = _format_status(completed_steps, current_step, elapsed)
-                if status_msg is None:
-                    status_msg = await msg.answer(status_text)
-                    last_edit = now
-                elif now - last_edit > 0.8:
-                    with contextlib.suppress(Exception):
-                        await status_msg.edit_text(status_text)
-                    last_edit = now
-
-            elif isinstance(item, str):
-                accumulated_text += item
-                if now - last_edit < 0.3:
-                    continue
-
-                if use_draft:
-                    try:
-                        if not draft_started and status_msg and completed_steps:
-                            summary = " | ".join(f"[done] {s}" for s in completed_steps[-3:])
-                            with contextlib.suppress(Exception):
-                                await status_msg.edit_text(summary)
-                            draft_started = True
-                        await bot.send_message_draft(
-                            chat_id=msg.chat.id,
-                            draft_id=draft_id,
-                            text=accumulated_text + " |",
-                        )
-                    except Exception:
-                        log.info("sendMessageDraft unavailable, falling back to editMessageText")
-                        use_draft = False
-
-                if not use_draft and accumulated_text:
-                    display = accumulated_text + " |"
-                    if not draft_started:
-                        if status_msg and completed_steps:
-                            summary = " | ".join(f"[done] {s}" for s in completed_steps[-3:])
-                            with contextlib.suppress(Exception):
-                                await status_msg.edit_text(summary)
-                        draft_started = True
-                        status_msg = await msg.answer(display)
-                    else:
-                        with contextlib.suppress(Exception):
-                            if status_msg:
-                                await status_msg.edit_text(display)
-                last_edit = now
-
-        if status_msg and accumulated_text and tool_names_used:
-            pipeline = pipeline_summary(tool_names_used)
-            if pipeline:
-                with contextlib.suppress(Exception):
-                    await status_msg.edit_text(f"<i>{pipeline}</i>", parse_mode="HTML")
-            else:
-                with contextlib.suppress(Exception):
-                    await status_msg.delete()
-        elif status_msg and accumulated_text:
-            with contextlib.suppress(Exception):
-                await status_msg.delete()
-
-        if accumulated_text:
-            final = accumulated_text
-            if done_footer:
-                final += f"\n\n<i>{done_footer}</i>"
+        if result.text:
+            final = result.text
+            if result.done_footer:
+                final += f"\n\n<i>{result.done_footer}</i>"
             await msg.answer(final, parse_mode="HTML")
             log.info(
                 "Response uid=%d: %d chars, %d tools, elapsed=%.1fs",
                 uid,
-                len(accumulated_text),
-                len(tool_names_used),
+                len(result.text),
+                len(result.tool_names),
                 time.perf_counter() - t0,
             )
-        elif not accumulated_text:
+        else:
             log.warning("Empty response uid=%d", uid)
+            await msg.answer("<i>No response generated. Try rephrasing.</i>", parse_mode="HTML")
 
     except Exception as e:
         log.error("Chat error uid=%d: %s", uid, e, exc_info=True)
-        await msg.answer(f"Error: {e}")
+        await msg.answer("Something went wrong. Please try again.")
 
 
 @router.message(F.voice)
@@ -414,6 +459,8 @@ async def handle_voice(msg: Message, bot: Bot, pool: ClientPool, audio: AudioPro
         await msg.answer(f"Download error: {e}")
         return
 
+    with contextlib.suppress(Exception):
+        await bot.send_chat_action(msg.chat.id, ChatAction.RECORD_VOICE)
     try:
         text = await audio.stt(voice_bytes, voice.mime_type or "audio/ogg")
         log.debug("STT result uid=%d: %d chars", uid, len(text))
@@ -428,14 +475,34 @@ async def handle_voice(msg: Message, bot: Bot, pool: ClientPool, audio: AudioPro
         await msg.answer("Could not transcribe. Try again.")
         return
 
+    t0 = time.perf_counter()
     try:
         client = await pool.get(uid)
-        resp = await client.chat(text)
-        log.debug("Chat response uid=%d: %d chars ess=%.2f", uid, len(resp.text), resp.ess_score)
-        await _send_voice_reply(msg, resp.text, audio)
+        result = await _consume_stream(
+            msg,
+            client,
+            text,
+            t0,
+            edit_throttle=1.2,
+            stream_text=False,
+            pool=pool,
+            user_id=uid,
+        )
+
+        if result.text:
+            log.debug("Voice chat response uid=%d: %d chars", uid, len(result.text))
+            with contextlib.suppress(Exception):
+                await bot.send_chat_action(msg.chat.id, ChatAction.RECORD_VOICE)
+            await _send_voice_reply(msg, result.text, audio)
+            if result.done_footer:
+                await msg.answer(f"<i>{result.done_footer}</i>", parse_mode="HTML")
+        else:
+            log.warning("Empty voice response uid=%d", uid)
+            await msg.answer("<i>No response generated. Try again.</i>", parse_mode="HTML")
+
     except Exception as e:
         log.error("Chat error uid=%d: %s", uid, e, exc_info=True)
-        await msg.answer(f"Error: {e}")
+        await msg.answer("Something went wrong. Please try again.")
 
 
 async def _main() -> None:
@@ -474,12 +541,21 @@ async def _main() -> None:
             except Exception as e:
                 sys.exit(f"Cannot connect to Sonality: {e}")
 
+        async def _periodic_cleanup() -> None:
+            while not shutdown_event.is_set():
+                await asyncio.sleep(600)
+                removed = await pool.cleanup()
+                if removed:
+                    log.info("Cleaned up %d idle client(s)", removed)
+
         dp["pool"], dp["audio"] = pool, audio
         try:
             polling_task = asyncio.create_task(dp.start_polling(bot))
             shutdown_task = asyncio.create_task(shutdown_event.wait())
+            cleanup_task = asyncio.create_task(_periodic_cleanup())
             _done, pending = await asyncio.wait(
-                [polling_task, shutdown_task], return_when=asyncio.FIRST_COMPLETED
+                [polling_task, shutdown_task, cleanup_task],
+                return_when=asyncio.FIRST_COMPLETED,
             )
             for task in pending:
                 task.cancel()

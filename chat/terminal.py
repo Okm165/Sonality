@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import signal
 import sys
 import time as _time
 
@@ -16,7 +15,14 @@ from rich.table import Table
 from rich.text import Text
 
 from . import config
-from .client import TOOL_LABELS, Belief, ProgressEvent, SonalityClient, pipeline_summary
+from .client import (
+    TOOL_LABELS,
+    Belief,
+    ProgressEvent,
+    SonalityClient,
+    extract_tool_arg_summary,
+    pipeline_summary,
+)
 
 log = logging.getLogger(__name__)
 
@@ -75,16 +81,12 @@ def _progress_action(event: ProgressEvent) -> str:
     if event.type == "context_build":
         return event.detail if event.detail else "Loading context..."
     if event.type == "summarizing":
-        return "Compressing context..."
+        return event.detail if event.detail else "Compressing context..."
+    if event.type == "reviewing":
+        return event.detail if event.detail else "Cross-checking evidence..."
     if event.type == "tool_call":
         label = TOOL_LABELS.get(event.tool_name, event.tool_name.replace("_", " "))
-        query = ""
-        if event.tool_args:
-            try:
-                parsed = json.loads(event.tool_args)
-                query = parsed.get("query", parsed.get("url", parsed.get("text", "")))[:60]
-            except json.JSONDecodeError:
-                query = event.tool_args[:60]
+        query = extract_tool_arg_summary(event.tool_args)
         return f"{label}: {query}" if query else label
     if event.type == "tool_result":
         label = TOOL_LABELS.get(event.tool_name, event.tool_name.replace("_", " "))
@@ -283,17 +285,6 @@ async def _main() -> None:
         level=getattr(logging, config.LOG_LEVEL.upper(), logging.INFO),
         format="%(levelname)s %(name)s: %(message)s",
     )
-    log = logging.getLogger(__name__)
-
-    shutdown_event = asyncio.Event()
-
-    def signal_handler() -> None:
-        log.debug("Shutdown signal received")
-        shutdown_event.set()
-
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, signal_handler)
 
     async with SonalityClient() as client:
         try:
@@ -317,7 +308,7 @@ async def _main() -> None:
                 Panel.fit(
                     "[bold blue]Sonality[/bold blue]\n"
                     f"[red]Cannot connect: {e}[/red]\n"
-                    f"[yellow]Ensure Sonality is running at {config.SONALITY_URL}[/yellow]",
+                    f"[yellow]Sonality expected at {config.SONALITY_URL}[/yellow]",
                     border_style="red",
                     padding=(0, 2),
                 )
@@ -326,7 +317,6 @@ async def _main() -> None:
 
         console.print("[dim]Type /help for commands[/dim]")
         await _chat_loop(client)
-    console.print("[dim]Goodbye![/dim]")
 
 
 def main() -> None:

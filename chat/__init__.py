@@ -1,15 +1,18 @@
-"""Chat module for Sonality with terminal and Telegram interfaces."""
+"""Chat module — terminal TUI and Telegram bot interfaces for Sonality.
+
+Public API: SonalityClient (streaming HTTP), AudioProcessor (STT/TTS),
+and audio utilities (chunk_text, optimize_for_speech, mp3_to_ogg_opus).
+Run via ``python -m chat terminal`` or ``python -m chat telegram``.
+"""
 
 from __future__ import annotations
 
-from .audio import AudioProcessor, chunk_text, mp3_to_ogg_opus, optimize_for_speech
-from .client import Belief, ChatResponse, HealthStatus, SonalityClient
-from .llm import llm_call
+from .audio import AudioProcessor, chunk_text, llm_call, mp3_to_ogg_opus, optimize_for_speech
+from .client import Belief, HealthStatus, SonalityClient
 
 __all__ = [
     "AudioProcessor",
     "Belief",
-    "ChatResponse",
     "HealthStatus",
     "SonalityClient",
     "chunk_text",
