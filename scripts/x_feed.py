@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Feed X posts to Sonality — fetch one, ingest one, repeat.
 
+Uses fire-and-forget /ingest (202 queue). Same pattern as feed.py.
 Pay-per-use: $0.005/post + $0.01/user. Set a cap at developer.x.com.
 """
 
@@ -13,7 +14,7 @@ from dataclasses import dataclass
 from typing import Final
 
 import httpx
-from _helpers import print_error, print_result, show_beliefs
+from _helpers import connect_or_exit, fetch_and_show_beliefs, queue_ingest
 from dotenv import load_dotenv
 from rich.console import Console
 from rich.markup import escape
@@ -27,7 +28,6 @@ USER_FIELDS: Final = "username,name,public_metrics,verified"
 MIN_TEXT_LEN: Final = 80
 MIN_LIKES: Final = 5
 
-# tag → (search query, topic_override for /ingest)
 QUERIES: Final[dict[str, tuple[str, str]]] = {
     "geopolitics": (
         '("foreign policy" OR sanctions OR diplomacy OR "security council" OR NATO)'
@@ -71,11 +71,6 @@ QUERIES: Final[dict[str, tuple[str, str]]] = {
         ' OR "policy change" OR election) is:verified has:links -is:retweet lang:en',
         "politics",
     ),
-    "breaking_finance": (
-        '("breaking" OR "just in") (market OR economy OR trade OR tariff OR recession)'
-        " is:verified -is:retweet lang:en",
-        "",
-    ),
 }
 
 console = Console()
@@ -83,6 +78,8 @@ console = Console()
 
 @dataclass(frozen=True, slots=True)
 class Config:
+    """Runtime configuration from environment variables (X_FEED_* prefix)."""
+
     max_results: int
     max_pages: int
     sort_order: str
@@ -94,11 +91,7 @@ class Config:
 # ---------------------------------------------------------------------------
 
 
-def _get(
-    client: httpx.Client,
-    path: str,
-    params: dict[str, str | int],
-) -> dict[str, object]:
+def _get(client: httpx.Client, path: str, params: dict[str, str | int]) -> dict[str, object]:
     """GET with 429 back-off."""
     r = client.get(f"{X_API}{path}", params=params)
     if r.status_code == 429:
@@ -112,9 +105,7 @@ def _get(
 
 
 def _search(
-    client: httpx.Client,
-    query: str,
-    cfg: Config,
+    client: httpx.Client, query: str, cfg: Config
 ) -> Iterator[tuple[dict[str, object], dict[str, object] | None]]:
     """Yield (post, author_or_none) one at a time."""
     params: dict[str, str | int] = {
@@ -191,23 +182,15 @@ def _entities(post: dict[str, object]) -> dict[str, object]:
 
 
 def _worth_ingesting(
-    text: str,
-    m: dict[str, int],
-    user: dict[str, object] | None,
-    post: dict[str, object],
+    text: str, m: dict[str, int], user: dict[str, object] | None, post: dict[str, object]
 ) -> bool:
+    """Quality gate: accept if text is long enough AND has substance, likes, or verification."""
     if len(text) < MIN_TEXT_LEN:
         return False
     ent = _entities(post)
-    substance = bool(ent.get("urls") or ent.get("annotations"))
-    substance = substance or bool(post.get("context_annotations"))
+    substance = bool(ent.get("urls") or ent.get("annotations") or post.get("context_annotations"))
     verified = bool(user and user.get("verified"))
-    return (
-        substance
-        or m.get("like_count", 0) >= MIN_LIKES
-        or verified
-        or m.get("bookmark_count", 0) > 0
-    )
+    return substance or m.get("like_count", 0) >= MIN_LIKES or verified
 
 
 # ---------------------------------------------------------------------------
@@ -216,6 +199,7 @@ def _worth_ingesting(
 
 
 def _k(n: int) -> str:
+    """Format a number compactly: 1500 → '1.5K', 2000000 → '2.0M'."""
     if n >= 1_000_000:
         return f"{n / 1_000_000:.1f}M"
     if n >= 1_000:
@@ -224,14 +208,10 @@ def _k(n: int) -> str:
 
 
 def _enrich(
-    text: str,
-    m: dict[str, int],
-    user: dict[str, object] | None,
-    post: dict[str, object],
+    text: str, m: dict[str, int], user: dict[str, object] | None, post: dict[str, object]
 ) -> str:
     """Enriched text with credibility markers for ESS classification."""
     parts: list[str] = []
-
     if user:
         v = "verified" if user.get("verified") else "unverified"
         um = _metrics(user)
@@ -239,59 +219,25 @@ def _enrich(
             f"[X/{v}/@{user.get('username', '?')}, "
             f"{_k(um.get('followers_count', 0))} followers, "
             f"{_k(m.get('like_count', 0))} likes, "
-            f"{_k(m.get('bookmark_count', 0))} saves, "
-            f"{_k(m.get('impression_count', 0))} views]"
+            f"{_k(m.get('bookmark_count', 0))} saves]"
         )
-
     parts.append(text)
-    ent = _entities(post)
 
+    ent = _entities(post)
     urls = ent.get("urls")
     if isinstance(urls, list):
         for u in urls[:3]:
             if isinstance(u, dict) and isinstance(u.get("title"), str) and u["title"]:
                 parts.append(f"Linked: {u['title']} ({u.get('display_url', '')})")
 
-    anns = ent.get("annotations")
-    if isinstance(anns, list):
-        ner = [
-            f"{a.get('type')}:{a.get('normalized_text')}"
-            for a in anns[:5]
-            if isinstance(a, dict)
-            and isinstance(a.get("probability"), (int, float))
-            and a.get("probability", 0) >= 0.8
-            and isinstance(a.get("type"), str)
-            and isinstance(a.get("normalized_text"), str)
-        ]
-        if ner:
-            parts.append(f"Entities: {', '.join(ner)}")
-
-    ca = post.get("context_annotations")
-    if isinstance(ca, list):
-        labels = {
-            a["entity"]["name"]
-            for a in ca
-            if isinstance(a, dict)
-            and isinstance(a.get("entity"), dict)
-            and isinstance(a["entity"].get("name"), str)
-        }
-        if labels:
-            parts.append(f"X Topics: {', '.join(sorted(labels))}")
-
     uid = user.get("username", "?") if user else "?"
     parts.append(f"Source: x.com/{uid}/status/{post.get('id', '?')}")
     return "\n\n".join(parts)
 
 
-def _panel(
-    text: str,
-    m: dict[str, int],
-    user: dict[str, object] | None,
-    post: dict[str, object],
-) -> Panel:
-    """Rich panel for terminal display."""
+def _panel(text: str, m: dict[str, int], user: dict[str, object] | None) -> Panel:
+    """Build a Rich panel for displaying a tweet in the terminal."""
     lines: list[str] = []
-
     if user:
         um = _metrics(user)
         tick = " ✓" if user.get("verified") else ""
@@ -300,21 +246,10 @@ def _panel(
             f" · {_k(um.get('followers_count', 0))} followers"
         )
         lines.append("")
-
     body = escape(text[:300])
     if len(text) > 300:
         body += "…"
     lines.append(body)
-
-    ent = _entities(post)
-    urls = ent.get("urls")
-    if isinstance(urls, list):
-        for u in urls[:1]:
-            if isinstance(u, dict) and isinstance(u.get("title"), str) and u["title"]:
-                lines.append(
-                    f"\n[dim]→ {escape(str(u['title']))} ({u.get('display_url', '')})[/dim]"
-                )
-
     lines.append(
         f"[dim]{_k(m.get('like_count', 0))} likes"
         f" · {_k(m.get('retweet_count', 0))} RT"
@@ -329,6 +264,7 @@ def _panel(
 
 
 def main() -> None:
+    """Fetch posts from X API, ingest quality-gated content into Sonality."""
     load_dotenv()
     token = os.getenv("X_BEARER_TOKEN", "")
     base = os.getenv("SONALITY_URL", "http://localhost:8000")
@@ -360,14 +296,10 @@ def main() -> None:
 
     with (
         httpx.Client(headers={"Authorization": f"Bearer {token}"}, timeout=60.0) as xc,
-        httpx.Client(timeout=300.0) as sc,
+        httpx.Client(timeout=httpx.Timeout(30.0, connect=10.0)) as sc,
     ):
-        try:
-            sc.get(f"{base}/health").raise_for_status()
-        except Exception as exc:
-            console.print(f"[red]✗ Sonality unreachable: {exc}[/red]")
+        if not connect_or_exit(sc, base):
             return
-        console.print("[green]✓ Connected[/green]\n")
 
         seen: set[str] = set()
         ok = total = 0
@@ -387,33 +319,15 @@ def main() -> None:
                     continue
 
                 total += 1
-                console.print(_panel(text, m, user, post))
-
-                try:
-                    r = sc.post(
-                        f"{base}/ingest",
-                        json={"text": _enrich(text, m, user, post), "topic_override": topic},
-                    )
-                    r.raise_for_status()
+                console.print(_panel(text, m, user))
+                success, _ = queue_ingest(
+                    sc, base, _enrich(text, m, user, post), topic, cfg.throttle
+                )
+                if success:
                     ok += 1
-                    print_result(r.json())
-                except httpx.HTTPStatusError as exc:
-                    print_error(exc)
-                except Exception as exc:
-                    console.print(f"  [red]✗ {exc}[/red]")
 
-                if cfg.throttle > 0:
-                    time.sleep(cfg.throttle)
-
-        console.print(f"\n[bold]Done — {ok}/{total} ingested[/bold]\n")
-
-        try:
-            r = sc.get(f"{base}/beliefs")
-            r.raise_for_status()
-            beliefs = r.json()
-            show_beliefs(beliefs if isinstance(beliefs, list) else beliefs.get("beliefs", []))
-        except Exception as exc:
-            console.print(f"[yellow]Could not fetch beliefs: {exc}[/yellow]")
+        console.print(f"\n[bold]Done — {ok}/{total} queued[/bold]\n")
+        fetch_and_show_beliefs(sc, base)
 
 
 if __name__ == "__main__":

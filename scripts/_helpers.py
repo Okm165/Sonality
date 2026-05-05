@@ -1,6 +1,13 @@
-"""Shared display helpers for feed scripts."""
+"""Shared helpers for feed scripts (feed.py, x_feed.py).
+
+Provides: queue_ingest (fire-and-forget POST to /ingest with backpressure),
+print_error (HTTP error display), show_beliefs (Rich table of current beliefs),
+and connect_or_exit (health-check guard).
+"""
 
 from __future__ import annotations
+
+import time
 
 import httpx
 from rich.console import Console
@@ -10,28 +17,68 @@ from rich.table import Table
 console = Console()
 
 
-def print_result(res: dict[str, object]) -> None:
-    """Display ingest result with full ESS feedback."""
-    score = float(res.get("score", 0) or 0)
-    rtype = res.get("reasoning_type", "?")
-    urgency = res.get("urgency", "?")
-    updated = res.get("belief_update_recommended", False)
-    raw_topics = res.get("topics")
-    topics = ", ".join(raw_topics[:3]) if isinstance(raw_topics, list) else "-"
-    summary = res.get("summary") or ""
+def connect_or_exit(client: httpx.Client, base: str) -> bool:
+    """Check /health and print connection status. Returns False on failure."""
+    try:
+        client.get(f"{base}/health").raise_for_status()
+    except Exception as exc:
+        console.print(f"[red]\u2717 Sonality unreachable: {exc}[/red]")
+        return False
+    console.print("[green]\u2713 Connected[/green]\n")
+    return True
 
-    color = "green" if updated else "yellow" if score else "dim"
-    marker = "▲" if updated else "·"
-    console.print(
-        f"  [{color}]{marker}[/{color}] ESS={score:.2f} {rtype} "
-        f"[dim]urgency={urgency}[/dim] | {topics}"
-    )
-    if summary and isinstance(summary, str):
-        console.print(f"    [dim italic]{escape(summary[:200])}[/dim italic]")
+
+def fetch_and_show_beliefs(client: httpx.Client, base: str) -> None:
+    """Fetch beliefs from API and display them."""
+    try:
+        r = client.get(f"{base}/beliefs")
+        r.raise_for_status()
+        beliefs = r.json()
+        show_beliefs(beliefs if isinstance(beliefs, list) else beliefs.get("beliefs", []))
+    except Exception as exc:
+        console.print(f"[yellow]Could not fetch beliefs: {exc}[/yellow]")
+
+
+def queue_ingest(
+    client: httpx.Client,
+    base: str,
+    text: str,
+    topic: str,
+    throttle: float,
+) -> tuple[bool, int]:
+    """POST text to /ingest, handle errors and back-off.
+
+    Returns (success, queue_depth). Sleeps for throttle seconds on success,
+    or extra time if queue_depth > 50.
+    """
+    try:
+        r = client.post(f"{base}/ingest", json={"text": text, "topic_override": topic})
+        r.raise_for_status()
+        data = r.json()
+        job_id = data.get("job_id", "")
+        depth = data.get("queue_depth", 0)
+        console.print(f"  [green]✓ queued[/green] job={job_id[:8]} depth={depth}")
+        if depth > 50 and throttle > 0:
+            extra = min(depth * 2, 120)
+            console.print(f"  [yellow]queue depth {depth} — pausing {extra}s[/yellow]")
+            time.sleep(extra)
+        elif throttle > 0:
+            time.sleep(throttle)
+        return True, depth
+    except httpx.HTTPStatusError as exc:
+        print_error(exc)
+        if throttle > 0:
+            time.sleep(throttle)
+        return False, 0
+    except Exception as exc:
+        console.print(f"  [red]✗ {exc}[/red]")
+        if throttle > 0:
+            time.sleep(throttle)
+        return False, 0
 
 
 def print_error(exc: httpx.HTTPStatusError) -> None:
-    """Display ingest error with response body."""
+    """Display HTTP error with response body."""
     if exc.response is not None:
         body = exc.response.text[:300]
         console.print(f"  [red]✗ HTTP {exc.response.status_code}[/red]")

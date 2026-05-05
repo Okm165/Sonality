@@ -27,6 +27,7 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
 @dataclass
 class DiagnosticsReport:
+    """Aggregate health metrics from Neo4j + Qdrant. Unhealthy if issues is non-empty."""
     neo4j_episodes: int = 0
     neo4j_derivatives: int = 0
     neo4j_segments: int = 0
@@ -55,6 +56,11 @@ class DiagnosticsReport:
 
 
 async def run_diagnostics() -> DiagnosticsReport:
+    """Run all diagnostic checks and return a populated report.
+
+    Connects to Neo4j and Qdrant, checks node counts, structural integrity
+    (temporal chains, segments), cross-store consistency, and payload completeness.
+    """
     report = DiagnosticsReport()
     driver = AsyncGraphDatabase.driver(
         config.NEO4J_URL,
