@@ -95,7 +95,7 @@ class TestTimeoutFailsFast:
         monkeypatch.setattr(provider, "urlopen", raising_urlopen)
 
         start = time.perf_counter()
-        with pytest.raises(RuntimeError, match="Provider network error"):
+        with pytest.raises(RuntimeError, match="Provider DNS failure"):
             provider.default_provider._post_json("/chat/completions", {"model": "test"})
         elapsed = time.perf_counter() - start
 
@@ -188,36 +188,3 @@ class TestLLMSemaphoreContention:
             worker._extract_features("ep-uid-test", "some content", SemanticCategory.PERSONALITY)
 
         assert llm_call_count == 1
-
-
-class TestNormalizeSchemaNotation:
-    """_normalize_schema_notation correctly coerces LLM schema-template outputs."""
-
-    def test_pipe_separated_enum_keeps_first_option(self) -> None:
-        from sonality.provider import _normalize_schema_notation
-
-        text = '{"field": "OPTION_A" | "OPTION_B" | "OPTION_C"}'
-        result = _normalize_schema_notation(text)
-        assert '"OPTION_A"' in result
-        assert '"OPTION_B"' not in result
-
-    def test_ellipsis_placeholder_cleared(self) -> None:
-        from sonality.provider import _normalize_schema_notation
-
-        text = '{"field": "...", "other": 1}'
-        result = _normalize_schema_notation(text)
-        assert '""' in result
-
-    def test_angle_bracket_float_replaced(self) -> None:
-        from sonality.provider import _normalize_schema_notation
-
-        text = '{"score": <float>}'
-        result = _normalize_schema_notation(text)
-        assert "0.5" in result
-
-    def test_angle_bracket_string_replaced(self) -> None:
-        from sonality.provider import _normalize_schema_notation
-
-        text = '{"label": <string>}'
-        result = _normalize_schema_notation(text)
-        assert '""' in result

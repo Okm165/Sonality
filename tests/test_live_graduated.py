@@ -27,8 +27,9 @@ from pydantic import BaseModel
 
 from sonality import config
 from sonality.llm.caller import LLMCallResult, llm_call
+from sonality.llm.parse import parse_json_object
 from sonality.memory.embedder import Embedder
-from sonality.provider import default_provider, parse_json_object
+from sonality.provider import default_provider
 
 # Top-level parser tests do NOT call the LLM and run without -m live.
 # All test classes below require a live LLM/DB and are marked at class level.
@@ -79,7 +80,7 @@ def _cosine(a: list[float], b: list[float]) -> float:
 )
 def test_extract_last_json_object_parametric(text: str, expected_key: str) -> None:
     """extract_last_json_object handles all LLM output patterns the model might emit."""
-    from sonality.provider import extract_last_json_object
+    from sonality.llm.parse import extract_last_json_object
 
     result = extract_last_json_object(text)
     assert result is not None, f"Returned None for: {text!r}"
@@ -97,7 +98,7 @@ def test_extract_last_json_object_parametric(text: str, expected_key: str) -> No
 )
 def test_extract_last_json_object_returns_none_for_invalid(text: str) -> None:
     """extract_last_json_object returns None when no valid object is present."""
-    from sonality.provider import extract_last_json_object
+    from sonality.llm.parse import extract_last_json_object
 
     assert extract_last_json_object(text) is None, f"Should return None for: {text!r}"
 
@@ -199,7 +200,7 @@ class TestL1RawResponse:
 
         print(f"\n  raw={result.text!r}  ({elapsed})")
         # Tolerant parse — strip markdown fences and surrounding prose
-        from sonality.provider import parse_json_object
+        from sonality.llm.parse import parse_json_object
 
         parsed = parse_json_object(result.text)
         assert parsed, f"No JSON object found in LLM response.\nraw={result.text!r}"
@@ -586,11 +587,11 @@ class TestL2xPerPromptParsing:
         This diagnoses whether tool_calls or JSON-text fallback is being used.
         """
         from sonality.ess import PROVIDER_ESS_TOOL, PROVIDER_ESS_TOOL_CHOICE
-        from sonality.provider import extract_tool_call_arguments
+        from sonality.llm.parse import extract_tool_call_arguments
 
         t = time.perf_counter()
         completion = default_provider.chat_completion(
-            model=config.ESS_MODEL,
+            model=config.STRUCTURED_MODEL,
             messages=(
                 {
                     "role": "user",

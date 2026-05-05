@@ -49,7 +49,7 @@ def test_split_query_parallel_subqueries(
 ) -> None:
     mock_llm_call(
         {
-            "Decompose complex query into independent sub-queries": {
+            "This query decomposes into independent sub-queries": {
                 "sub_queries": ["one", "two"],
                 "aggregation_strategy": "compare",
             }
@@ -64,7 +64,7 @@ def test_split_query_timeline_strategy_orders_by_created_at(
 ) -> None:
     mock_llm_call(
         {
-            "Decompose complex query into independent sub-queries": {
+            "This query decomposes into independent sub-queries": {
                 "sub_queries": ["later", "earlier"],
                 "aggregation_strategy": "timeline",
             }

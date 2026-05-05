@@ -59,7 +59,7 @@ def test_classify_normalizes_labels_and_boolean_strings() -> None:
     }
     with patch("sonality.ess.default_provider") as mock_provider:
         mock_provider.chat_completion = _mock_completion([payload])
-        result = classify("message", "snapshot")
+        result = classify("message")
 
     assert result.score == 0.72
     assert result.reasoning_type == ReasoningType.LOGICAL_ARGUMENT
@@ -86,7 +86,7 @@ def test_classify_marks_defaults_on_invalid_fields() -> None:
     }
     with patch("sonality.ess.default_provider") as mock_provider:
         mock_provider.chat_completion = _mock_completion([payload])
-        result = classify("message", "snapshot")
+        result = classify("message")
 
     assert result.score == 0.0
     assert result.reasoning_type == ReasoningType.NO_ARGUMENT
@@ -113,7 +113,7 @@ def test_classify_coerces_malformed_enum_without_retry() -> None:
     }
     with patch("sonality.ess.default_provider") as mock_provider:
         mock_provider.chat_completion = _mock_completion([payload])
-        result = classify("message", "snapshot")
+        result = classify("message")
 
     assert result.attempt_count == 1
     assert result.reasoning_type == ReasoningType.NO_ARGUMENT
@@ -135,15 +135,15 @@ def test_classify_debunked_claim_aliases_resolve() -> None:
         }
         with patch("sonality.ess.default_provider") as mock_provider:
             mock_provider.chat_completion = _mock_completion([payload])
-            result = classify("message", "snapshot")
+            result = classify("message")
 
         assert result.reasoning_type == ReasoningType.DEBUNKED_CLAIM, (
             f"alias={alias!r} did not resolve to debunked_claim, got {result.reasoning_type!r}"
         )
 
 
-def test_classify_marks_missing_when_required_field_absent_after_retries() -> None:
-    """Test that classify marks missing when required field absent after retries."""
+def test_classify_marks_missing_when_required_field_absent() -> None:
+    """Missing required fields are tracked as missing (Pydantic defaults fill them)."""
     payload = {
         "score": "0.55",
         "source_reliability": "informed_opinion",
@@ -153,9 +153,9 @@ def test_classify_marks_missing_when_required_field_absent_after_retries() -> No
     }
     with patch("sonality.ess.default_provider") as mock_provider:
         mock_provider.chat_completion = _mock_completion([payload])
-        result = classify("message", "snapshot")
+        result = classify("message")
 
-    assert result.attempt_count == 2
+    assert result.attempt_count == 1
     assert result.used_defaults
     assert "missing:reasoning_type" in result.defaulted_fields
     assert result.default_severity == "missing"

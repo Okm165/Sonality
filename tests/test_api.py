@@ -14,6 +14,7 @@ from unittest.mock import MagicMock
 import pytest
 from fastapi.testclient import TestClient
 
+import sonality.api as _api_mod
 from sonality.api import _agent_store, app
 from sonality.ess import (
     ESSResult,
@@ -78,8 +79,12 @@ def mock_agent() -> MagicMock:
 
 @pytest.fixture
 def client(mock_agent: MagicMock) -> TestClient:
+    import asyncio
+
     _agent_store["agent"] = mock_agent
+    _api_mod._ingest_queue = asyncio.Queue(maxsize=256)
     yield TestClient(app, raise_server_exceptions=True)
+    _api_mod._ingest_queue = None
     _agent_store.pop("agent", None)
 
 
@@ -229,24 +234,23 @@ class TestSimpleChat:
 class TestIngest:
     def test_valid_ingest(self, client: TestClient) -> None:
         r = client.post("/ingest", json={"text": "Solar output grew 25% globally in 2024."})
-        assert r.status_code == 200
+        assert r.status_code == 202
         body = r.json()
-        assert body["success"] is True
-        assert body["score"] == pytest.approx(0.55)
-        assert body["reasoning_type"] == ReasoningType.EMPIRICAL_DATA
-        assert body["belief_update_recommended"] is True
-        assert "climate" in body["topics"]
+        assert "job_id" in body
+        assert body["status"] == "pending"
 
-    def test_ingest_with_topic_override(self, client: TestClient, mock_agent: MagicMock) -> None:
-        client.post(
+    def test_ingest_with_topic_override(self, client: TestClient) -> None:
+        r = client.post(
             "/ingest",
             json={"text": "Some text.", "topic_override": "renewable_energy"},
         )
-        mock_agent.ingest.assert_called_once_with("Some text.", topic_override="renewable_energy")
+        assert r.status_code == 202
+        assert r.json()["status"] == "pending"
 
-    def test_ingest_no_topic_override(self, client: TestClient, mock_agent: MagicMock) -> None:
-        client.post("/ingest", json={"text": "Some text."})
-        mock_agent.ingest.assert_called_once_with("Some text.", topic_override="")
+    def test_ingest_no_topic_override(self, client: TestClient) -> None:
+        r = client.post("/ingest", json={"text": "Some text."})
+        assert r.status_code == 202
+        assert r.json()["status"] == "pending"
 
 
 # ---------------------------------------------------------------------------

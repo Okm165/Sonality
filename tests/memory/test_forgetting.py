@@ -56,7 +56,7 @@ def test_forgetting_uses_full_uid_and_hard_delete_path(
 ) -> None:
     mock_llm_call(
         {
-            "Review memory candidates for archival/forgetting": {
+            "Assess these memory candidates": {
                 "decisions": [
                     {
                         "uid": "episode-aaa",
@@ -88,7 +88,7 @@ def test_forgetting_does_not_use_foundational_substring_heuristic(
 ) -> None:
     mock_llm_call(
         {
-            "Review memory candidates for archival/forgetting": {
+            "Assess these memory candidates": {
                 "decisions": [
                     {
                         "uid": "episode-aaa",
