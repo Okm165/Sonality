@@ -6,9 +6,38 @@ import logging
 from collections.abc import Sequence
 from typing import Final
 
+from pydantic import BaseModel, model_validator
+
+from .llm.parse import coerce_string_fields
 from .schema import ChatRole
 
 log = logging.getLogger(__name__)
+
+
+class _ConversationSummarySchema(BaseModel):
+    """Structured conversation summary."""
+
+    intent: str = ""
+    key_facts: str = ""
+    decisions: str = ""
+    open_threads: str = ""
+
+    @model_validator(mode="before")
+    @classmethod
+    def coerce_lists(cls, data: object) -> object:
+        return coerce_string_fields(data, ("key_facts", "decisions", "open_threads"), sep="; ")
+
+    def render(self) -> str:
+        parts: list[str] = []
+        if self.intent:
+            parts.append(f"Intent: {self.intent}")
+        if self.key_facts:
+            parts.append(f"Key facts: {self.key_facts}")
+        if self.decisions:
+            parts.append(f"Decisions: {self.decisions}")
+        if self.open_threads:
+            parts.append(f"Open threads: {self.open_threads}")
+        return "\n".join(parts)
 
 
 def estimate_tokens_utf8(text: str) -> int:
@@ -80,7 +109,7 @@ def message_tokens_budget_for_system(
     return max(256, total_budget - sys_tok - reserve_completion)
 
 
-_SUMMARIZE_THRESHOLD: Final = 8
+SUMMARIZE_THRESHOLD: Final = 8
 _SUMMARY_PREFIX: Final = "[Earlier conversation summary]"
 
 
@@ -96,9 +125,9 @@ def summarize_and_trim(
     If no summary exists, generates fresh from older messages. Falls back to simple
     trimming when history is short or LLM summarization fails.
     """
-    if len(messages) < _SUMMARIZE_THRESHOLD:
+    if len(messages) < SUMMARIZE_THRESHOLD:
         log.debug(
-            "History short (%d msgs < %d), using simple trim", len(messages), _SUMMARIZE_THRESHOLD
+            "History short (%d msgs < %d), using simple trim", len(messages), SUMMARIZE_THRESHOLD
         )
         return trim_chat_messages_for_budget(messages, max_message_tokens=max_message_tokens)
 
@@ -151,7 +180,8 @@ def _llm_summarize_messages(messages: list[dict[str, str]], previous_summary: st
     If previous_summary is provided, the LLM merges new information into it
     rather than regenerating from scratch (anchored approach, arXiv:2603.29193).
     """
-    from .llm.caller import llm_call_text
+    from . import config
+    from .llm.caller import llm_call
     from .prompts import CONVERSATION_SUMMARY_PROMPT
 
     formatted = "\n".join(
@@ -161,20 +191,27 @@ def _llm_summarize_messages(messages: list[dict[str, str]], previous_summary: st
     prev_section = (
         f"Previous summary to update:\n{previous_summary}"
         if previous_summary
-        else "No previous summary — generate fresh."
+        else "No previous summary."
     )
     prompt = CONVERSATION_SUMMARY_PROMPT.format(
         previous_summary=prev_section, messages=formatted[:3000]
     )
     try:
-        summary = llm_call_text(prompt, max_tokens=300)
-        log.debug(
-            "Summarized %d messages → %d chars (anchored=%s)",
-            len(messages),
-            len(summary),
-            bool(previous_summary),
+        r = llm_call(
+            prompt=prompt,
+            response_model=_ConversationSummarySchema,
+            fallback=_ConversationSummarySchema(),
+            model=config.FAST_MODEL,
         )
-        return summary.strip()
+        rendered = r.value.render()
+        log.debug(
+            "Summarized %d messages → %d chars (anchored=%s success=%s)",
+            len(messages),
+            len(rendered),
+            bool(previous_summary),
+            r.success,
+        )
+        return rendered
     except Exception:
         log.warning("Context summarization failed", exc_info=True)
         return ""
