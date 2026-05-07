@@ -59,7 +59,7 @@ flowchart TD
 
 ## Tool Availability
 
-All tool schemas are always passed to the LLM. Memory and synthesis tools work unconditionally. Web tools (`web_search`, `web_extract`) require a configured Firecrawl instance and return an error message when unavailable. There are no per-turn limits — the agent decides how many tools to use. Stall detection and deduplication prevent infinite loops.
+All tool schemas are always passed to the LLM. Memory and synthesis tools work unconditionally. Web tools (`web_search`, `web_extract`) require a running Fathom service and return an error message when unavailable. There are no per-turn limits — the agent decides how many tools to use. Stall detection and deduplication prevent infinite loops.
 
 ## Storage Split
 

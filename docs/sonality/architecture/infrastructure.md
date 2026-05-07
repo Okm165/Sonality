@@ -7,7 +7,7 @@ flowchart LR
     App[sonality:8000] --> Neo4j[neo4j:7687]
     App --> Qdrant[qdrant:6333]
     App --> LLM[LLM Provider]
-    Telegram --> Speaches[speaches:8001]
+    Telegram --> Speaches[speaches:8020]
 ```
 
 ## Services
@@ -17,7 +17,7 @@ flowchart LR
 | `sonality` | 8000 | Main API |
 | `neo4j` | 7474/7687 | Graph database |
 | `qdrant` | 6333/6334 | Vector database |
-| `speaches` | 8001 | STT/TTS (optional) |
+| `speaches` | 8020 | STT/TTS (optional) |
 
 ## Commands
 

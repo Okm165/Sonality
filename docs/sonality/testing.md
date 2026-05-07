@@ -37,9 +37,10 @@ Session-scoped Neo4j + Qdrant via testcontainers.
 
 | Category | Location | Purpose |
 |----------|----------|---------|
-| Unit | `tests/` | ESS, chunking, boundaries |
-| Integration | `tests/memory/` | Router, retrieval, forgetting |
-| Live | `tests/test_live_graduated.py` | Full agent |
+| Shared | `tests/shared/` | LLM provider timeout, retry, semaphore |
+| Sonality API | `tests/sonality/test_api.py` | HTTP contract, SSE streaming |
+| ESS parsing | `tests/sonality/test_ess_parsing.py` | Classification coercion |
+| Chunking | `tests/sonality/memory/` | Derivative chunking, fallback |
 | Benchmarks | `benches/` | Multi-dimensional evaluation |
 
 ## Live Preconditions

@@ -68,7 +68,7 @@ aiogram-based bot with voice support via Speaches API. Progress events are displ
 ```bash
 # .env
 CHAT_TELEGRAM_TOKEN=...
-CHAT_SPEACHES_URL=http://speaches:8001
+CHAT_SPEACHES_URL=http://speaches:8020
 
 make telegram
 ```

@@ -90,12 +90,11 @@ SONALITY_QDRANT_URL=http://localhost:6333
 
 | Variable | Default | Notes |
 |----------|---------|-------|
-| `SONALITY_WEB_SEARCH_URL` | `http://localhost:3002` | Firecrawl API URL (Docker service) |
+| `SONALITY_FATHOM_URL` | `http://localhost:8010` | Fathom research service URL |
 | `SONALITY_WEB_SEARCH_ENABLED` | `true` | Master toggle for web access |
-| `SONALITY_WEB_CACHE_TTL` | `14400` | Search cache TTL in seconds (4h) |
 | `SONALITY_REFLECTION_WEB_QUERIES` | `3` | Max web queries per reflection enrichment step |
 
-The agent uses a unified agentic loop where the LLM decides ALL cognitive steps via tool calls: recall_memory, web_search, web_extract, synthesize, and integrate_knowledge. All tools are always available — there are no per-turn limits. Pipeline enforcement overrides premature "finish" handoffs when substantive recall/search was done but synthesize or integrate_knowledge was skipped. Stall detection and deduplication prevent infinite loops. Web search and scrape are backed by Firecrawl (self-hosted via docker-compose), which uses Playwright for JavaScript rendering and SearXNG for search.
+The agent uses a unified agentic loop where the LLM decides ALL cognitive steps via tool calls: recall_memory, web_search, web_extract, synthesize, and integrate_knowledge. All tools are always available — there are no per-turn limits. Pipeline enforcement overrides premature "finish" handoffs when substantive recall/search was done but synthesize or integrate_knowledge was skipped. Stall detection and deduplication prevent infinite loops. Web search and extraction are delegated to the Fathom research service, which uses Playwright for JavaScript rendering and DuckDuckGo for search.
 
 ## HTTP API Authentication
 
@@ -121,12 +120,7 @@ docker compose up -d
 
 Services:
 - `sonality`: Agent API server (port 8000)
-- `neo4j`: Graph database (ports 7474, 7687)
+- `fathom`: Research + search service (port 8010)
+- `neo4j`: Graph database for both sonality and fathom (ports 7474, 7687)
 - `qdrant`: Vector database (ports 6333, 6334)
-- `firecrawl`: Web search + scrape API (port 3002)
-- `firecrawl-playwright`: Headless browser rendering (internal)
-- `firecrawl-redis`: Job queue (internal)
-- `firecrawl-rabbitmq`: Message broker (internal)
-- `firecrawl-postgres`: Job management DB (internal)
-- `searxng`: Meta-search engine (internal)
-- `speaches`: STT/TTS for Telegram (port 8001)
+- `speaches`: STT/TTS for Telegram (port 8020)
