@@ -13,7 +13,7 @@ from typing import Final
 import pytest
 from pydantic import BaseModel
 
-from sonality.llm.caller import LLMCallResult
+from sonality.caller import LLMCallResult
 
 log = logging.getLogger(__name__)
 NO_DB_CONTAINERS: Final[dict[str, str]] = {}
@@ -103,14 +103,9 @@ def mock_llm_call(
         )
 
     targets = (
-        "sonality.llm.caller.llm_call",
-        "sonality.memory.retrieval.router.llm_call",
-        "sonality.memory.retrieval.reranker.llm_call",
-        "sonality.memory.retrieval.chain.llm_call",
-        "sonality.memory.retrieval.split.llm_call",
+        "sonality.caller.llm_call",
         "sonality.agent.llm_call",
-        "sonality.memory.belief_provenance.llm_call",
-        "sonality.memory.forgetting.llm_call",
+        "sonality.memory.derivatives.llm_call",
         "sonality.memory.knowledge_extract.llm_call",
     )
     for target in targets:

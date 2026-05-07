@@ -5,8 +5,8 @@ Use the session-scoped fixtures to share containers across tests, or
 function-scoped fixtures for complete isolation.
 
 Usage:
-    pytest tests/ --use-containers  # Force testcontainers instead of local DBs
-    pytest tests/                   # Uses local DBs if available, containers as fallback
+    pytest tests/ --use-containers  # Spin up Neo4j + Qdrant via testcontainers
+    pytest tests/                   # Uses local DBs (requires running containers)
 """
 
 from __future__ import annotations
@@ -80,8 +80,9 @@ def _init_neo4j_schema(url: str, auth: tuple[str, str]) -> None:
     """Initialize Neo4j schema for testing."""
     from typing import cast
 
-    from neo4j import GraphDatabase
     from neo4j._typing import LiteralString
+
+    from neo4j import GraphDatabase
 
     driver = GraphDatabase.driver(url, auth=auth)
     try:
@@ -155,8 +156,9 @@ def patch_config_for_containers(container_config: ContainerConfig) -> None:
 
 async def clear_databases(qdrant_url: str, neo4j_url: str, neo4j_auth: tuple[str, str]) -> None:
     """Clear all data from both databases while preserving schema."""
-    from neo4j import GraphDatabase
     from qdrant_client import AsyncQdrantClient
+
+    from neo4j import GraphDatabase
 
     client = AsyncQdrantClient(url=qdrant_url)
     for collection in Collection:

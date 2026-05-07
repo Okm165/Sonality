@@ -1,8 +1,7 @@
 """Root conftest: configures debug-level file logging for all test sessions.
 
 Every test run writes a timestamped log file to data/ with full DEBUG output
-from the sonality package — ESS decisions, belief updates, knowledge extraction,
-memory retrieval, reflection cycles, and health diagnostics.
+from all workspace packages (sonality, fathom, shared, benches, tests).
 
 A console handler at INFO level is also attached so key events stream to the
 terminal when running with -s (no-capture mode).
@@ -12,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import sys
+from collections.abc import Generator
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -59,7 +59,7 @@ def pytest_configure(config: pytest.Config) -> None:
     console_handler.setLevel(logging.INFO)
     console_handler.setFormatter(logging.Formatter("%(levelname)-5s  %(name)s  %(message)s"))
 
-    for logger_name in ("sonality", "benches", "tests"):
+    for logger_name in ("sonality", "fathom", "shared", "benches", "tests"):
         logger = logging.getLogger(logger_name)
         logger.setLevel(logging.DEBUG)
         logger.addHandler(file_handler)
@@ -71,16 +71,14 @@ def pytest_configure(config: pytest.Config) -> None:
     _log_state["console_handler"] = console_handler
 
 
-
-
 @pytest.fixture
-def suppress_expected_logs():
+def suppress_expected_logs() -> Generator[None, None, None]:
     """Temporarily suppress ERROR-level logs during tests that expect failures.
 
     Use this fixture in tests that intentionally trigger exceptions to prevent
     alarming tracebacks from appearing in test output.
     """
-    loggers = [logging.getLogger(name) for name in ("sonality", "benches", "tests")]
+    loggers = [logging.getLogger(name) for name in ("sonality", "fathom", "shared", "benches", "tests")]
     original_levels = [logger.level for logger in loggers]
     for logger in loggers:
         logger.setLevel(logging.CRITICAL)
@@ -96,7 +94,7 @@ def pytest_unconfigure(config: pytest.Config) -> None:
     if isinstance(file_handler, logging.FileHandler):
         file_handler.flush()
         file_handler.close()
-        for logger_name in ("sonality", "benches", "tests"):
+        for logger_name in ("sonality", "fathom", "shared", "benches", "tests"):
             logging.getLogger(logger_name).removeHandler(file_handler)
 
     console_handler = _log_state.get("console_handler")
