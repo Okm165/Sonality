@@ -35,7 +35,7 @@ BENCH_TEACHING_BASE = uv run pytest benches/test_teaching_suite_live.py \
 .PHONY: help
 help: ## Show available commands
 	@echo ""
-	@echo "  Sonality — LLM agent with self-evolving personality"
+	@echo "  Zensical — Sonality + Fathom + Chat monorepo"
 	@echo ""
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
 		awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -47,13 +47,13 @@ help: ## Show available commands
 install: ## Install dependencies with uv (creates local .venv)
 	uv sync
 
-install-dev: ## Install with dev dependencies (ruff, pytest, mypy)
+install-dev: ## Install with dev dependencies (ruff, pytest, pyright)
 	uv sync --all-extras
 
 # --- Database ---
 
 .PHONY: db-up db-down db-reset db-clear
-db-up: ## Start database containers (Neo4j + Qdrant)
+db-up: ## Start database containers (Neo4j + Qdrant — shared by sonality and fathom)
 	docker compose up -d neo4j qdrant
 
 db-down: ## Stop database containers
@@ -62,7 +62,7 @@ db-down: ## Stop database containers
 db-reset: db-down ## Reset databases (delete all data and restart)
 	docker volume rm -f sonality_neo4j_data sonality_qdrant_data sonality_neo4j_logs 2>/dev/null || true
 	docker compose up -d neo4j qdrant
-	@echo "Databases reset. Schema is applied automatically on next 'make run'."
+	@echo "Databases reset. Schema is applied automatically on next startup."
 
 db-clear: ## Clear all data from databases while preserving schema
 	@echo "Clearing Qdrant collections..."
@@ -74,12 +74,24 @@ db-clear: ## Clear all data from databases while preserving schema
 
 # --- Run ---
 
-.PHONY: run serve chat telegram feed x-feed preflight-live preflight-live-probe
+.PHONY: run serve chat telegram feed x-feed fathom fathom-serve up down preflight-live preflight-live-probe
 run: ## Start the Sonality REPL agent
 	uv run sonality $(ARGS)
 
 serve: ## Start the Sonality API server (OpenAI-compatible at /v1/chat/completions)
 	uv run sonality-server --host 0.0.0.0 --port 8000 $(ARGS)
+
+fathom: ## Run Fathom research CLI
+	uv run fathom $(ARGS)
+
+fathom-serve: ## Start Fathom search + research service (port 8010)
+	uv run fathom-server --host 0.0.0.0 --port 8010 $(ARGS)
+
+up: ## Start all services (databases + fathom + sonality)
+	docker compose up -d
+
+down: ## Stop all services
+	docker compose down
 
 chat: ## Interactive terminal chat with Sonality
 	uv run --extra chat sonality-chat
@@ -105,17 +117,17 @@ preflight-live-probe: preflight-live ## Run a tiny live call to verify endpoint/
 
 .PHONY: lint format format-check typecheck test bench-contracts check check-ci
 lint: ## Lint code (ruff check)
-	uv run ruff check sonality/ chat/ tests/ benches/
+	uv run ruff check src/ tests/ benches/
 
 format: ## Format code (ruff format)
-	uv run ruff format sonality/ chat/ tests/ benches/
-	uv run ruff check --fix sonality/ chat/ tests/ benches/
+	uv run ruff format src/ tests/ benches/
+	uv run ruff check --fix src/ tests/ benches/
 
 format-check: ## Check formatting without writing changes (CI parity)
-	uv run ruff format --check sonality/ chat/ tests/ benches/
+	uv run ruff format --check src/ tests/ benches/
 
 typecheck: ## Type-check code (pyright)
-	uv run pyright sonality/ chat/
+	uv run pyright src/sonality/ src/fathom/ src/shared/ src/chat/
 
 test: ## Run tests (pytest, skip live API tests)
 	uv run pytest tests -m "not live" -v -s
@@ -363,11 +375,16 @@ check-ci: format-check check ## Run local checks equivalent to CI
 
 # --- Docker ---
 
-.PHONY: docker-build docker-run
-docker-build: ## Build Docker image
-	docker build -t sonality .
+.PHONY: docker-build docker-build-sonality docker-build-fathom docker-run
+docker-build: docker-build-sonality docker-build-fathom ## Build all Docker images
 
-docker-run: ## Run agent in Docker (interactive)
+docker-build-sonality: ## Build Sonality Docker image
+	docker build -f docker/sonality.Dockerfile -t sonality .
+
+docker-build-fathom: ## Build Fathom Docker image
+	docker build -f docker/fathom.Dockerfile -t fathom .
+
+docker-run: ## Run Sonality agent in Docker (interactive)
 	docker compose run --rm sonality
 
 # --- Inspect ---
