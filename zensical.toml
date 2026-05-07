@@ -1,9 +1,9 @@
 [project]
-site_name = "Sonality"
-site_description = "LLM agent with self-evolving personality and beliefs — grounded in 200+ academic references"
-site_author = "Sonality"
+site_name = "Zensical"
+site_description = "Multi-agent workspace: Sonality personality engine, Fathom autonomous research, shared LLM infrastructure"
+site_author = "Zensical contributors"
 site_url = "https://okm165.github.io/Sonality/"
-copyright = "&copy; 2025–2026 Sonality contributors"
+copyright = "&copy; 2025–2026 Zensical contributors"
 
 extra_javascript = [
     "https://unpkg.com/mathjax@3/es5/tex-mml-chtml.js",
@@ -12,33 +12,31 @@ extra_javascript = [
 nav = [
     { "Home" = "index.md" },
     { "Getting Started" = "getting-started.md" },
-    { "Configuration" = "configuration.md" },
-    { "API Reference" = "api-reference.md" },
-    { "Architecture" = [
-        { "Overview" = "architecture/overview.md" },
-        { "Data Flow" = "architecture/data-flow.md" },
-        { "Memory System" = "architecture/memory.md" },
-        { "Retrieval Pipeline" = "architecture/retrieval-pipeline.md" },
-        { "Knowledge Extraction" = "architecture/knowledge-extraction.md" },
-        { "Forgetting System" = "architecture/forgetting-system.md" },
-        { "Semantic Features" = "architecture/semantic-features-worker.md" },
-        { "Chat Clients" = "architecture/chat-clients.md" },
-        { "Infrastructure" = "architecture/infrastructure.md" },
-        { "Prompts Reference" = "architecture/prompts-reference.md" },
+    { "Project Structure" = "project-structure.md" },
+    { "Sonality" = [
+        { "Configuration" = "sonality/configuration.md" },
+        { "API Reference" = "sonality/api-reference.md" },
+        { "Overview" = "sonality/architecture/overview.md" },
+        { "Data Flow" = "sonality/architecture/data-flow.md" },
+        { "Memory System" = "sonality/architecture/memory.md" },
+        { "Retrieval Pipeline" = "sonality/architecture/retrieval-pipeline.md" },
+        { "Knowledge Extraction" = "sonality/architecture/knowledge-extraction.md" },
+        { "Forgetting System" = "sonality/architecture/forgetting-system.md" },
+        { "Semantic Features" = "sonality/architecture/semantic-features-worker.md" },
+        { "Chat Clients" = "sonality/architecture/chat-clients.md" },
+        { "Infrastructure" = "sonality/architecture/infrastructure.md" },
+        { "Prompts Reference" = "sonality/architecture/prompts-reference.md" },
+        { "Concepts — ESS" = "sonality/concepts/ess.md" },
+        { "Concepts — Beliefs" = "sonality/concepts/beliefs.md" },
+        { "Concepts — Reflection" = "sonality/concepts/reflection.md" },
+        { "Concepts — Anti-Sycophancy" = "sonality/concepts/anti-sycophancy.md" },
+        { "Testing" = "sonality/testing.md" },
+        { "Benchmarks" = "sonality/testing/benchmark-system.md" },
+        { "Usage Guide" = "sonality/usage-and-teaching-plan.md" },
     ] },
-    { "Concepts" = [
-        { "ESS" = "concepts/ess.md" },
-        { "Beliefs" = "concepts/beliefs.md" },
-        { "Reflection" = "concepts/reflection.md" },
-        { "Anti-Sycophancy" = "concepts/anti-sycophancy.md" },
-    ] },
-    { "Testing" = [
-        { "Overview" = "testing.md" },
-        { "Benchmarks" = "testing/benchmark-system.md" },
-    ] },
-    { "Reference" = [
-        { "Project Structure" = "project-structure.md" },
-        { "Usage Guide" = "usage-and-teaching-plan.md" },
+    { "Fathom" = [
+        { "Overview" = "fathom/overview.md" },
+        { "Configuration" = "fathom/configuration.md" },
     ] },
 ]
 
