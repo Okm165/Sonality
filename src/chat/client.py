@@ -9,16 +9,16 @@ real-time agent status.
 from __future__ import annotations
 
 import json
-import logging
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Final
 
 import httpx
+import structlog
 
 from . import config
 
-log = logging.getLogger(__name__)
+log = structlog.get_logger()
 
 # Shared tool labels for UX display (no emojis)
 TOOL_LABELS: Final[dict[str, str]] = {
@@ -101,7 +101,7 @@ class SonalityClient:
 
     def __init__(self, max_history: int = 40) -> None:
         self._client = httpx.AsyncClient(
-            base_url=config.SONALITY_URL, timeout=httpx.Timeout(config.HTTP_TIMEOUT, connect=10.0)
+            base_url=config.settings.sonality_url, timeout=httpx.Timeout(config.settings.http_timeout, connect=10.0)
         )
         self._history: list[dict[str, str]] = []
         self._max_history = max_history
@@ -141,16 +141,14 @@ class SonalityClient:
         """
         self._history.append({"role": "user", "content": message})
         self._trim_history()
-        log.debug(
-            "chat_stream: sending %d messages (latest=%d chars)", len(self._history), len(message)
-        )
+        log.debug("chat_stream_send", messages=len(self._history), latest_chars=len(message))
         chunks: list[str] = []
         try:
             async with self._client.stream(
                 "POST",
                 "/v1/chat/completions",
                 json={
-                    "model": config.MODEL_ID,
+                    "model": config.settings.model_id,
                     "messages": list(self._history),
                     "stream": True,
                 },
@@ -171,6 +169,7 @@ class SonalityClient:
                     try:
                         data = json.loads(line[6:])
                     except json.JSONDecodeError:
+                        log.debug("sse_json_skip", line=line[:60])
                         continue
 
                     if event_type:
@@ -194,7 +193,7 @@ class SonalityClient:
             self._history.pop()
             raise
         full_response = "".join(chunks)
-        log.debug("chat_stream: received %d chars in %d chunks", len(full_response), len(chunks))
+        log.debug("chat_stream_received", chars=len(full_response), chunks=len(chunks))
         self._history.append({"role": "assistant", "content": full_response})
 
     def _trim_history(self) -> None:

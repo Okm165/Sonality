@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 import sys
 import time as _time
 
+import structlog
 from rich.console import Console
 from rich.live import Live
 from rich.panel import Panel
@@ -24,7 +24,7 @@ from .client import (
     pipeline_summary,
 )
 
-log = logging.getLogger(__name__)
+log = structlog.get_logger()
 
 console = Console()
 
@@ -212,7 +212,7 @@ async def _chat_loop(client: SonalityClient) -> None:
             continue
 
         t0 = _time.perf_counter()
-        log.info("User message: %d chars", len(user_input))
+        log.info("user_message", chars=len(user_input))
         completed_steps: list[str] = []
         tool_names_used: list[str] = []
         current_action = ""
@@ -231,7 +231,7 @@ async def _chat_loop(client: SonalityClient) -> None:
                     elapsed = _time.perf_counter() - t0
 
                     if isinstance(item, ProgressEvent):
-                        log.debug("Progress: type=%s detail=%s", item.type, item.detail)
+                        log.debug("progress_event", type=item.type, detail=item.detail[:80])
 
                         if item.type == "done":
                             done_meta = _format_done_metadata(item.detail, tool_names_used)
@@ -269,23 +269,13 @@ async def _chat_loop(client: SonalityClient) -> None:
                 footer.append_text(done_meta)
                 console.print(footer)
 
-            log.info(
-                "Response complete: %d chars, %d tools, elapsed=%.1fs",
-                response_chars,
-                len(tool_names_used),
-                _time.perf_counter() - t0,
-            )
+            log.info("response_complete", chars=response_chars, tools=len(tool_names_used), elapsed=f"{_time.perf_counter() - t0:.1f}s")
         except Exception as e:
-            log.error("Chat error: %s", e, exc_info=True)
+            log.error("chat_error", error=str(e), exc_info=True)
             console.print(f"[red]Error: {e}[/red]")
 
 
 async def _main() -> None:
-    logging.basicConfig(
-        level=getattr(logging, config.LOG_LEVEL.upper(), logging.INFO),
-        format="%(levelname)s %(name)s: %(message)s",
-    )
-
     async with SonalityClient() as client:
         try:
             h = await client.health()
@@ -308,7 +298,7 @@ async def _main() -> None:
                 Panel.fit(
                     "[bold blue]Sonality[/bold blue]\n"
                     f"[red]Cannot connect: {e}[/red]\n"
-                    f"[yellow]Sonality expected at {config.SONALITY_URL}[/yellow]",
+                    f"[yellow]Sonality expected at {config.settings.sonality_url}[/yellow]",
                     border_style="red",
                     padding=(0, 2),
                 )

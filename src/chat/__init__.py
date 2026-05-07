@@ -7,8 +7,14 @@ Run via ``python -m chat terminal`` or ``python -m chat telegram``.
 
 from __future__ import annotations
 
-from .audio import AudioProcessor, chunk_text, llm_call, mp3_to_ogg_opus, optimize_for_speech
+import os
+
+from shared.logging import setup_logging
+
+from .audio import AudioProcessor, chunk_text, mp3_to_ogg_opus, optimize_for_speech
 from .client import Belief, HealthStatus, SonalityClient
+
+__version__ = "0.1.0"
 
 __all__ = [
     "AudioProcessor",
@@ -16,7 +22,8 @@ __all__ = [
     "HealthStatus",
     "SonalityClient",
     "chunk_text",
-    "llm_call",
     "mp3_to_ogg_opus",
     "optimize_for_speech",
 ]
+
+setup_logging(os.environ.get("CHAT_LOG_LEVEL", "INFO"))

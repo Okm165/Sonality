@@ -5,13 +5,13 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-import logging
 import signal
 import sys
 import time
 from dataclasses import dataclass, field
 from io import BytesIO
 
+import structlog
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.enums import ChatAction
 from aiogram.filters import Command, CommandStart
@@ -27,7 +27,7 @@ from .client import (
     pipeline_summary,
 )
 
-log = logging.getLogger(__name__)
+log = structlog.get_logger()
 router = Router()
 
 
@@ -46,7 +46,7 @@ class ClientPool:
             now = time.monotonic()
             if user_id not in self._clients:
                 self._clients[user_id] = SonalityClient()
-                log.debug("Created new client for user_id=%d", user_id)
+                log.debug("client_created", user_id=user_id)
             self._last_access[user_id] = now
             return self._clients[user_id]
 
@@ -64,7 +64,7 @@ class ClientPool:
                 await self._clients[uid].close()
                 del self._clients[uid]
                 del self._last_access[uid]
-                log.debug("Removed idle client for user_id=%d", uid)
+                log.debug("client_removed_idle", user_id=uid)
             return len(to_remove)
 
     async def close_all(self) -> None:
@@ -86,7 +86,7 @@ async def _generate_voices(audio: AudioProcessor, chunks: list[str]) -> list[byt
             ogg = await mp3_to_ogg_opus(mp3)
             return idx, ogg
         except Exception as e:
-            log.warning("Voice generation failed chunk=%d: %s", idx, e)
+            log.warning("voice_gen_failed", chunk=idx, error=str(e))
             return idx, None
 
     results = await asyncio.gather(*[gen(c, i) for i, c in enumerate(chunks)])
@@ -108,7 +108,7 @@ async def _send_voice_reply(msg: Message, text: str, audio: AudioProcessor) -> N
             try:
                 await msg.answer_voice(BufferedInputFile(ogg, f"voice_{i}.ogg"))
             except Exception as e:
-                log.warning("Voice send failed chunk=%d: %s", i, e)
+                log.warning("voice_send_failed", chunk=i, error=str(e))
 
 
 @router.message(CommandStart())
@@ -125,6 +125,7 @@ async def cmd_start(msg: Message, pool: ClientPool) -> None:
             )
             status += f"\nTop: {top}"
     except Exception:
+        log.warning("cmd_start_health_failed", exc_info=True)
         status = "connecting..."
     await msg.answer(
         f"<b>Sonality</b> - a mind that grows\n\n{status}\n\nSend a message to chat | /help for commands",
@@ -166,7 +167,7 @@ async def cmd_beliefs(msg: Message, pool: ClientPool) -> None:
             parse_mode="HTML",
         )
     except Exception as e:
-        log.error("beliefs error uid=%d: %s", uid, e)
+        log.error("beliefs_error", user_id=uid, error=str(e))
         await msg.answer(f"Error: {e}")
 
 
@@ -192,7 +193,7 @@ async def cmd_snapshot(msg: Message, pool: ClientPool) -> None:
             parse_mode="HTML",
         )
     except Exception as e:
-        log.error("snapshot error uid=%d: %s", uid, e)
+        log.error("snapshot_error", user_id=uid, error=str(e))
         await msg.answer(f"Error: {e}")
 
 
@@ -207,7 +208,7 @@ async def cmd_health(msg: Message, pool: ClientPool) -> None:
             parse_mode="HTML",
         )
     except Exception as e:
-        log.error("health error uid=%d: %s", uid, e)
+        log.error("health_error", user_id=uid, error=str(e))
         await msg.answer(f"Error: {e}")
 
 
@@ -219,7 +220,7 @@ async def cmd_clear(msg: Message, pool: ClientPool) -> None:
         client.clear_history()
         await msg.answer("Conversation cleared.")
     except Exception as e:
-        log.error("clear error uid=%d: %s", uid, e)
+        log.error("clear_error", user_id=uid, error=str(e))
         await msg.answer(f"Error: {e}")
 
 
@@ -360,7 +361,7 @@ async def _consume_stream(
                             text=result.text + " |",
                         )
                     except Exception:
-                        log.info("sendMessageDraft unavailable, falling back to editMessageText")
+                        log.info("draft_unavailable_fallback")
                         use_draft = False
 
                 if not use_draft and result.text:
@@ -394,10 +395,10 @@ async def _consume_stream(
 
 
 @router.message(F.text)
-async def handle_text(msg: Message, bot: Bot, pool: ClientPool, audio: AudioProcessor) -> None:
+async def handle_text(msg: Message, bot: Bot, pool: ClientPool, **_: object) -> None:
     uid = _uid(msg)
     text = msg.text or ""
-    log.info("Text message uid=%d: %d chars", uid, len(text))
+    log.info("text_message", user_id=uid, chars=len(text))
     t0 = time.perf_counter()
 
     with contextlib.suppress(Exception):
@@ -422,19 +423,13 @@ async def handle_text(msg: Message, bot: Bot, pool: ClientPool, audio: AudioProc
             if result.done_footer:
                 final += f"\n\n<i>{result.done_footer}</i>"
             await msg.answer(final, parse_mode="HTML")
-            log.info(
-                "Response uid=%d: %d chars, %d tools, elapsed=%.1fs",
-                uid,
-                len(result.text),
-                len(result.tool_names),
-                time.perf_counter() - t0,
-            )
+            log.info("response_complete", user_id=uid, chars=len(result.text), tools=len(result.tool_names), elapsed=f"{time.perf_counter() - t0:.1f}s")
         else:
-            log.warning("Empty response uid=%d", uid)
+            log.warning("empty_response", user_id=uid)
             await msg.answer("<i>No response generated. Try rephrasing.</i>", parse_mode="HTML")
 
     except Exception as e:
-        log.error("Chat error uid=%d: %s", uid, e, exc_info=True)
+        log.error("chat_error", user_id=uid, error=str(e), exc_info=True)
         await msg.answer("Something went wrong. Please try again.")
 
 
@@ -444,18 +439,16 @@ async def handle_voice(msg: Message, bot: Bot, pool: ClientPool, audio: AudioPro
     if not voice:
         return
     uid = _uid(msg)
-    log.debug(
-        "Voice message uid=%d: duration=%ds mime=%s", uid, voice.duration or 0, voice.mime_type
-    )
+    log.debug("voice_message", user_id=uid, duration=voice.duration or 0, mime=voice.mime_type)
 
     try:
         dl = await bot.download(voice.file_id)
         if not isinstance(dl, BytesIO):
             raise TypeError("Expected BytesIO")
         voice_bytes = dl.read()
-        log.debug("Downloaded voice uid=%d: %d bytes", uid, len(voice_bytes))
+        log.debug("voice_downloaded", user_id=uid, bytes=len(voice_bytes))
     except Exception as e:
-        log.error("Download failed uid=%d: %s", uid, e, exc_info=True)
+        log.error("voice_download_failed", user_id=uid, error=str(e))
         await msg.answer(f"Download error: {e}")
         return
 
@@ -463,15 +456,15 @@ async def handle_voice(msg: Message, bot: Bot, pool: ClientPool, audio: AudioPro
         await bot.send_chat_action(msg.chat.id, ChatAction.RECORD_VOICE)
     try:
         text = await audio.stt(voice_bytes, voice.mime_type or "audio/ogg")
-        log.debug("STT result uid=%d: %d chars", uid, len(text))
+        log.debug("stt_result", user_id=uid, chars=len(text))
         await msg.answer(f"<i>{text}</i>", parse_mode="HTML")
     except Exception as e:
-        log.error("STT failed uid=%d: %s", uid, e, exc_info=True)
+        log.error("stt_failed", user_id=uid, error=str(e))
         await msg.answer(f"Transcription error: {e}")
         return
 
     if not text.strip():
-        log.warning("Empty transcription uid=%d", uid)
+        log.warning("empty_transcription", user_id=uid)
         await msg.answer("Could not transcribe. Try again.")
         return
 
@@ -490,35 +483,28 @@ async def handle_voice(msg: Message, bot: Bot, pool: ClientPool, audio: AudioPro
         )
 
         if result.text:
-            log.debug("Voice chat response uid=%d: %d chars", uid, len(result.text))
+            log.debug("voice_response", user_id=uid, chars=len(result.text))
             with contextlib.suppress(Exception):
                 await bot.send_chat_action(msg.chat.id, ChatAction.RECORD_VOICE)
             await _send_voice_reply(msg, result.text, audio)
             if result.done_footer:
                 await msg.answer(f"<i>{result.done_footer}</i>", parse_mode="HTML")
         else:
-            log.warning("Empty voice response uid=%d", uid)
+            log.warning("empty_voice_response", user_id=uid)
             await msg.answer("<i>No response generated. Try again.</i>", parse_mode="HTML")
 
     except Exception as e:
-        log.error("Chat error uid=%d: %s", uid, e, exc_info=True)
+        log.error("chat_error", user_id=uid, error=str(e), exc_info=True)
         await msg.answer("Something went wrong. Please try again.")
 
 
 async def _main() -> None:
-    logging.basicConfig(
-        level=getattr(logging, config.LOG_LEVEL.upper(), logging.INFO),
-        format="%(levelname)s %(name)s: %(message)s",
-    )
-
-    if not config.TELEGRAM_TOKEN:
+    if not config.settings.telegram_token:
         sys.exit("Error: CHAT_TELEGRAM_TOKEN not set")
 
-    log.info("=== Sonality Telegram Bot ===")
-    log.info("Sonality API: %s", config.SONALITY_URL)
-    log.info("Speaches API: %s", config.SPEACHES_URL)
+    log.info("telegram_bot_starting", sonality_url=config.settings.sonality_url, speaches_url=config.settings.speaches_url)
 
-    bot = Bot(token=config.TELEGRAM_TOKEN)
+    bot = Bot(token=config.settings.telegram_token)
     dp = Dispatcher()
     dp.include_router(router)
 
@@ -526,7 +512,7 @@ async def _main() -> None:
     shutdown_event = asyncio.Event()
 
     def signal_handler() -> None:
-        log.info("Shutdown signal received")
+        log.info("shutdown_signal")
         shutdown_event.set()
 
     loop = asyncio.get_running_loop()
@@ -537,7 +523,7 @@ async def _main() -> None:
         async with SonalityClient() as test_client:
             try:
                 h = await test_client.health()
-                log.info("Connected: snapshot_v%d, %d beliefs", h.snapshot_version, h.belief_count)
+                log.info("connected", snapshot_version=h.snapshot_version, beliefs=h.belief_count)
             except Exception as e:
                 sys.exit(f"Cannot connect to Sonality: {e}")
 
@@ -546,7 +532,7 @@ async def _main() -> None:
                 await asyncio.sleep(600)
                 removed = await pool.cleanup()
                 if removed:
-                    log.info("Cleaned up %d idle client(s)", removed)
+                    log.info("clients_cleaned", removed=removed)
 
         dp["pool"], dp["audio"] = pool, audio
         try:
@@ -562,9 +548,9 @@ async def _main() -> None:
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
         finally:
-            log.info("Closing client pool...")
+            log.info("closing_pool")
             await pool.close_all()
-            log.info("Telegram bot shutdown complete")
+            log.info("telegram_bot_shutdown")
 
 
 def main() -> None:
