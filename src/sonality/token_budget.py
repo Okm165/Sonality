@@ -6,22 +6,21 @@ from collections.abc import Sequence
 from typing import Final
 
 import structlog
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, Field, model_validator
 
-from shared.llm.parse import coerce_string_fields
+from shared.llm.parse import coerce_string_fields, render_labeled
+from shared.types import ChatRole
 
-from .schema import ChatRole
-
-log = structlog.get_logger()
+log = structlog.get_logger(__name__)
 
 
 class _ConversationSummarySchema(BaseModel):
     """Structured conversation summary."""
 
-    intent: str = ""
-    key_facts: str = ""
-    decisions: str = ""
-    open_threads: str = ""
+    intent: str = Field(default="", max_length=1000)
+    key_facts: str = Field(default="", max_length=2000)
+    decisions: str = Field(default="", max_length=2000)
+    open_threads: str = Field(default="", max_length=1000)
 
     @model_validator(mode="before")
     @classmethod
@@ -29,16 +28,15 @@ class _ConversationSummarySchema(BaseModel):
         return coerce_string_fields(data, ("key_facts", "decisions", "open_threads"), sep="; ")
 
     def render(self) -> str:
-        parts: list[str] = []
-        if self.intent:
-            parts.append(f"Intent: {self.intent}")
-        if self.key_facts:
-            parts.append(f"Key facts: {self.key_facts}")
-        if self.decisions:
-            parts.append(f"Decisions: {self.decisions}")
-        if self.open_threads:
-            parts.append(f"Open threads: {self.open_threads}")
-        return "\n".join(parts)
+        return render_labeled(
+            self,
+            {
+                "intent": "Intent",
+                "key_facts": "Key facts",
+                "decisions": "Decisions",
+                "open_threads": "Open threads",
+            },
+        )
 
 
 def estimate_tokens_utf8(text: str) -> int:
@@ -63,33 +61,9 @@ def estimate_tokens_utf8(text: str) -> int:
     return len(text.encode("utf-8")) // 4 + 1
 
 
-def _extract_text_from_content(content: object) -> str:
-    """Extract text from message content, handling both string and multipart formats."""
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts: list[str] = []
-        for item in content:
-            if isinstance(item, str):
-                parts.append(item)
-            elif (
-                isinstance(item, dict)
-                and item.get("type") == "text"
-                and isinstance(item.get("text"), str)
-            ):
-                parts.append(item["text"])
-        return " ".join(parts)
-    return ""
-
-
-def _estimate_messages_tokens(messages: Sequence[dict[str, object] | dict[str, str]]) -> int:
-    """Sum :func:`estimate_tokens_utf8` over each message's content field.
-
-    Handles both string content and multipart content (list of text/image blocks).
-    """
-    return sum(
-        estimate_tokens_utf8(_extract_text_from_content(m.get("content", ""))) for m in messages
-    )
+def _estimate_messages_tokens(messages: Sequence[dict[str, str]]) -> int:
+    """Sum :func:`estimate_tokens_utf8` over each message's content field."""
+    return sum(estimate_tokens_utf8(m.get("content", "")) for m in messages)
 
 
 def trim_chat_messages_for_budget(
@@ -114,6 +88,12 @@ def trim_chat_messages_for_budget(
     return trimmed
 
 
+_DEFAULT_COMPLETION_RESERVE: Final = 16_384
+"""Tokens reserved for model completion when max_tokens is unspecified.
+Scaled from 8K (32K context) to 16K (262K context) for comprehensive responses.
+"""
+
+
 def message_tokens_budget_for_system(
     *,
     total_budget: int,
@@ -125,12 +105,21 @@ def message_tokens_budget_for_system(
     ``total_budget`` is typically :data:`sonality.config.settings.chat_input_token_budget`.
     Subtracts :func:`estimate_tokens_utf8` of ``system_prompt`` and ``reserve_completion``,
     then returns at least 256 so a minimal tail can remain.
+
+    When ``reserve_completion <= 0`` (server-decides mode), uses 8192 as a
+    safe default so context math still works.
     """
+    effective_reserve = (
+        reserve_completion if reserve_completion > 0 else _DEFAULT_COMPLETION_RESERVE
+    )
     sys_tok = estimate_tokens_utf8(system_prompt)
-    return max(256, total_budget - sys_tok - reserve_completion)
+    return max(256, total_budget - sys_tok - effective_reserve)
 
 
-SUMMARIZE_THRESHOLD: Final = 8
+SUMMARIZE_THRESHOLD: Final = 20
+"""Minimum message count before LLM summarization triggers.
+Scaled from 8 (32K context) to 20 (262K context) to leverage larger window.
+"""
 _SUMMARY_PREFIX: Final = "[Earlier conversation summary]"
 
 
@@ -211,11 +200,11 @@ def _llm_summarize_messages(messages: list[dict[str, str]], previous_summary: st
     rather than regenerating from scratch (anchored approach, arXiv:2603.29193).
     """
     from . import config
-    from .caller import llm_call
+    from .caller import format_prompt, llm_call
     from .prompts import CONVERSATION_SUMMARY_PROMPT
 
     formatted = "\n".join(
-        f"{m.get('role', ChatRole.USER).capitalize()}: {m.get('content', '')[:300]}"
+        f"{m.get('role', ChatRole.USER).capitalize()}: {m.get('content', '')[:800]}"
         for m in messages
     )
     prev_section = (
@@ -223,11 +212,10 @@ def _llm_summarize_messages(messages: list[dict[str, str]], previous_summary: st
         if previous_summary
         else "No previous summary."
     )
-    prompt = CONVERSATION_SUMMARY_PROMPT.format(
-        previous_summary=prev_section, messages=formatted[:3000]
-    )
     r = llm_call(
-        prompt=prompt,
+        instructions=format_prompt(
+            CONVERSATION_SUMMARY_PROMPT, previous_summary=prev_section, messages=formatted
+        ),
         response_model=_ConversationSummarySchema,
         fallback=_ConversationSummarySchema(),
         model=config.settings.fast_model,
