@@ -19,6 +19,7 @@ uv.lock
 # Runtime data
 data/
 logs/
+.models/
 
 # Environment
 .env
