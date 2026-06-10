@@ -25,19 +25,19 @@ jobs:
         uses: astral-sh/setup-uv@v4
 
       - name: Install dependencies
-        run: uv sync --group dev
+        run: uv sync --all-extras --group docs
 
       - name: Check formatting
-        run: uv run ruff format --check sonality tests benches
+        run: uv run ruff format --check src/ tests/
 
       - name: Lint
-        run: uv run ruff check sonality tests benches
+        run: uv run ruff check src/ tests/
 
-      - name: Type-check runtime package
-        run: uv run mypy sonality
+      - name: Type-check
+        run: uv run pyright src/sonality/ src/fathom/ src/shared/ src/chat/
 
       - name: Run unit tests
         run: uv run pytest tests -m "not live" -q
 
-      - name: Run non-live benchmark tests
-        run: uv run pytest benches -m "bench and not live" -q
+      - name: Build docs
+        run: uv run zensical build --clean

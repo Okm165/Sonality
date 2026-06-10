@@ -8,13 +8,13 @@ from __future__ import annotations
 
 import os
 import re
-import time
 from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Final
 
 import feedparser  # type: ignore[import-untyped]
 import httpx
+from _helpers import connect_or_exit, fetch_and_show_beliefs, queue_ingest
 from dotenv import load_dotenv
 from gnews import GNews  # type: ignore[import-untyped]
 from rich.console import Console
@@ -118,6 +118,8 @@ console = Console()
 
 @dataclass(frozen=True, slots=True)
 class Article:
+    """Single news article from RSS or GNews."""
+
     title: str
     description: str
     source: str
@@ -136,10 +138,10 @@ def _rss(source: str, url: str, topic: str, limit: int) -> Iterator[Article]:
         feed = feedparser.parse(url)
         for entry in feed.entries[:limit]:
             yield Article(
-                title=entry.get("title", ""),
-                description=entry.get("summary", entry.get("description", "")),
+                title=str(entry.get("title") or ""),
+                description=str(entry.get("summary") or entry.get("description") or ""),
                 source=source,
-                link=entry.get("link", ""),
+                link=str(entry.get("link") or ""),
                 topic=topic,
             )
     except Exception as exc:
@@ -168,6 +170,7 @@ def _gnews(country: str, gnews_topic: str, topic: str, limit: int) -> Iterator[A
 
 
 def _panel(article: Article) -> Panel:
+    """Build a Rich panel for displaying an article in the terminal."""
     body = escape(article.description[:300])
     if len(article.description) > 300:
         body += "…"
@@ -184,15 +187,7 @@ _HTML_TAG = re.compile(r"<[^>]+>")
 def _enrich(article: Article) -> str:
     """Enriched text with source credibility marker for ESS classification."""
     desc = _HTML_TAG.sub("", article.description).strip()
-    return (
-        f"[News/{article.source}]\n\n"
-        f"{article.title}\n\n"
-        f"{desc}\n\n"
-        f"Source: {article.link}"
-    )
-
-
-from _helpers import print_error, print_result, show_beliefs
+    return f"[News/{article.source}]\n\n{article.title}\n\n{desc}\n\nSource: {article.link}"
 
 
 def _ingest_one(
@@ -205,36 +200,21 @@ def _ingest_one(
     total: int,
     throttle: float,
 ) -> tuple[int, int]:
-    """Filter, display, and ingest a single article. Returns updated (ok, total)."""
+    """Filter, display, and fire-and-forget ingest a single article."""
     key = article.link or article.title
     if not key or key in seen:
         return ok, total
-    if not article.title or len(article.description) < MIN_DESC_LEN:
+    stripped_desc = _HTML_TAG.sub("", article.description).strip()
+    if not article.title or len(stripped_desc) < MIN_DESC_LEN:
         return ok, total
     seen.add(key)
 
     total += 1
     console.print(_panel(article))
-
-    try:
-        r = client.post(
-            f"{base}/ingest",
-            json={"text": _enrich(article), "topic_override": topic},
-        )
-        r.raise_for_status()
+    success, _ = queue_ingest(client, base, _enrich(article), topic, throttle)
+    if success:
         ok += 1
-        print_result(r.json())
-    except httpx.HTTPStatusError as exc:
-        print_error(exc)
-    except Exception as exc:
-        console.print(f"  [red]✗ {exc}[/red]")
-
-    if throttle > 0:
-        time.sleep(throttle)
-
     return ok, total
-
-
 
 
 # ---------------------------------------------------------------------------
@@ -243,6 +223,7 @@ def _ingest_one(
 
 
 def main() -> None:
+    """Fetch news from RSS + GNews, ingest each article into Sonality."""
     load_dotenv()
     base = os.getenv("SONALITY_URL", "http://localhost:8000")
     throttle = float(os.getenv("FEED_THROTTLE", "5"))
@@ -265,13 +246,9 @@ def main() -> None:
         f"({len(GNEWS_COUNTRIES)}×{len(GNEWS_MAP)}) · throttle {throttle}s[/dim]\n"
     )
 
-    with httpx.Client(timeout=300.0) as client:
-        try:
-            client.get(f"{base}/health").raise_for_status()
-        except Exception as exc:
-            console.print(f"[red]✗ Sonality unreachable: {exc}[/red]")
+    with httpx.Client(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
+        if not connect_or_exit(client, base):
             return
-        console.print("[green]✓ Connected[/green]\n")
 
         seen: set[str] = set()
         ok = total = 0
@@ -293,15 +270,8 @@ def main() -> None:
                 for article in _gnews(country, gnews_topic, topic, gnews_limit):
                     ok, total = _ingest_one(client, base, article, topic, seen, ok, total, throttle)
 
-        console.print(f"\n[bold]Done — {ok}/{total} ingested[/bold]\n")
-
-        try:
-            r = client.get(f"{base}/beliefs")
-            r.raise_for_status()
-            beliefs = r.json()
-            show_beliefs(beliefs if isinstance(beliefs, list) else beliefs.get("beliefs", []))
-        except Exception as exc:
-            console.print(f"[yellow]Could not fetch beliefs: {exc}[/yellow]")
+        console.print(f"\n[bold]Done — {ok}/{total} queued[/bold]\n")
+        fetch_and_show_beliefs(client, base)
 
 
 if __name__ == "__main__":
