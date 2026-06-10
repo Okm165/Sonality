@@ -1,9 +1,8 @@
 """Agent progress events for real-time UX streaming.
 
 Events are emitted during the agentic loop (agent.py) and serialized as
-SSE events by the API (api.py). Chat clients in the ``chat`` package
-consume them to render live progress: which tool is running, when the
-agent is thinking, when quorum critique reviews evidence, etc.
+SSE events by the API (api.py). Chat clients consume them to render live
+progress: which tool is running, when the agent is thinking, etc.
 """
 
 from __future__ import annotations
@@ -11,13 +10,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .schema import EventType
-
-THINKING = EventType.THINKING
-TOOL_CALL = EventType.TOOL_CALL
-TOOL_RESULT = EventType.TOOL_RESULT
-CONTEXT_BUILD = EventType.CONTEXT_BUILD
-SUMMARIZING = EventType.SUMMARIZING
-DONE = EventType.DONE
 
 
 @dataclass(frozen=True, slots=True)

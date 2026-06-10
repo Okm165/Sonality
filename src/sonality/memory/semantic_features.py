@@ -1,17 +1,13 @@
 """Semantic feature extraction and storage (personality, preferences, knowledge, relationships).
 
-Background ingestion worker extracts features from episodes using category-specific
-LLM prompts. Features stored in Qdrant with vector embeddings.
+Fully async: LLM calls via ``sonality.caller.async_llm_call`` (gated by ``_llm_gate``),
+embeddings via ``sonality.caller.async_embed_documents`` (gated by ``_embedding_gate``),
+Qdrant via ``AsyncQdrantClient``.  No threads needed.
 """
 
 from __future__ import annotations
 
-import asyncio
-import queue
 import re
-import threading
-import time as _time
-from collections.abc import Coroutine
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -21,32 +17,29 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.models import FieldCondition, Filter, MatchValue, PointStruct
 
+from shared.embedder import Embedder
 from shared.llm.parse import normalize_llm_list_response
 from shared.types import deterministic_id
 
 from .. import config
-from ..caller import llm_call
+from ..caller import async_embed_documents, async_llm_call, format_prompt
 from ..prompts import FEATURE_CONSOLIDATION_PROMPT, FEATURE_EXTRACTION_PROMPT, FEATURE_TAGS
-from ..provider import interaction_in_progress, llm_semaphore_idle
 from ..schema import DENSE_VECTOR, Collection, SemanticCategory
-from .embedder import Embedder
 
-log = structlog.get_logger()
+log = structlog.get_logger(__name__)
 
 SEMANTIC_CATEGORIES: list[SemanticCategory] = list(SemanticCategory)
+CONSOLIDATION_THRESHOLD: int = 20
+_MAX_CITATIONS: int = 50
 
 
 class FeatureCommandType(StrEnum):
-    """Operations the LLM can request on semantic features."""
-
     ADD = "add"
     UPDATE = "update"
     DELETE = "delete"
 
 
 class FeatureConsolidationDecision(StrEnum):
-    """Whether duplicate/overlapping features should be merged."""
-
     CONSOLIDATE = "CONSOLIDATE"
     SKIP = "SKIP"
 
@@ -61,17 +54,22 @@ _VALID_FEATURE_TAGS: frozenset[str] = frozenset(
 class FeatureCommand(BaseModel):
     command: FeatureCommandType
     tag: str = ""
-    feature: str
+    feature: str = Field(max_length=150)
     value: str = ""
-    confidence: float = 0.5
-    reason: str = ""
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+    reason: str = Field(default="", max_length=300)
+
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def clamp_confidence(cls, v: object) -> object:
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            return max(0.0, min(1.0, float(v)))
+        return v
 
     @field_validator("command", mode="before")
     @classmethod
     def normalize_command(cls, v: object) -> object:
-        if isinstance(v, str):
-            return v.lower()
-        return v
+        return v.lower() if isinstance(v, str) else v
 
     @field_validator("tag", mode="before")
     @classmethod
@@ -87,8 +85,7 @@ class FeatureCommand(BaseModel):
     @classmethod
     def coerce_value(cls, v: object) -> str:
         if isinstance(v, str):
-            result = re.sub(r"\s*\(conf=[\d.]+\)\s*$", "", v).strip()
-            return result[:200]
+            return re.sub(r"\s*\(conf=[\d.]+\)\s*$", "", v).strip()[:200]
         if isinstance(v, dict):
             first = next(iter(v.values()), "")
             return str(first)[:200] if isinstance(first, (str, int, float)) else ""
@@ -96,20 +93,15 @@ class FeatureCommand(BaseModel):
 
 
 class FeatureExtractionResponse(BaseModel):
-    commands: list[FeatureCommand] = Field(default_factory=list)
+    commands: list[FeatureCommand] = Field(default_factory=list, max_length=30)
 
     @model_validator(mode="before")
     @classmethod
     def normalize_commands(cls, data: object) -> object:
-        return normalize_llm_list_response(
-            data,
-            list_key="commands",
-            item_required_key="command",
-        )
+        return normalize_llm_list_response(data, list_key="commands", item_required_key="command")
 
     @model_validator(mode="after")
     def validate_tags(self) -> FeatureExtractionResponse:
-        """Filter out commands with unrecognised tags — silently discard rather than repair."""
         before = len(self.commands)
         self.commands = [cmd for cmd in self.commands if cmd.tag and cmd.tag in _VALID_FEATURE_TAGS]
         dropped = before - len(self.commands)
@@ -119,17 +111,21 @@ class FeatureExtractionResponse(BaseModel):
 
 
 class FeatureConsolidationAction(BaseModel):
-    source_uid: str
-    target_uid: str
-    canonical_tag: str = ""
-    canonical_feature: str = ""
+    source_uid: str = Field(max_length=100)
+    target_uid: str = Field(max_length=100)
+    canonical_tag: str = Field(default="", max_length=100)
+    canonical_feature: str = Field(default="", max_length=150)
     canonical_value: str = ""
-    reason: str = ""
+    reason: str = Field(default="", max_length=2000)
+
+    @field_validator("canonical_value", mode="before")
+    @classmethod
+    def truncate_canonical_value(cls, v: object) -> str:
+        return str(v)[:500] if v is not None else ""
 
     @model_validator(mode="before")
     @classmethod
     def normalize_uid_keys(cls, data: object) -> object:
-        """LLM sometimes returns variant key names for source/target UIDs."""
         if isinstance(data, dict):
             for alt, canonical in (
                 ("from", "source_uid"),
@@ -146,230 +142,100 @@ class FeatureConsolidationAction(BaseModel):
 
 class FeatureConsolidationResponse(BaseModel):
     consolidation_decision: FeatureConsolidationDecision = FeatureConsolidationDecision.SKIP
-    reasoning: str = ""
-    actions: list[FeatureConsolidationAction] = Field(default_factory=list)
+    reasoning: str = Field(default="", max_length=3000)
+    actions: list[FeatureConsolidationAction] = Field(default_factory=list, max_length=20)
 
-    @field_validator("consolidation_decision", mode="before")
+    @model_validator(mode="before")
     @classmethod
-    def normalize_decision(cls, v: object) -> object:
-        """Normalize case: models return 'skip'/'consolidate' but enum is uppercase."""
-        if isinstance(v, str):
-            return v.upper()
-        return v
+    def normalize_response(cls, data: object) -> object:
+        was_bare_list = isinstance(data, list)
+        if isinstance(data, dict):
+            cd = data.get("consolidation_decision")
+            if isinstance(cd, str):
+                data["consolidation_decision"] = cd.strip().upper()
+        result = normalize_llm_list_response(
+            data, list_key="actions", item_required_key="source_uid"
+        )
+        if was_bare_list and isinstance(result, dict) and result.get("actions"):
+            result.setdefault("consolidation_decision", "CONSOLIDATE")
+        return result
 
 
 @dataclass(frozen=True, slots=True)
 class SemanticFeatureRow:
-    """Read-only view of a semantic feature from Qdrant."""
-
     uid: str
     tag: str
     feature_name: str
     value: str
     confidence: float
-    citations: list[str]
 
 
-class SemanticIngestionWorker:
-    """Background daemon thread that extracts semantic features from episodes.
+class SemanticFeatureExtractor:
+    """Fully async semantic feature extraction.
 
-    Receives episode UIDs via thread-safe queue. Processes in adaptive batches.
-    Uses LLM for category-specific feature extraction.
+    LLM calls go through ``async_llm_call`` (gated by sonality's semaphore),
+    embeddings through ``async_embed_documents`` (gated by embedding semaphore),
+    Qdrant through ``AsyncQdrantClient``.  No thread pool slots consumed.
     """
 
-    def __init__(
-        self,
-        qdrant_url: str,
-        embedder: Embedder,
-    ) -> None:
+    def __init__(self, qdrant: AsyncQdrantClient, embedder: Embedder) -> None:
         self._embedder = embedder
-        self._qdrant = AsyncQdrantClient(url=qdrant_url)
-        self._queue: queue.Queue[tuple[str, str, tuple[SemanticCategory, ...]]] = queue.Queue()
-        self._loop = asyncio.new_event_loop()
-        self._loop_thread = threading.Thread(
-            target=self._loop.run_forever, name="semantic-ingestion-loop", daemon=True
-        )
-        self._thread = threading.Thread(target=self._run, name="semantic-ingestion", daemon=True)
-        self._stop_event = threading.Event()
-        self._last_defer_log: float = 0.0
+        self._qdrant = qdrant
+        log.info("semantic_extractor_ready")
 
-    def _run_async[T](self, coro: Coroutine[object, object, T]) -> T:
-        if not self._loop.is_running() or self._stop_event.is_set():
-            coro.close()
-            from shared.errors import ServiceUnavailableError
-
-            raise ServiceUnavailableError("semantic ingestion loop is not running")
-        future = asyncio.run_coroutine_threadsafe(coro, self._loop)
-        try:
-            return future.result(timeout=config.settings.async_timeout)
-        except TimeoutError:
-            future.cancel()
-            raise
-
-    def start(self) -> None:
-        if not self._thread.is_alive():
-            self._loop_thread.start()
-            # Wait for the event loop to be running before starting the processing
-            # thread, preventing a race where the first queue item is processed
-            # before run_forever() has been called.
-            deadline = _time.monotonic() + 5.0
-            while not self._loop.is_running() and _time.monotonic() < deadline:
-                _time.sleep(0.005)
-            self._thread.start()
-        log.info("semantic_worker_started")
-
-    async def _cancel_all_and_close_client(self) -> None:
-        tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
-        for task in tasks:
-            task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
-        await self._qdrant.close()
-
-    def stop(self) -> None:
-        self._stop_event.set()
-        if self._thread.is_alive():
-            # Use config.settings.async_timeout as the join deadline so that a long LLM
-            # call inside _process_episode has time to finish before the event
-            # loop is torn down. If the thread doesn't finish in time, we still
-            # proceed so the agent shutdown doesn't hang indefinitely.
-            self._thread.join(timeout=float(config.settings.async_timeout))
-        if self._loop.is_running():
-            try:
-                self._run_async(self._cancel_all_and_close_client())
-            except Exception:
-                log.debug("semantic_worker_shutdown_error", exc_info=True)
-            self._loop.call_soon_threadsafe(self._loop.stop)
-        if self._loop_thread.is_alive():
-            self._loop_thread.join(timeout=5.0)
-
-    def enqueue(
+    async def process_episode(
         self,
         episode_uid: str,
         content: str,
         categories: tuple[SemanticCategory, ...] = (),
     ) -> None:
-        """Queue an episode for feature extraction. Empty categories = all."""
-        log.info("semantic_enqueue", episode_uid=episode_uid[:8], categories=len(categories) or "all", queue_depth=self._queue.qsize())
-        self._queue.put((episode_uid, content, categories))
-
-    def _run(self) -> None:
-        while not self._stop_event.is_set():
-            try:
-                first = self._queue.get(timeout=60.0)
-            except queue.Empty:
-                continue
-
-            batch = [first]
-            while len(batch) < 5:
-                try:
-                    batch.append(self._queue.get_nowait())
-                except queue.Empty:
-                    break
-
-            requeue: list[tuple[str, str, tuple[SemanticCategory, ...]]] = []
-            for item in batch:
-                episode_uid, content, categories = item
-                if interaction_in_progress():
-                    now = _time.monotonic()
-                    if now - self._last_defer_log > 30.0:
-                        log.debug(
-                            "semantic_worker_deferring",
-                            queued_count=self._queue.qsize() + len(requeue) + 1,
-                        )
-                        self._last_defer_log = now
-                    requeue.append(item)
-                else:
-                    try:
-                        self._process_episode(episode_uid, content, categories)
-                    except Exception:
-                        log.error("semantic_ingestion_failed_retry", episode_uid=episode_uid[:8], exc_info=True)
-                        _time.sleep(5.0)
-                        try:
-                            self._process_episode(episode_uid, content, categories)
-                        except Exception:
-                            log.error("semantic_ingestion_failed_dropped", episode_uid=episode_uid[:8], exc_info=True)
-                    _time.sleep(30.0)
-                self._queue.task_done()
-
-            for item in requeue:
-                self._queue.put(item)
-
-            if requeue:
-                _time.sleep(5.0)
-
-    def _process_episode(
-        self,
-        episode_uid: str,
-        content: str,
-        categories: tuple[SemanticCategory, ...],
-    ) -> None:
+        """Extract features from episode content for specified categories (or all)."""
         target_cats = list(categories) if categories else SEMANTIC_CATEGORIES
         for category in target_cats:
-            if self._stop_event.is_set():
-                log.debug("semantic_worker_stopping_mid_episode", category=category)
-                return
-            if interaction_in_progress():
-                log.debug(
-                    "semantic_worker_pausing_mid_episode",
-                    category=category,
-                )
-                self._queue.put(
-                    (episode_uid, content, tuple(target_cats[target_cats.index(category) :]))
-                )
-                return
             try:
-                self._extract_features(episode_uid, content, category)
+                await self._extract_features(episode_uid, content, category)
             except Exception:
                 log.error(
-                    "feature_extraction_episode_failed",
+                    "feature_extraction_failed",
                     episode_uid=episode_uid[:8],
                     category=category,
                     exc_info=True,
                 )
 
-    def _extract_features(self, episode_uid: str, content: str, category: SemanticCategory) -> None:
-        if self._stop_event.is_set():
-            return
-        if not llm_semaphore_idle():
-            log.debug(
-                "semantic_worker_llm_busy_requeue",
-                episode_uid=episode_uid[:8],
-                category=category,
-            )
-            remaining = SEMANTIC_CATEGORIES[SEMANTIC_CATEGORIES.index(category) :]
-            self._queue.put((episode_uid, content, tuple(remaining)))
-            return
-        existing = self._load_existing_features(category)
+    async def _extract_features(
+        self, episode_uid: str, content: str, category: SemanticCategory
+    ) -> None:
+        """Extract features for a single category."""
+        existing = await self._load_existing_features(category)
         tags = FEATURE_TAGS.get(category, "")
-        prompt = FEATURE_EXTRACTION_PROMPT.format(
-            category=category,
-            episode_content=content[:4000],
-            tags=tags,
-            existing_features=existing[:3000],
-        )
-
-        result = llm_call(
-            prompt=prompt,
+        result = await async_llm_call(
+            instructions=format_prompt(
+                FEATURE_EXTRACTION_PROMPT,
+                category=category,
+                episode_content=content,
+                tags=tags,
+                existing_features=existing,
+            ),
             response_model=FeatureExtractionResponse,
             fallback=FeatureExtractionResponse(),
             model=config.settings.structured_model,
         )
         if not result.success:
-            log.debug(
-                "feature_extraction_llm_failed",
-                error=(result.error or "")[:80],
-            )
+            log.debug("feature_extraction_llm_failed", error=(result.error or "")[:80])
             return
 
         response = result.value
 
-        seen_tags: dict[str, int] = {}
+        seen_keys: dict[tuple[str, str], int] = {}
         for i, cmd in enumerate(response.commands):
-            if cmd.tag:
-                seen_tags[cmd.tag] = i
-        if len(seen_tags) < len(response.commands):
-            response.commands = [response.commands[i] for i in sorted(seen_tags.values())]
+            key = (cmd.tag or "", cmd.feature or "")
+            if key in seen_keys:
+                continue
+            seen_keys[key] = i
+        if len(seen_keys) < len(response.commands):
+            dropped = len(response.commands) - len(seen_keys)
+            log.debug("feature_extraction_exact_dupes_removed", dropped=dropped)
+            response.commands = [response.commands[i] for i in sorted(seen_keys.values())]
 
         upsert_indices = [
             i
@@ -382,21 +248,26 @@ class SemanticIngestionWorker:
         batch_embeddings: list[list[float]] = []
         if upsert_texts:
             try:
-                batch_embeddings = self._embedder.embed_documents(upsert_texts)
+                batch_embeddings = await async_embed_documents(self._embedder, upsert_texts)
             except Exception:
                 log.warning(
                     "batch_embedding_failed",
                     feature_count=len(upsert_texts),
                     category=category,
+                    exc_info=True,
                 )
-        embedding_map: dict[int, list[float]] = {
-            idx: emb for idx, emb in zip(upsert_indices, batch_embeddings, strict=True)
-        }
+                return
+        embedding_map: dict[int, list[float]] = dict(
+            zip(upsert_indices, batch_embeddings, strict=True)
+        )
 
-        if self._stop_event.is_set():
-            return
         for i, cmd in enumerate(response.commands):
-            if cmd.command in {FeatureCommandType.ADD, FeatureCommandType.UPDATE}:
+            is_upsert = cmd.command in {FeatureCommandType.ADD, FeatureCommandType.UPDATE}
+            is_delete = cmd.command is FeatureCommandType.DELETE
+            if not (is_upsert or is_delete):
+                continue
+
+            if is_upsert:
                 log.info(
                     "feature_upsert",
                     category=category,
@@ -405,20 +276,17 @@ class SemanticIngestionWorker:
                     value=(cmd.value or "")[:80],
                     confidence=cmd.confidence,
                 )
-            elif cmd.command is FeatureCommandType.DELETE:
-                if not cmd.reason.strip():
-                    continue
+            else:
                 log.info(
                     "feature_delete",
                     category=category,
                     tag=cmd.tag,
                     feature=cmd.feature,
-                    reason=cmd.reason[:80],
+                    reason=(cmd.reason or "")[:80],
                 )
-            else:
-                continue
+
             embedding = embedding_map.get(i, [])
-            if cmd.command in {FeatureCommandType.ADD, FeatureCommandType.UPDATE} and not embedding:
+            if is_upsert and not embedding:
                 log.warning(
                     "embedding_missing_for_feature",
                     category=category,
@@ -426,32 +294,29 @@ class SemanticIngestionWorker:
                     feature=cmd.feature,
                 )
                 continue
+
             try:
-                self._run_async(self._persist_command_async(episode_uid, category, cmd, embedding))
+                await self._persist_command(episode_uid, category, cmd, embedding)
             except Exception:
-                if self._stop_event.is_set():
-                    log.debug("feature_persist_skipped", episode=episode_uid[:8])
-                else:
-                    log.warning(
-                        "feature_persist_failed",
-                        episode=episode_uid[:8],
-                        category=category,
-                        tag=cmd.tag,
-                        feature=cmd.feature,
-                        exc_info=True,
-                    )
+                log.warning(
+                    "feature_persist_failed",
+                    episode=episode_uid[:8],
+                    category=category,
+                    exc_info=True,
+                )
 
-        try:
-            self._consolidate_features(category)
-        except Exception:
-            if self._stop_event.is_set():
-                log.debug("consolidation_skipped", category=category)
-            else:
-                log.warning("consolidation_failed", category=category, exc_info=True)
+        if upsert_indices:
+            feature_count = await self._count_features(category)
+            if feature_count > CONSOLIDATION_THRESHOLD:
+                try:
+                    await self._consolidate_features(category)
+                except Exception:
+                    log.warning("consolidation_failed", category=category, exc_info=True)
 
-    def _load_existing_features(self, category: SemanticCategory) -> str:
+    async def _load_existing_features(self, category: SemanticCategory) -> str:
+        """Load existing features for context in extraction prompt."""
         try:
-            rows = self._run_async(self._load_feature_rows_async(category, limit=30))
+            rows = await self._load_feature_rows(category, limit=30)
         except Exception:
             log.debug("semantic_features_load_failed", exc_info=True)
             return "None yet"
@@ -462,51 +327,67 @@ class SemanticIngestionWorker:
             for row in rows
         )
 
-    def _consolidate_features(self, category: SemanticCategory) -> None:
-        features = self._run_async(self._load_feature_rows_async(category, limit=40))
+    async def _count_features(self, category: SemanticCategory) -> int:
+        """Count features in category for lazy consolidation check."""
+        try:
+            result = await self._qdrant.count(
+                collection_name=Collection.SEMANTIC_FEATURES,
+                count_filter=Filter(
+                    must=[FieldCondition(key="category", match=MatchValue(value=category))]
+                ),
+            )
+            return result.count
+        except Exception:
+            log.warning("count_features_failed", category=category, exc_info=True)
+            return 0
+
+    async def _consolidate_features(self, category: SemanticCategory) -> None:
+        """Consolidate duplicate/overlapping features via LLM."""
+        features = await self._load_feature_rows(category, limit=40)
         if len(features) < 2:
             return
-        log.debug(
-            "consolidating_semantic_features",
-            feature_count=len(features),
-            category=category,
-        )
+
+        log.debug("consolidating_semantic_features", feature_count=len(features), category=category)
         features_text = "\n".join(
             f"[{f.uid[:8]}] [{f.tag}] {f.feature_name}: {f.value} (conf={f.confidence:.2f})"
             for f in features
         )
-        result = llm_call(
-            prompt=FEATURE_CONSOLIDATION_PROMPT.format(category=category, features=features_text),
+        result = await async_llm_call(
+            instructions=format_prompt(
+                FEATURE_CONSOLIDATION_PROMPT, category=category, features=features_text
+            ),
             response_model=FeatureConsolidationResponse,
             fallback=FeatureConsolidationResponse(),
             model=config.settings.structured_model,
         )
         if not result.success:
-            log.debug(
-                "feature_consolidation_llm_failed",
-                error=(result.error or "")[:80],
-            )
+            log.debug("feature_consolidation_llm_failed", error=(result.error or "")[:80])
             return
+
         response = result.value
         if response.consolidation_decision is FeatureConsolidationDecision.SKIP:
+            log.debug("consolidation_skipped", reasoning=response.reasoning[:120])
             return
-        feature_uids = {f.uid for f in features}
-        for action in response.actions:
-            source_uid = action.source_uid
-            target_uid = action.target_uid
-            if (
-                not source_uid
-                or not target_uid
-                or source_uid == target_uid
-                or source_uid not in feature_uids
-                or target_uid not in feature_uids
-            ):
-                continue
-            self._run_async(self._merge_features_async(category, source_uid, target_uid, action))
 
-    async def _load_feature_rows_async(
+        log.info(
+            "consolidation_started",
+            action_count=len(response.actions),
+            reasoning=response.reasoning[:120],
+        )
+        prefix_to_uid = {f.uid[:8]: f.uid for f in features}
+        for action in response.actions:
+            src = prefix_to_uid.get(action.source_uid, action.source_uid)
+            tgt = prefix_to_uid.get(action.target_uid, action.target_uid)
+            if not src or not tgt or src == tgt:
+                continue
+            if src not in prefix_to_uid.values() or tgt not in prefix_to_uid.values():
+                continue
+            await self._merge_features(category, src, tgt, action)
+
+    async def _load_feature_rows(
         self, category: SemanticCategory, limit: int
     ) -> list[SemanticFeatureRow]:
+        """Load feature rows from Qdrant."""
         results, _ = await self._qdrant.scroll(
             collection_name=Collection.SEMANTIC_FEATURES,
             scroll_filter=Filter(
@@ -527,22 +408,20 @@ class SemanticIngestionWorker:
                     tag=str(p.get("tag", "")),
                     feature_name=str(p.get("feature_name", "")),
                     value=str(p.get("value", "")),
-                    confidence=float(p.get("confidence", 0.0)),
-                    citations=list(p.get("episode_citations", []))
-                    if p.get("episode_citations")
-                    else [],
+                    confidence=float(p.get("confidence") or 0.0),
                 )
             )
         rows.sort(key=lambda r: -r.confidence)
         return rows
 
-    async def _merge_features_async(
+    async def _merge_features(
         self,
         category: SemanticCategory,
         source_uid: str,
         target_uid: str,
         action: FeatureConsolidationAction,
     ) -> None:
+        """Merge source feature into target."""
         results, _ = await self._qdrant.scroll(
             collection_name=Collection.SEMANTIC_FEATURES,
             scroll_filter=Filter(
@@ -555,21 +434,56 @@ class SemanticIngestionWorker:
             with_payload=True,
         )
         if not results:
+            log.warning(
+                "merge_target_missing", target_uid=target_uid[:8], source_uid=source_uid[:8]
+            )
             return
+
         target = results[0].payload or {}
-        citations = list(target.get("episode_citations", []))
-        confidence = float(target.get("confidence", 0.5))
-        await self._qdrant.set_payload(
+        new_value = action.canonical_value or str(target.get("value", ""))
+
+        raw_target_cit = target.get("episode_citations")
+        target_citations: list[object] = raw_target_cit if isinstance(raw_target_cit, list) else []
+
+        source_results, _ = await self._qdrant.scroll(
             collection_name=Collection.SEMANTIC_FEATURES,
-            payload={
-                "tag": action.canonical_tag or target.get("tag", ""),
-                "feature_name": action.canonical_feature or target.get("feature_name", ""),
-                "value": action.canonical_value or target.get("value", ""),
-                "confidence": confidence,
-                "episode_citations": citations,
-                "updated_at": datetime.now(UTC).isoformat(),
-            },
-            points=[target_uid],
+            scroll_filter=Filter(
+                must=[
+                    FieldCondition(key="category", match=MatchValue(value=category)),
+                    FieldCondition(key="uid", match=MatchValue(value=source_uid)),
+                ]
+            ),
+            limit=1,
+            with_payload=True,
+        )
+        source_citations: list[object] = []
+        if source_results and source_results[0].payload:
+            raw_src_cit = source_results[0].payload.get("episode_citations")
+            if isinstance(raw_src_cit, list):
+                source_citations = raw_src_cit
+
+        merged_citations = list(dict.fromkeys([*target_citations, *source_citations]))[
+            -_MAX_CITATIONS:
+        ]
+
+        new_payload = {
+            "tag": action.canonical_tag or target.get("tag", ""),
+            "feature_name": action.canonical_feature or target.get("feature_name", ""),
+            "value": new_value,
+            "confidence": float(target.get("confidence") or 0.5),
+            "episode_citations": merged_citations,
+            "updated_at": datetime.now(UTC).isoformat(),
+        }
+        new_embedding = (await async_embed_documents(self._embedder, [new_value]))[0]
+        await self._qdrant.upsert(
+            collection_name=Collection.SEMANTIC_FEATURES,
+            points=[
+                PointStruct(
+                    id=target_uid,
+                    vector={DENSE_VECTOR: new_embedding},
+                    payload={**target, **new_payload},
+                )
+            ],
         )
         await self._qdrant.delete(
             collection_name=Collection.SEMANTIC_FEATURES,
@@ -584,13 +498,14 @@ class SemanticIngestionWorker:
             reason=action.reason[:80],
         )
 
-    async def _persist_command_async(
+    async def _persist_command(
         self,
         episode_uid: str,
         category: SemanticCategory,
         cmd: FeatureCommand,
         embedding: list[float],
     ) -> None:
+        """Persist a feature command to Qdrant."""
         seed = f"semantic:{category}:{cmd.tag.strip().lower()}:{cmd.feature.strip().lower()}"
         feature_uid = deterministic_id(seed)
         now = datetime.now(UTC).isoformat()
@@ -605,10 +520,12 @@ class SemanticIngestionWorker:
                 with_payload=True,
             )
             citations = [episode_uid]
+            created_at = now
             if existing and existing[0].payload:
                 old_citations = existing[0].payload.get("episode_citations", [])
                 if isinstance(old_citations, list):
-                    citations = list(dict.fromkeys([*old_citations, episode_uid]))
+                    citations = list(dict.fromkeys([*old_citations, episode_uid]))[-_MAX_CITATIONS:]
+                created_at = existing[0].payload.get("created_at", now)
 
             point = PointStruct(
                 id=feature_uid,
@@ -621,7 +538,7 @@ class SemanticIngestionWorker:
                     "value": cmd.value,
                     "episode_citations": citations,
                     "confidence": max(0.0, min(1.0, cmd.confidence)),
-                    "created_at": now,
+                    "created_at": created_at,
                     "updated_at": now,
                 },
             )

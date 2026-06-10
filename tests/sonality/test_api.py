@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Generator
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -10,28 +11,24 @@ from fastapi.testclient import TestClient
 
 import sonality.api as _api_mod
 from sonality.api import _agent_store, app
-from sonality.ess import (
-    ESSResult,
-    KnowledgeDensity,
-    OpinionDirection,
-    ReasoningType,
-    SourceReliability,
-    UrgencyLevel,
-)
+from sonality.ess import CredibilitySignals, ESSResult
 from sonality.memory.graph import BeliefNode
 
 
-def _make_ess(**kwargs: object) -> ESSResult:
-    defaults: dict[str, object] = {
+def _make_ess(**kwargs: Any) -> ESSResult:
+    defaults: dict[str, Any] = {
         "score": 0.55,
-        "reasoning_type": ReasoningType.EMPIRICAL_DATA,
-        "source_reliability": SourceReliability.UNVERIFIED_CLAIM,
+        "signals": CredibilitySignals(
+            specificity=0.6,
+            grounding=0.5,
+            rigor=0.4,
+            source_quality=0.3,
+            objectivity=0.7,
+        ),
         "topics": ("climate", "energy"),
         "summary": "User asserts that renewable energy reduces emissions.",
-        "opinion_direction": OpinionDirection.SUPPORTS,
-        "knowledge_density": KnowledgeDensity.MODERATE,
         "belief_update_recommended": True,
-        "urgency": UrgencyLevel.STANDARD,
+        "urgency": 0.5,
     }
     defaults.update(kwargs)
     return ESSResult(**defaults)
@@ -43,8 +40,12 @@ def mock_agent() -> MagicMock:
     ess = _make_ess()
     beliefs = [
         BeliefNode(
-            topic="climate", valence=0.4, confidence=0.7,
-            uncertainty=0.3, evidence_count=3, belief_text="Position on climate",
+            topic="climate",
+            valence=0.4,
+            confidence=0.7,
+            uncertainty=0.3,
+            evidence_count=3,
+            belief_text="Position on climate",
         )
     ]
     agent.respond.return_value = "Renewable energy does reduce emissions."
@@ -53,15 +54,19 @@ def mock_agent() -> MagicMock:
     agent.get_all_beliefs.return_value = beliefs
     agent.get_belief.side_effect = lambda t: beliefs[0] if t == "climate" else None
     agent.get_health.return_value = (1, 5)
+    agent.check_dependencies.return_value = {"neo4j": "ok", "qdrant": "ok"}
     return agent
 
 
 @pytest.fixture
-def client(mock_agent: MagicMock) -> Generator[TestClient, None, None]:
+def client(
+    mock_agent: MagicMock, monkeypatch: pytest.MonkeyPatch
+) -> Generator[TestClient, None, None]:
     import asyncio
 
     _agent_store["agent"] = mock_agent
     _api_mod._ingest_queue = asyncio.Queue(maxsize=256)
+    monkeypatch.setattr(_api_mod, "http_dependency_status", lambda *_args, **_kwargs: "ok")
     yield TestClient(app, raise_server_exceptions=True)
     _api_mod._ingest_queue = None
     _agent_store.pop("agent", None)

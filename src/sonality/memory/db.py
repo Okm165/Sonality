@@ -17,7 +17,7 @@ from shared.neo4j import connect as neo4j_connect
 from .. import config
 from ..schema import NEO4J_SCHEMA_STATEMENTS, init_qdrant_collections
 
-log = structlog.get_logger()
+log = structlog.get_logger(__name__)
 
 
 @dataclass
@@ -28,8 +28,13 @@ class DatabaseConnections:
     qdrant: AsyncQdrantClient = field(init=False)
 
     @classmethod
-    async def create(cls) -> DatabaseConnections:
-        """Create and verify all database connections."""
+    async def create(cls, *, embedding_dims: int = 0) -> DatabaseConnections:
+        """Create and verify all database connections.
+
+        Args:
+            embedding_dims: Actual embedding dimensions (from server probe).
+                When 0, falls back to config.settings.embedding_dimensions.
+        """
         self = cls()
         self.neo4j_driver = await neo4j_connect(
             config.settings.neo4j_url,
@@ -43,14 +48,22 @@ class DatabaseConnections:
 
         log.info("qdrant_connecting", url=config.settings.qdrant_url)
         self.qdrant = AsyncQdrantClient(url=config.settings.qdrant_url)
-        await init_qdrant_collections(self.qdrant)
-        log.info("qdrant_ready")
+        await init_qdrant_collections(self.qdrant, dims=embedding_dims)
+        log.info("qdrant_ready", dims=embedding_dims or config.settings.embedding_dimensions)
 
         return self
 
     async def close(self) -> None:
         """Gracefully close all connections."""
         log.info("db_closing")
-        await self.neo4j_driver.close()
-        await self.qdrant.close()
+        if hasattr(self, "neo4j_driver"):
+            try:
+                await self.neo4j_driver.close()
+            except Exception:
+                log.warning("neo4j_close_failed", exc_info=True)
+        if hasattr(self, "qdrant"):
+            try:
+                await self.qdrant.close()
+            except Exception:
+                log.warning("qdrant_close_failed", exc_info=True)
         log.info("db_closed")
