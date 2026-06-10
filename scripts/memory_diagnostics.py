@@ -13,11 +13,13 @@ import asyncio
 import logging
 import sys
 from dataclasses import dataclass, field
+from typing import cast
 
-from neo4j import AsyncGraphDatabase
+from neo4j._typing import LiteralString
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.models import FieldCondition, Filter, MatchValue
 
+from neo4j import AsyncGraphDatabase
 from sonality import config
 from sonality.schema import Collection
 
@@ -27,8 +29,8 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
 @dataclass
 class DiagnosticsReport:
+    """Aggregate health metrics from Neo4j + Qdrant. Unhealthy if issues is non-empty."""
     neo4j_episodes: int = 0
-    neo4j_derivatives: int = 0
     neo4j_segments: int = 0
     neo4j_topics: int = 0
     neo4j_beliefs: int = 0
@@ -55,29 +57,33 @@ class DiagnosticsReport:
 
 
 async def run_diagnostics() -> DiagnosticsReport:
+    """Run all diagnostic checks and return a populated report.
+
+    Connects to Neo4j and Qdrant, checks node counts, structural integrity
+    (temporal chains, segments), cross-store consistency, and payload completeness.
+    """
     report = DiagnosticsReport()
     driver = AsyncGraphDatabase.driver(
-        config.NEO4J_URL,
-        auth=(config.NEO4J_USER, config.NEO4J_PASSWORD),
+        config.settings.neo4j_url,
+        auth=(config.settings.neo4j_user, config.settings.neo4j_password),
     )
-    qdrant = AsyncQdrantClient(url=config.QDRANT_URL)
+    qdrant = AsyncQdrantClient(url=config.settings.qdrant_url)
 
     try:
         # ── Neo4j counts ────────────────────────────────────────────────
-        async with driver.session(database=config.NEO4J_DATABASE) as session:
+        async with driver.session(database=config.settings.neo4j_database) as session:
             for label, attr in [
                 ("Episode", "neo4j_episodes"),
-                ("Derivative", "neo4j_derivatives"),
                 ("Segment", "neo4j_segments"),
                 ("Topic", "neo4j_topics"),
                 ("Belief", "neo4j_beliefs"),
             ]:
-                result = await session.run(f"MATCH (n:{label}) RETURN count(n) AS cnt")
+                result = await session.run(cast(LiteralString, f"MATCH (n:{label}) RETURN count(n) AS cnt"))
                 record = await result.single()
                 setattr(report, attr, record["cnt"] if record else 0)
 
         # ── Neo4j structural checks ──────────────────────────────────────
-        async with driver.session(database=config.NEO4J_DATABASE) as session:
+        async with driver.session(database=config.settings.neo4j_database) as session:
             # Temporal chain gaps: episodes with no TEMPORAL_NEXT edge AND not the latest
             # (episodes that have a successor in time but the edge is missing)
             result = await session.run("""
@@ -176,7 +182,7 @@ async def run_diagnostics() -> DiagnosticsReport:
                 if p.payload and p.payload.get("episode_uid")
             }
 
-            async with driver.session(database=config.NEO4J_DATABASE) as session:
+            async with driver.session(database=config.settings.neo4j_database) as session:
                 result = await session.run("MATCH (e:Episode) RETURN e.uid AS uid")
                 neo4j_episode_uids = {record["uid"] async for record in result}
 
@@ -189,9 +195,6 @@ async def run_diagnostics() -> DiagnosticsReport:
                 log.warning(msg)
 
         # ── Structural health checks ────────────────────────────────────
-        if report.neo4j_episodes > 0 and report.neo4j_derivatives == 0:
-            report.issues.append("Episodes exist in Neo4j but no derivatives — broken storage")
-
         active_ratio = (
             report.qdrant_derivatives_active / max(report.qdrant_derivatives_total, 1)
             if report.qdrant_derivatives_total > 0
@@ -200,17 +203,6 @@ async def run_diagnostics() -> DiagnosticsReport:
         if active_ratio < 0.5:
             report.warnings.append(
                 f"High archive ratio: {1 - active_ratio:.0%} of Qdrant derivatives are archived"
-            )
-
-        if report.neo4j_episodes > 0:
-            avg_derivs = report.neo4j_derivatives / report.neo4j_episodes
-            if avg_derivs < 1.0:
-                report.issues.append(
-                    f"Low derivative density: {avg_derivs:.1f} derivatives/episode (expected ≥ 1)"
-                )
-            elif avg_derivs > 50:
-                report.warnings.append(
-                    f"High derivative density: {avg_derivs:.1f} derivatives/episode"
                 )
 
         if report.temporal_chain_gaps > 0:
@@ -256,7 +248,6 @@ def _print_report(report: DiagnosticsReport) -> None:
     print()
     print("Neo4j:")
     print(f"  Episodes:    {report.neo4j_episodes}")
-    print(f"  Derivatives: {report.neo4j_derivatives}")
     print(f"  Segments:    {report.neo4j_segments}")
     print(f"  Topics:      {report.neo4j_topics}")
     print(f"  Beliefs:     {report.neo4j_beliefs}")
