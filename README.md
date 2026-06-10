@@ -1,131 +1,112 @@
 # Sonality
 
-LLM agent with a self-evolving personality via the **Sponge architecture** — a ~500-token natural-language narrative that absorbs every conversation, modulated by an Evidence Strength Score (ESS) that gates personality updates by argument quality.
+A multi-agent system for building LLM personalities that evolve through evidence-gated belief revision. Sonality maintains a mutable personality narrative in external memory, updated only when users present sufficiently strong arguments. The result is coherent personality evolution rather than random drift, sycophantic agreement, or noise absorption.
 
-Strong logical arguments shift the agent's views. Casual chat, social pressure, and bare assertions are filtered out. Established beliefs resist change proportionally to their evidence base. Unreinforced beliefs decay over time. The result: coherent personality evolution, not random drift.
+Architecture decisions grounded in 200+ academic references spanning AGM belief revision, anti-sycophancy research, and memory-augmented generation.
 
-Architecture decisions grounded in 200+ academic references.
+```mermaid
+flowchart LR
+    subgraph clients ["Clients"]
+        CLI["Terminal"]
+        API["HTTP API"]
+        TG["Telegram"]
+        Voice["Voice"]
+    end
+
+    subgraph core ["Core"]
+        Sonality["Sonality<br/>Personality Engine"]
+        Fathom["Fathom<br/>Web Research"]
+    end
+
+    subgraph storage ["Storage"]
+        Neo4j["Neo4j"]
+        Qdrant["Qdrant"]
+    end
+
+    CLI --> Sonality
+    API --> Sonality
+    TG --> API
+    Voice --> API
+    Sonality --> Fathom
+    Sonality --> Neo4j
+    Sonality --> Qdrant
+    Fathom --> Neo4j
+    Fathom --> Qdrant
+```
+
+## Core Idea
+
+Standard LLM deployments have no persistent personality. Each conversation starts from zero. Systems that attempt persistence through naive memory concatenation drift randomly — absorbing noise from casual remarks as readily as from peer-reviewed evidence.
+
+Sonality solves this with the **Sponge architecture**: a ~500-token mutable personality narrative backed by structured belief vectors in Neo4j. Every user message is scored by the **Evidence Strength Score (ESS)** classifier before it can influence beliefs. Strong logical arguments shift views. Social pressure, emotional appeals, and debunked claims are filtered out. Established beliefs resist change proportionally to their evidence base.
 
 ## How It Works
 
 ```mermaid
-flowchart TD
-    USER["User message"] --> CTX["Context assembly"]
-
-    subgraph PROMPT["System prompt bundle"]
-        ID["Core identity (immutable)"]
-        SNAP["Personality snapshot (~500 tokens, mutable)"]
-        TRAITS["Structured traits and opinions"]
-        MEM["Retrieved memory context (Neo4j + Qdrant)"]
-    end
-
-    CTX --> GEN["LLM response generation"]
-    ID --> GEN
-    SNAP --> GEN
-    TRAITS --> GEN
-    MEM --> GEN
-    GEN --> RESP["Assistant response"]
-    RESP --> POST["Post-processing"]
-    POST --> ESS["ESS classification"]
-    ESS -->|ESS payload reliable| UPDATE["Opinion update and insight extraction"]
-    ESS -->|ESS payload defaulted| TRACK["Topic tracking only"]
-    UPDATE --> REFLECT{"Reflection due?"}
-    TRACK --> SAVE["Persist sponge state"]
-    REFLECT -->|yes| CONSOLIDATE["Consolidate and decay"]
-    REFLECT -->|no| SAVE
-    CONSOLIDATE --> SAVE
-```
-
-Every interaction runs **7–12 LLM calls** (5–8 synchronous, 2–4 async background):
-
-**Synchronous (blocks response):**
-1. **Query routing** — classifies query (SIMPLE/TEMPORAL/MULTI_ENTITY/AGGREGATION/BELIEF_QUERY/NONE) to select optimal retrieval strategy
-2. **Listwise reranking** — LLM reorders retrieved episodes by semantic relevance to query
-3. **Response generation** — core identity + personality snapshot + structured traits + retrieved memory context → response
-4. **ESS classification** — evaluates *user's* argument quality (0.0–1.0); third-person framing of the agent's response prevents self-judge sycophancy bias
-5. **Segment boundary detection** — event-driven detection of topic/goal shifts that triggers episode segmentation
-
-Conditionally (when ESS reliability gates pass):
-
-6. **Belief provenance update** — per-topic LLM assessment with AGM-style contraction handling (1–4 calls based on active topics)
-7. **Insight extraction** — one-sentence personality observation extracted when evidence quality is reliable
-
-**Async background (non-blocking):**
-8. **Episodic memory storage** — LLM semantic chunking (typically 5–12 chunks per episode) + Ollama embedding for Qdrant storage
-9. **Semantic feature extraction** — LLM extracts persistent personality features across 4 categories (personality, preferences, knowledge, relationships); consolidates near-duplicates
-10. **STM segment consolidation** — background worker periodically summarizes and consolidates episode segments
-
-**Key implementation details:**
-- **Structured LLM calls** (ESS classification, routing, retrieval, extraction) use `enable_thinking=False` because thinking mode is incompatible with JSON prefill and hurts structured-output accuracy. The **main chat response** also uses `enable_thinking=False` to prevent deliberation markers leaking into user-visible output; reasoning quality is preserved by the model's training rather than explicit chain-of-thought. Background tasks that already use a system JSON prompt (`llm_call`) always disable thinking for the same reason.
-- A `threading.Semaphore(1)` serializes all LLM HTTP calls to prevent overwhelming single-threaded local inference servers.
-- `SemanticIngestionWorker` runs on its own dedicated `asyncio` event loop in a background thread with its own async Qdrant client, eliminating cross-loop contention. Embeddings are computed synchronously in the worker thread before submitting the DB write to the async path.
-- **Per-reasoning-type magnitude caps** (aligned with AGM minimal change principle): empirical_data ≤ 0.20, expert_opinion ≤ 0.14, logical_argument ≤ 0.10, anecdotal ≤ 0.06, debunked_claim = 0.0, social_pressure ≤ 0.02 per update. Prevents a single high-ESS turn from jumping opinion vectors by 0.8+.
-- **`debunked_claim` ESS category**: conclusively-refuted conspiracy theories (Climategate, vaccine-autism fabrication, moon landing, etc.) are classified as `debunked_claim` (score ≈ 0.0–0.07) rather than `anecdotal`. They freeze sponge mutation (staged updates not committed, insight extraction skipped) and have zero belief update magnitude. Backed by FactCheck.org, RefuteClaim (ACL 2024), and HKS Misinformation Review.
-- **Manipulative reasoning type filter**: messages classified as `social_pressure`, `emotional_appeal`, `debunked_claim`, or `anecdotal` trigger a sponge freeze — staged updates are not committed, insight extraction and reflection are skipped. Knowledge extraction still runs to capture factual claims, but opinion-type propositions are not staged as belief updates (only fact/speculation propositions are stored). This prevents coercive rhetoric or emotional appeals from shifting belief vectors while still learning facts stated within those turns.
-- **ESS minimum threshold (0.25)**: even for non-manipulative reasoning types, belief updates require ESS score ≥ 0.25. This filters out borderline `logical_argument` (typically ~0.22) while allowing `empirical_data` (typically 0.45–0.85). Combined with the manipulative filter, ensures only substantive evidence can update beliefs.
-- **Bayesian confidence floor**: belief confidence cannot stay at zero as evidence accumulates. After 2 consistent updates: uncertainty ≤ 0.50. After 3+: uncertainty ≤ 0.30. Applied at both belief creation (when `evidence_increment >= 2` from staged updates) and on each update in the `else` branch. The LLM-assessed `new_uncertainty` from the belief provenance evaluation is threaded through `StagedOpinionUpdate` → `apply_due_staged_updates` → `update_opinion`, so the Bayesian floor is applied after (not instead of) the LLM's own uncertainty estimate. Prevents oscillation caused by the belief update LLM returning `new_uncertainty=1.0` indefinitely despite multiple supporting episodes.
-- **Semantic feature tag validation**: each category has a fixed set of valid tags (e.g. `personality` → Communication Style, Values, Behavioral Traits, Temperament, Cognitive Style). LLM is told these in the extraction prompt, preventing cross-category tag contamination.
-- **Contradiction-only feature deletion**: semantic features are never deleted due to topic shifts, empathetic language, or paraphrased recalls of previous discussions. The extraction prompt mandates a direct new assertive counter-claim in the `reason` field; the runtime guard skips any DELETE command with `reason=""`. When ESS type is manipulative (emotional_appeal, social_pressure, etc.) the extraction prompt explicitly prohibits DELETE commands. This prevents personality erosion when users switch topics or the agent expresses empathy. Research-backed: FadeMem (2025), MemGPT, and PersonaAgent all show that topic silence ≠ trait contradiction.
-- **Hybrid BM25+vector retrieval**: derivative search uses RRF (Reciprocal Rank Fusion) of dense vector cosine similarity and sparse BM25 text search via Qdrant's built-in text indexing. This improves recall on exact-term queries (specific study names, statistics) where pure semantic search underperforms. Formula: `RRF(d) = Σ 1/(60 + rank_r(d))`, fusing vector and text ranked lists server-side.
-
-Periodically (every ~20 interactions): **reflection** — consolidates accumulated insights into the personality narrative, decays unreinforced beliefs, validates snapshot integrity.
-
-## One Interaction Timeline
-
-```mermaid
 sequenceDiagram
     participant U as User
-    participant A as Sonality agent
-    participant L as Reasoning LLM
-    participant E as ESS classifier
-    participant M as Sponge memory
+    participant A as Sonality Agent
+    participant L as LLM
+    participant E as ESS Classifier
+    participant M as Memory (Neo4j + Qdrant)
 
     U->>A: Message
-    A->>L: Generate response from identity + snapshot + memory
-    L-->>A: Response draft
-    A->>E: Classify user evidence quality
-    E-->>A: ESS score and labels
-    alt ESS > threshold
-        A->>M: Update beliefs and extract insight
-    else ESS <= threshold
+    A->>M: Load identity (snapshot + beliefs)
+    A->>L: Generate response (identity + memory context)
+    L-->>A: Response
+    A->>E: Classify user argument quality
+    E-->>A: Score + reasoning type
+    alt ESS passes (strong evidence)
+        A->>M: Update beliefs + extract insights
+    else ESS fails (weak/manipulative)
         A->>M: Track topic engagement only
     end
-    A-->>U: Final response
+    A-->>U: Response
 ```
 
-## Benchmark Evaluation Flow
+Every interaction runs through:
 
-```mermaid
-flowchart LR
-    PACKS["Scenario packs"] --> RUNNER["Scenario runner"]
-    RUNNER --> STEPS["StepResult stream"]
-    STEPS --> CONTRACTS["Contract checks"]
-    CONTRACTS --> GATES["Metric gates and confidence intervals"]
-    GATES --> DECISION["Release decision"]
-    STEPS --> TRACES["JSONL traces"]
-    TRACES --> HEALTH["Health summary"]
-    TRACES --> RISK["Risk events"]
-    GATES --> SUMMARY["run_summary.json"]
-```
+1. **Identity loading** — Personality snapshot and beliefs loaded from Neo4j (stateless per-request)
+2. **Agentic loop** — Two-phase state machine (THINKING/ACTING) with three tools: memory recall, web research, knowledge integration
+3. **ESS classification** — User argument quality scored 0.0–1.0 with reasoning type detection
+4. **Gated updates** — Only messages passing ESS threshold and non-manipulative type filter can modify beliefs
+5. **Async bookkeeping** — Belief provenance, semantic features, knowledge extraction, forgetting
 
-When reading benchmark output, start with:
+## Key Mechanisms
 
-1. `run_summary.json` — gate outcomes, confidence intervals, blockers
-2. `risk_event_trace.jsonl` — concrete hard-failure reasons
-3. `health_summary_report.json` — pack-level health rollup
-4. Pack trace files (`*_trace.jsonl`) — turn-level forensic detail
+**Evidence Strength Score (ESS)** — Classifies each user message for argument quality across five credibility signals (specificity, grounding, rigor, source quality, objectivity). The agent's response is excluded from the evaluation prompt entirely, eliminating self-judge sycophancy bias through structural separation rather than prompt engineering.
 
-Decision semantics:
+**Belief revision** — AGM-aligned (minimal change, evidence-proportional updates, proper contraction). Per-reasoning-type magnitude caps: `empirical_data` ≤ 0.20, `logical_argument` ≤ 0.10, `anecdotal` ≤ 0.06. Provenance edges in Neo4j track which episodes formed which beliefs.
 
-| Decision | Meaning | Typical next step |
-|---|---|---|
-| `pass` | Hard gates passed with no blockers | Candidate for release |
-| `pass_with_warnings` | Hard gates passed but soft blockers remain (for example budget or uncertainty-width warnings) | Review warnings and rerun targeted packs |
-| `fail` | At least one hard gate failed | Investigate `risk_event_trace.jsonl`, fix, rerun |
+**Dual-store memory** — Neo4j (graph relationships, temporal chains, belief provenance) + Qdrant (dense vector retrieval over semantic chunks). Episodes are decomposed into 1–15 derivative chunks for fine-grained retrieval.
+
+**Retrieval pipeline** — LLM-routed query classification → multi-pass vector search → temporal expansion → listwise reranking. Five retrieval strategies (SIMPLE, TEMPORAL, AGGREGATION, BELIEF_QUERY, NONE) selected per query.
+
+**Fathom web research** — Autonomous research engine with zero-heuristic design. Probabilistic URL selection via softmax over embedding + domain productivity scores. Progressive document composition with source tracking.
+
+**Forgetting engine** — LLM-assessed batch decisions (KEEP/ARCHIVE/FORGET) prevent unbounded memory growth. High-ESS, frequently-accessed episodes are protected.
+
+## Technical Contributions
+
+From a computer science perspective, Sonality combines several techniques in a novel composition:
+
+**LLM-assessed belief revision.** Rather than implementing AGM axiomatically with formal logic, the system uses structured LLM calls to achieve AGM-aligned behavior (minimal change, proper contraction, evidence proportionality). This bridges formal epistemology with practical LLM deployment — the model acts as both the reasoning engine and the belief revision operator.
+
+**Mandatory tool consolidation.** The agentic loop's two-phase design (THINKING/ACTING) with mandatory output consolidation solves the "context explosion" problem in tool-using agents. Raw tool outputs (potentially thousands of tokens) never accumulate in the context window; each is distilled into concise LTM/STM entries before the next thinking phase. This enables operation within 4K–8K context windows.
+
+**Emergent loop termination.** The automaton has no explicit "DONE" signal. The consolidation schema intentionally omits decision fields — completion emerges from STM content guiding the next thinking phase toward a text response. A stall counter with forced synthesis provides a convergence safety net.
+
+**Proportional context compression.** `compose_guarded` splits context into immutable scaffolding (never compressed) and dynamic inputs (compressed proportionally to their share of total size when over budget). Each input message gets a budget proportional to its character count, preserving information density where it matters most.
+
+**Deterministic idempotent memory writes.** Knowledge propositions, derivative chunks, and semantic features use `uuid5` (SHA-1 namespace hashing) for ID generation. Given identical input content, the same ID is produced — enabling safe reprocessing without duplicate creation.
+
+**Hybrid exploration-exploitation in information retrieval.** Fathom's softmax-temperature sampling over RRF-fused ranking scores balances known-good sources (exploitation) against novel domains (exploration), with the temperature dynamically controlled by the LLM based on research progress.
+
+**Quantized-model normalization pipeline.** The 49-test output parsing system enables reliable structured extraction from models at extreme quantization levels (IQ2_M, ~2 bits/weight) by normalizing common artifacts: pipe-separated enums, type placeholders, trailing ellipsis, template copies, and malformed JSON.
 
 ## Quick Start
 
-**With a cloud provider:**
+**Cloud LLM provider:**
 
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -134,409 +115,106 @@ cp .env.example .env   # set SONALITY_BASE_URL + SONALITY_API_KEY
 make run
 ```
 
-**With a local setup (Ollama for embeddings, local LLM endpoint):**
+**Full local stack (llama.cpp + databases):**
 
 ```bash
-# Start databases
+cp .env.example .env
+docker compose up -d
+```
+
+**Hybrid (local databases + cloud LLM):**
+
+```bash
+cp .env.example .env   # set cloud provider credentials
 docker compose up -d neo4j qdrant
-
-# Pull embedding model into your local Ollama
-ollama pull nomic-embed-text
-
-# Configure .env for local endpoints
-cat > .env << 'EOF'
-SONALITY_BASE_URL=http://localhost:11434/v1   # or your local LLM server
-SONALITY_API_KEY=
-SONALITY_MODEL=your-local-model-name
-SONALITY_EMBEDDING_BASE_URL=http://localhost:11434/v1
-SONALITY_EMBEDDING_SEND_DIMENSIONS=false
-SONALITY_FAST_LLM_MAX_TOKENS=4096            # thinking models need more tokens
-SONALITY_ASYNC_TIMEOUT=300                   # slow local models need longer timeout
-SONALITY_QDRANT_URL=http://localhost:6333
-EOF
-
-make run
+make serve
 ```
-
-Or with Docker:
-
-```bash
-cp .env.example .env   # set provider + API key or local endpoints
-docker compose run --rm sonality
-```
-
-## Database Setup
-
-**Infrastructure:** Neo4j 5 (graph memory + state) + Qdrant (vector search + hybrid BM25).
-
-Schema definitions are centralized in `sonality/schema.py` as the single source of truth for both Docker Compose and test containers.
-
-**Initialization approaches:**
-
-| Database | Method | Details |
-|---|---|---|
-| Qdrant | Application-level | Collections created by `sonality.schema.init_qdrant_collections()` on first connection |
-| Neo4j | Application-level | Schema (constraints + indexes) created by `sonality.memory.db` on first connection |
-
-**Common commands:**
-
-```bash
-make db-up     # Start database containers
-make db-down   # Stop containers
-make db-reset  # Delete all data and restart (fresh state; schema applied on next run)
-make db-clear  # Clear data, preserve schema
-```
-
-**Schema regeneration:** If you modify `sonality/schema.py`, regenerate `scripts/init_neo4j.cypher` by running the schema exporter in `sonality/schema.py` directly. Qdrant collections are initialized at runtime by `sonality.schema.init_qdrant_collections()`.
-
-## REPL Commands
-
-| Command | Description |
-|---|---|
-| `/sponge` | Full personality state (JSON) |
-| `/snapshot` | Current narrative snapshot |
-| `/beliefs` | Opinion vectors with confidence and evidence count |
-| `/insights` | Pending personality insights (cleared at reflection) |
-| `/staged` | Staged opinion updates awaiting cooling-period commit |
-| `/topics` | Topic engagement counts |
-| `/shifts` | Recent personality shifts with magnitudes |
-| `/health` | Personality health metrics and risk indicators |
-| `/models` | Active provider/model/ESS-model and base URL |
-| `/diff` | Text diff of last snapshot change |
-| `/reset` | Reset to seed personality |
-| `/quit` | Exit |
 
 ## Configuration
 
-Set in `.env` (see `.env.example`):
+Set in `.env` (see `.env.example` for all options):
 
 | Variable | Default | Description |
-|---|---|---|
-| `SONALITY_API_KEY` | *(empty — optional for local endpoints)* | API key; leave empty for local LLM servers |
-| `SONALITY_BASE_URL` | `https://api.openai.com/v1` | OpenAI-compatible chat endpoint |
-| `SONALITY_MODEL` | `gpt-4.1-mini` | Main reasoning model |
-| `SONALITY_ESS_MODEL` | same as `SONALITY_MODEL` | Model for ESS classification (separate model reduces self-judge bias) |
-| `SONALITY_EMBEDDING_BASE_URL` | same as `SONALITY_BASE_URL` | Embedding endpoint; set to `http://localhost:11434/v1` for Ollama |
-| `SONALITY_EMBEDDING_MODEL` | `nomic-embed-text` | Embedding model ID |
-| `SONALITY_EMBEDDING_SEND_DIMENSIONS` | `true` | Set `false` for Ollama models that don't accept a `dimensions` parameter |
-| `SONALITY_FAST_LLM_MAX_TOKENS` | `1024` | Token budget for structured-output calls; **increase to 4096 for thinking/CoT models** |
-| `SONALITY_ASYNC_TIMEOUT` | `300` | Seconds to wait for async operations; increase for slow local LLMs |
-| `SONALITY_OPINION_COOLING_PERIOD` | `3` | Interactions before staged belief commits |
-| `SONALITY_REFLECTION_EVERY` | `20` | Interactions between periodic reflections |
-| `SONALITY_BOOTSTRAP_DAMPENING_UNTIL` | `10` | Early interactions get 0.5× update magnitude |
-| `SONALITY_SEMANTIC_RETRIEVAL_COUNT` | `2` | Semantic memories retrieved per interaction |
-| `SONALITY_EPISODIC_RETRIEVAL_COUNT` | `3` | Episodic memories retrieved per interaction |
-| `SONALITY_LOG_LEVEL` | `INFO` | Logging verbosity |
-
-If live runs fail, use `make preflight-live-probe` to validate endpoint/model/policy access with a tiny real request before launching long benchmarks.
-
-**Thinking model support:** For models with chain-of-thought reasoning (Qwen3, Mistral-3.1, DeepSeek-R1, etc.), the system leaves thinking enabled and strips chain-of-thought from final output. This keeps answer quality high while ensuring users only see the final response.
+|----------|---------|-------------|
+| `SONALITY_BASE_URL` | `https://api.openai.com/v1` | OpenAI-compatible endpoint |
+| `SONALITY_API_KEY` | *(empty)* | API key (empty for local servers) |
+| `SONALITY_MODEL` | `gpt-4.1-mini` | Primary reasoning model |
+| `SONALITY_STRUCTURED_MODEL` | same as MODEL | ESS, routing, structured output |
+| `SONALITY_LLM_MAX_TOKENS` | `8192` | Max response tokens |
+| `SONALITY_NEO4J_URI` | `bolt://localhost:7687` | Neo4j connection |
+| `SONALITY_QDRANT_URL` | `http://localhost:6333` | Qdrant endpoint |
+| `SONALITY_FATHOM_URL` | `http://localhost:8010` | Fathom research service |
 
 Runtime model overrides (no `.env` edit required):
 
 ```bash
 uv run sonality --model "anthropic/claude-sonnet-4" --ess-model "anthropic/claude-3.7-sonnet"
-# or: make run ARGS='--model "anthropic/claude-sonnet-4" --ess-model "anthropic/claude-3.7-sonnet"'
 ```
-
-## Theoretical Foundations and Research Alignment
-
-The Sonality architecture draws from and aligns with several active research areas in LLM memory, belief revision, and personality stability:
-
-**AGM Belief Revision Framework** — The belief update mechanism follows AGM (Alchourrón-Gärdenfors-Makinson) principles with LLM-based implementation:
-- **Contraction action** in `BeliefUpdateResponse` enables AGM-style belief contraction when contradicting evidence accumulates
-- **Per-reasoning-type magnitude caps** implement the AGM minimal change principle — `empirical_data ≤ 0.20`, `logical_argument ≤ 0.10`, `anecdotal ≤ 0.06`
-- **Evidence-weighted updates** where belief confidence scales with accumulated supporting/contradicting episodes
-
-Related work: Hase et al. (2024) "Fundamental Problems With Model Editing" identifies 12 open problems with LLM belief revision. Sonality addresses several through its provenance-tracked, evidence-gated update pipeline rather than direct model edits.
-
-**SSGM (Stability and Safety-Governed Memory) Framework** — Aligns with Lam et al. (2026) on memory governance:
-- **Consistency verification** — `dual_store.verify_consistency()` detects and cleans orphan derivatives during reflection
-- **Temporal decay modeling** — staged opinion updates with cooling periods, belief decay during reflection
-- **Dynamic access control** — ESS gating filters low-quality inputs before memory consolidation
-- **Semantic drift prevention** — insight accumulation before reflection avoids iterative summarization drift (the "Broken Telephone" effect)
-
-**Jungian Personality Framework** — Partial alignment with Wang et al. (2026) on structured personality control:
-- **Reflection mechanism** for long-term personality evolution maps to their reflection-driven gradual personality updates
-- **Behavioral signature tracking** (`disagreement_rate`, `topic_engagement`) provides personality diagnostics
-
-**Self-Reflective Memory Architecture (SRMA)** — The Sponge architecture achieves similar goals to SRMA (IJCA 2025):
-- **Episodic encoding** — full-fidelity episode storage with derivative chunking
-- **Reflection scoring** — ESS-based quality filtering before updates
-- **Adaptive retrieval** — BM25+vector hybrid retrieval with listwise reranking
-
-**Sycophancy Resistance** — Implements key findings from BASIL (arXiv 2508.16846) for Bayesian-rational belief revision:
-- **Third-person ESS framing** reduces self-judge sycophancy bias (SYCON Bench, EMNLP 2025: up to 63.8% sycophancy reduction with third-person perspective)
-- **Manipulative reasoning type filter** blocks social pressure, emotional appeal, and anecdotal claims (addresses ELEPHANT, ICLR 2026: "social sycophancy" where LLMs affirm both sides of conflicts)
-- **ESS minimum threshold (0.25)** distinguishes rational evidence-based updates from sycophantic agreement
-
-**Personality Stability** — Addresses findings from PERSIST (AAAI 2026) which showed standard deviations >0.3 on 5-point scales even for 400B+ models:
-- **Structured belief state** with evidence tracking provides stability anchors
-- **ESS gating** filters noise that would otherwise cause random drift
-- **Reflection cooling periods** prevent rapid oscillation from isolated inputs
-
-## Key Mechanisms
-
-**Evidence Strength Score (ESS)** — classifies each user message for argument quality (0.0–1.0). Captures reasoning type (logical_argument, empirical_data, expert_opinion, anecdotal, **debunked_claim**, social_pressure, emotional_appeal, no_argument), source reliability, novelty, and opinion direction. Third-person framing reduces sycophancy bias by up to 63.8%. The `debunked_claim` type covers conclusively-refuted conspiracy theories (Climategate, retracted vaccine studies, etc.) — these score ≤0.07, freeze sponge mutation, and have zero belief update magnitude, ensuring known misinformation cannot shift the agent's views even when presented confidently.
-
-**LLM-first belief updates** — provenance, contradiction handling, contraction, confidence shifts, and decay decisions are generated by structured LLM assessments instead of static formulas.
-
-**Dual-store memory** — every episode is written to Neo4j + Qdrant derivatives, with graph edges (`SUPPORTS_BELIEF`, `CONTRADICTS_BELIEF`, temporal links, segments) and vector retrieval combined during reranked recall.
-
-**Bootstrap dampening** — first 10 interactions get 0.5× update magnitude, preventing "first-impression dominance" from the Deffuant bounded confidence model.
-
-**Insight accumulation** — per-interaction insights are one-sentence extractions appended to a list. Only during reflection are they consolidated into the personality narrative. This avoids the "Broken Telephone" effect where iterative LLM rewrites converge to generic text.
-
-**Disagreement tracking with staged beliefs** — the disagreement detector checks both committed `opinion_vectors` and pending `staged_opinion_updates` to correctly identify disagreement in early interactions, before beliefs mature past the cooling period.
-
-**Forgetting engine with recency signals** — episode forgetting candidates are evaluated with access count, last-accessed timestamp, and ESS score. High-ESS, frequently-accessed episodes are protected from archival; unaccessed trivial episodes are preferred for hard-delete. Aligned with FadeMem (2025) differential decay and A-MAC (2025) five-factor admission metrics.
-
-**Interaction timing telemetry** — every `respond()` call logs LLM wall time and total post-processing time, enabling per-interaction throughput analysis without profiler overhead.
-
-**Contradiction-only feature deletion guard** — semantic features resist accidental deletion when users change topics. Both the extraction prompt and a runtime guard enforce that DELETE commands require an explicit contradiction quote. Topic silence (e.g. asking about cooking while climate features exist) never triggers deletion. This prevents the "personality erosion" problem observed in MemGPT-style systems where over-deletion by LLMs is a known failure mode.
-
-**Bayesian confidence floor** — belief confidence cannot be permanently frozen at zero. After 2 consistent updates, belief uncertainty is capped at 0.50 (confidence ≥ 0.50). After 3+ updates, uncertainty is capped at 0.30 (confidence ≥ 0.70). This prevents the pathological case where the belief update LLM returns `new_uncertainty=1.0` indefinitely, which would leave beliefs permanently unstable and unable to resist future contradictions.
-
-**Belief preservation monitoring** — reflection captures `opinion_vectors` before the decay step and checks for unexpected evictions after the snapshot rewrite. Only beliefs that completely disappear from `opinion_vectors` (not just from the narrative text) trigger a WARNING, eliminating false positives from the snapshot's narrative-not-enumeration design.
-
-**JSON normalization for quantized models** — extensive regex-based normalization handles common quantized model artifacts: pipe-separated enum options (`"A" | "B"` → `"A"`), type placeholders (`float` → `0.5`), trailing ellipsis (`0.3...` → `0.3`), and template copies. This allows reliable structured output extraction even from heavily quantized models (IQ2_M, ~2 bits/weight).
-
-## Test Architecture
-
-The test suite is organized in progressive levels of complexity:
-
-```
-tests/
-├── test_live_graduated.py    # L0-L3x: Infrastructure validation
-│   ├── L0 Connectivity       # Endpoint reachable
-│   ├── L1 Raw response       # LLM/embedding returns valid data
-│   ├── L2 Structured parsing # Schema extraction, ESS classify
-│   ├── L2r Repeatability     # Same schema consistent 3x
-│   ├── L2x Per-prompt        # Each prompt template in isolation
-│   ├── L3 Memory primitives  # Vector insert/search
-│   └── L3x Store/retrieve    # Full DualEpisodeStore workflow
-│
-├── test_agent_health.py      # S1-S7: Behavioral health
-│   ├── S1 Clean start        # DB empty verification
-│   ├── S2 Episode storage    # Single turn → episode + derivatives
-│   ├── S3 ESS gating         # Social pressure vs empirical evidence
-│   ├── S4 Memory retrieval   # Related query recalls episode
-│   ├── S5 Anti-sycophancy    # Holds position under pressure
-│   ├── S6 Personality        # Snapshot evolves, beliefs bounded
-│   └── S7 Extended           # 15-turn scenario with contradiction
-│
-benches/
-├── test_teaching_suite_live.py       # 60-pack teaching scenarios
-├── test_knowledge_acquisition_live.py # K1-K32 knowledge acquisition batteries
-├── test_psych_stability_live.py      # B1-B12 psychological stability batteries
-├── test_knowledge_accumulation_bench.py # 6-domain accumulation bench
-└── test_ess_calibration_live.py      # ESS classifier calibration
-```
-
-**Validation status:**
-- Unit tests: 101/101 ✅ (`make test`) — includes 28 API endpoint tests (`tests/test_api.py`)
-- Bench contracts (non-live): 80/80 ✅ (`make bench-contracts`)
-- Use `make check` to run all no-key quality gates. Use `make check-ci` for CI parity (adds format-check).
-
-## Development
-
-```bash
-make install-dev   # install with dev tools
-make check         # lint + typecheck + tests + non-live bench contracts
-make check-ci      # local CI parity (adds format-check)
-make format        # auto-format
-make docs          # build documentation (output in site/)
-make docs-serve    # serve docs locally with live reload
-make preflight-live  # validate live API config and model selection
-make preflight-live-probe  # run tiny real API call (catches provider/policy issues)
-make bench-knowledge-acquisition    # run K1-K32 knowledge acquisition battery
-make bench-psych-stability          # run B1-B12 psychological stability battery
-make bench-knowledge-accumulation   # run 6-domain knowledge accumulation bench
-make bench-teaching  # run teaching benchmark suite (API key required)
-make bench-teaching-pulse  # 2-pack pulse for fastest go/no-go signal
-make bench-teaching-rapid  # single-replicate triage slice for fast signal
-make bench-teaching-first-signal  # first-N pack slice for immediate signal
-make bench-plan-segments BENCH_PACK_GROUP=development BENCH_SEGMENT_SIZE=4  # print deterministic segment plan
-make bench-teaching-segmented BENCH_PACK_GROUP=all BENCH_SEGMENT_SIZE=6  # run gate-checked chunked sweep
-make bench-teaching-contextual BENCH_SEGMENT_PROFILE=rapid  # run contextual group sweep with gates
-make bench-teaching-failures-last BENCH_FAILURE_RERUN_PROFILE=rapid  # rerun latest failed packs only
-make bench-teaching-hotspots  # rapid run of known weak development packs
-make bench-teaching-hotspots-auto  # adaptive hotspot run inferred from latest completed run
-make bench-teaching-iterate  # staged pulse->rapid->hotspots-auto fast-iteration pipeline
-make bench-report-last  # print compact summary for the latest run
-make bench-report-failures-last  # print failed-step preview from latest run
-make bench-report-root  # print trend table across completed runs in BENCH_OUTPUT_ROOT
-make bench-report-memory-root  # print memory-validity trend across completed runs
-make bench-report-beliefs-last  # print deep belief/memory alignment diagnostics for latest run
-make bench-report-insights-root  # aggregate decision/health/failure/topic insights
-make bench-report-delta-last  # compare latest completed run vs previous completed run
-make bench-signal-gate-last  # fail fast if latest run violates quick-signal thresholds
-make bench-teaching-smoke  # fast 3-pack smoke slice
-make bench-teaching BENCH_PROGRESS=step  # step-level live progress (very verbose)
-make bench-teaching-lean BENCH_PACK_OFFSET=8 BENCH_PACK_LIMIT=8  # deterministic segment rerun
-```
-
-GitHub CI runs the same no-key quality gates on every push/PR: format check, lint, mypy,
-unit tests (`tests/`), and non-live benchmark tests (`benches -m "bench and not live"`).
-To mirror CI locally, run:
-
-```bash
-make check-ci
-```
-
-Common workflows:
-
-| Goal | Command |
-|---|---|
-| Verify non-live project health (CI parity) | `make check-ci` |
-| Validate live benchmark config | `make preflight-live` |
-| Verify live endpoint/policy with tiny real call | `make preflight-live-probe` |
-| Get fastest live go/no-go signal (2 packs) | `make bench-teaching-pulse` |
-| Get first live health signal quickly | `make bench-teaching-rapid` |
-| Get immediate signal from first N packs | `make bench-teaching-first-signal` |
-| Preview deterministic chunk plan before running | `make bench-plan-segments BENCH_PACK_GROUP=all BENCH_SEGMENT_SIZE=6` |
-| Run chunked segmented sweep with gate checks between chunks | `make bench-teaching-segmented BENCH_SEGMENT_PROFILE=rapid BENCH_SEGMENT_SIZE=6` |
-| Prioritize historically weak packs in chunk ordering | `make bench-teaching-segmented BENCH_SEGMENT_ORDER=weak_first BENCH_SEGMENT_SIZE=6` |
-| Run contextual semantic slices end-to-end | `make bench-teaching-contextual BENCH_SEGMENT_PROFILE=rapid` |
-| Rerun only packs that failed in latest run | `make bench-teaching-failures-last BENCH_FAILURE_RERUN_PROFILE=rapid` |
-| Re-check only known weak development packs | `make bench-teaching-hotspots` |
-| Re-check adaptive weak packs from latest run | `make bench-teaching-hotspots-auto` |
-| Run staged fast-iteration pipeline | `make bench-teaching-iterate` |
-| Run staged pipeline with live quota probe | `make bench-teaching-iterate BENCH_REQUIRE_PROBE=1` |
-| Print summary of latest run artifacts | `make bench-report-last` |
-| Print failed-step preview for latest run | `make bench-report-failures-last` |
-| Print multi-run trend table in artifact root | `make bench-report-root` |
-| Print memory-validity trend in artifact root | `make bench-report-memory-root` |
-| Print deep belief/memory diagnostics for latest run | `make bench-report-beliefs-last` |
-| Print aggregated root insights + write `root_insights.json` | `make bench-report-insights-root` |
-| Compare latest run to previous completed run | `make bench-report-delta-last` |
-| Enforce quick-signal thresholds on latest run | `make bench-signal-gate-last` |
-| Run full teaching suite with per-pack progress | `make bench-teaching` |
-| Run a fast live smoke slice | `make bench-teaching-smoke` |
-| Debug teaching suite with per-step progress | `make bench-teaching-lean BENCH_PROGRESS=step` |
-| Run memory-focused benchmark contracts | `make bench-memory` |
-| Run personality-focused benchmark contracts | `make bench-personality` |
-| Build docs and validate site | `make docs` |
-
-Default `pytest` runs correctness tests only (`testpaths = ["tests"]`). Benchmarks are run explicitly from `benches/`.
-
-## Teaching Benchmark Packs
-
-`benches/test_teaching_suite_live.py` runs an API-required end-to-end benchmark harness over scenario packs that target personality persistence and development failure modes:
-
-By default this suite is intentionally large (60 packs / ~554 steps per replicate, with profile-driven 1–5 replicate runs), so long runtimes are expected. Use `--bench-profile rapid`/`lean` for iteration, then move to `default`/`high_assurance` when gating a release. Rapid is single-replicate signal mode; lean is fixed `n=2` signal mode. Both are treated as iteration workflows (hard-gate inconclusive outcomes are warnings instead of release blockers), so use `make bench-report-last` and `make bench-report-delta-last` to inspect trend direction before escalating. The rapid profile also applies a small ESS gate slack to reduce classifier-calibration false negatives in triage-only runs.
-Each run now emits explicit isolation and memory-validity artifacts (`run_isolation_trace.jsonl`, `run_isolation_report.json`, `memory_validity_trace.jsonl`, `memory_validity_report.json`, `belief_memory_alignment_report.json`) so you can verify fresh-start execution and audit whether belief updates match contract expectations. The memory-validity and belief-alignment reports include topic-level shift rollups, making it easier to inspect whether updates stay on-topic and policy-consistent.
-
-You can now split runs by pack groups without editing test code:
-
-- `--bench-pack-group all` (default)
-- `--bench-pack-group pulse` (ultra-fast 2-pack sanity slice: continuity + selective_revision)
-- `--bench-pack-group smoke` (continuity + selective_revision + memory_structure)
-- `--bench-pack-group memory`
-- `--bench-pack-group personality`
-- `--bench-pack-group triage` (high-signal starter slice across continuity, revision, memory, and safety)
-- `--bench-pack-group safety` (safety-critical failure modes: psychosocial, poisoning, misinformation, provenance)
-- `--bench-pack-group development` (personality-development core: identity, drift, revision, coherence)
-- `--bench-pack-group identity` (continuity + narrative stability + cross-session identity)
-- `--bench-pack-group revision` (evidence-sensitive revision + contradiction handling)
-- `--bench-pack-group misinformation` (misinformation correction durability and inoculation)
-- `--bench-pack-group provenance` (source memory, transfer, and provenance conflict handling)
-- `--bench-pack-group bias` (cognitive/social bias resilience packs)
-
-Or pass explicit keys with `--bench-packs key1,key2,...` (overrides pack group).
-For deterministic segmentation, combine `--bench-pack-offset` and `--bench-pack-limit`
-(or `BENCH_PACK_OFFSET` / `BENCH_PACK_LIMIT` in make invocations), for example:
-`make bench-teaching-lean BENCH_PACK_OFFSET=8 BENCH_PACK_LIMIT=8`.
-For automated chunked sweeps that stop early when quality gates fail, use
-`make bench-teaching-segmented` with:
-- `BENCH_SEGMENT_PROFILE` (`rapid`, `lean`, `default`, `high_assurance`)
-- `BENCH_SEGMENT_SIZE` (packs per chunk)
-- `BENCH_SEGMENT_MAX_SEGMENTS` (optional cap; `0` means no cap)
-- `BENCH_SEGMENT_ORDER` (`declared` or `weak_first`; `weak_first` uses latest run pass-rates)
-For quick targeted follow-up after any run, use:
-- `make bench-select-failures-last` (prints packs with failed steps from latest run)
-- `make bench-teaching-failures-last` (executes only those failed packs)
-Set `BENCH_OUTPUT_ROOT` to isolate experiment cohorts (for example, `BENCH_OUTPUT_ROOT=data/teaching_bench_iter1`).
-For fail-fast staging, `make bench-signal-gate-last` enforces quick thresholds from latest run:
-`BENCH_SIGNAL_MIN_PACK_PASS_RATE` (default `0.85`),
-`BENCH_SIGNAL_MAX_ESS_DEFAULT_RATE` (default `0.05`),
-`BENCH_SIGNAL_MAX_ESS_RETRY_RATE` (default `0.15`).
-Default iterate stages are now `pulse rapid hotspots-auto`; set `BENCH_ITERATE_STAGES`
-explicitly when you want the longer `safety` / `development` confirmation passes.
-For targeted reruns, `BENCH_HOTSPOT_PACKS` controls the pack list used by
-`make bench-teaching-hotspots`.
-
-| Category | Purpose | Representative packs |
-|---|---|---|
-| Identity & continuity | Preserve coherent self across sessions/time | `continuity`, `narrative_identity`, `trajectory_drift`, `long_delay_identity_consistency` |
-| Evidence-sensitive revision | Resist weak pressure; revise on strong evidence | `selective_revision`, `argument_defense`, `revision_fidelity`, `epistemic_calibration` |
-| Misinformation & correction durability | Hold corrections over delay and replay pressure | `misinformation_cie`, `counterfactual_recovery`, `delayed_regrounding`, `countermyth_causal_chain_consistency` |
-| Source/provenance reasoning | Track source trust and provenance across domains | `source_vigilance`, `source_reputation_transfer`, `source_memory_integrity`, `provenance_conflict_arbitration` |
-| Bias resilience | Stress classic cognitive/social bias failure modes | `anchoring_adjustment_resilience`, `status_quo_default_resilience`, `hindsight_certainty_resilience`, `conjunction_fallacy_probability_resilience` |
-| Memory quality & safety | Validate structure, leakage, and poisoning resistance | `longmem_persistence`, `memory_structure`, `memory_leakage`, `memory_poisoning`, `psychosocial` |
-
-Artifacts are intentionally dense for forensics and release gating:
-
-- Core run envelope: `run_manifest.json`, `run_summary.json`
-- Turn-level traces: `turn_trace.jsonl`, `ess_trace.jsonl`, `belief_delta_trace.jsonl`
-- Governance and safety: `risk_event_trace.jsonl`, `stop_rule_trace.jsonl`, `judge_calibration_report.json`
-- Health and operations: `health_metrics_trace.jsonl`, `health_summary_report.json`, `cost_ledger.json`
-- Pack-specific traces: one `*_trace.jsonl` per benchmark pack
-- Crash diagnostics: `run_error.json` (written when live runs fail before `run_summary.json`)
-
-Scenario design is grounded in peer-reviewed work from misinformation correction, persuasion and resistance, source monitoring, long-horizon memory, narrative identity, and judgment-under-uncertainty literatures. See `docs/testing.md` for the full pack inventory and references.
 
 ## Project Structure
 
 ```
-sonality/
-├── sonality/                   Python package
-│   ├── agent.py                Core loop: context → LLM → post-process
-│   ├── cli.py                  Terminal REPL
-│   ├── config.py               Environment + compile-time constants
-│   ├── ess.py                  Evidence Strength Score classifier
-│   ├── prompts.py              Agent-level LLM prompt templates
-│   ├── provider.py             HTTP LLM/embedding provider + JSON normalization
-│   ├── llm/
-│   │   ├── caller.py           Universal structured LLM call wrapper (retry, repair, fallback)
-│   │   └── prompts.py          Memory-subsystem LLM prompt templates
-│   └── memory/
-│       ├── sponge.py           SpongeState model, staged updates, persistence
-│       ├── dual_store.py       Episode storage coordinator (Neo4j + Qdrant)
-│       ├── graph.py            Neo4j graph traversal, provenance edges, belief nodes
-│       ├── db.py               Database connection pool (Neo4j + Qdrant)
-│       ├── derivatives.py      LLM-based semantic chunking → vector derivatives
-│       ├── embedder.py         Embedding calls (Ollama or any OpenAI-compatible endpoint)
-│       ├── semantic_features.py Async personality feature extraction and consolidation
-│       ├── belief_provenance.py Belief evidence assessment with AGM contraction
-│       ├── segmentation.py     Conversation segment boundary detection
-│       ├── updater.py          Insight extraction and snapshot validation
-│       ├── health.py           Personality health metric computation
-│       ├── consolidation.py    Segment consolidation readiness and summarization
-│       ├── stm_consolidator.py Background short-term memory consolidation worker
-│       └── retrieval/
-│           ├── router.py       Query intent routing (6 categories, 3 depth levels)
-│           ├── chain.py        Iterative sufficiency-checking retrieval
-│           ├── reranker.py     LLM listwise episode reranker
-│           └── split.py        Multi-entity query decomposition
-├── tests/                      Unit + integration tests (non-live by default)
-│   ├── test_api.py             FastAPI endpoint tests (28 tests, mocked agent):
-│   │                           all HTTP routes, error cases, schema validation,
-│   │                           /health, /v1/chat, /v1/embeddings, /beliefs,
-│   │                           /ingest, /probability, /correlations, /chat
-│   ├── test_agent_health.py    Live behavioral health suite (S1–S7, 25 tests):
-│   │                           S1 clean start, S2 episode storage, S3 ESS gating,
-│   │                           S4 memory retrieval, S5 anti-sycophancy, S6 personality
-│   │                           accumulation + belief magnitude bounds, S7 extended
-│   │                           16-interaction evolution: long-range memory recall,
-│   │                           contradiction handling, feature persistence across
-│   │                           topic shifts, no-unjustified-delete guard
-│   └── test_live_graduated.py  Live infrastructure tests (L0–L3x): connectivity, JSON
-│                               parsing per schema, memory primitives, store+recall
-├── benches/                    Evaluation/benchmark suites (pytest, opt-in)
-├── docs/                       Documentation source
-├── pyproject.toml              Dependencies and tool config
-├── Makefile                    Dev workflows
-├── Dockerfile                  Container build
-└── docker-compose.yml          Neo4j + Qdrant orchestration
+src/
+├── sonality/                        Personality engine
+│   ├── agent.py                     Stateless orchestrator
+│   ├── automaton.py                 Two-phase state machine (THINKING/ACTING)
+│   ├── ess.py                       Evidence Strength Score classifier
+│   ├── bookkeeping.py               Async post-response pipeline
+│   ├── api.py                       FastAPI server (OpenAI-compatible)
+│   ├── tools/                       recall_memory, web_research, integrate_knowledge
+│   └── memory/                      Neo4j graph + Qdrant vectors + retrieval pipeline
+├── fathom/                          Autonomous web research engine
+│   ├── session.py                   Core research loop
+│   ├── ranking.py                   Hybrid URL ranking (embedding + RRF + softmax)
+│   └── source_memory.py             Cross-session source memory
+├── shared/                          Cross-service infrastructure
+│   ├── llm/                         OpenAI-compatible provider + structured calls + output parsing
+│   ├── embedder.py                  HTTP embedding client
+│   └── ranking.py                   RRF primitives
+└── chat/                            Terminal + Telegram + voice clients
 ```
+
+## Development
+
+```bash
+make install-dev    # Install with dev tools (ruff, pyright, pytest)
+make check          # Lint + typecheck + tests
+make check-ci       # Full CI parity (format-check + docs build)
+make format         # Auto-format
+make docs           # Build documentation (Zensical → site/)
+make docs-serve     # Live-reload documentation server
+```
+
+## Research Foundations
+
+| Area | Reference | Application in Sonality |
+|------|-----------|------------------------|
+| Belief revision | [AGM](https://plato.stanford.edu/entries/logic-belief-revision/) (1985) | Minimal change, contraction, evidence-weighted updates |
+| Anti-sycophancy | [BASIL](https://arxiv.org/abs/2508.16846) (2025) | Bayesian-rational belief resistance |
+| Social sycophancy | [ELEPHANT](https://arxiv.org/abs/2410.02391) (ICLR 2026) | Manipulative reasoning type filter |
+| Personality stability | PERSIST (AAAI 2026) | Structured belief anchors + ESS gating |
+| Memory governance | SSGM (Lam et al., 2026) | Dual-store consistency + temporal decay |
+| Memory decay | [FadeMem](https://arxiv.org/abs/2601.18642) (2025) | Power-law belief decay for unreinforced opinions |
+| RAG vs fine-tuning | [arXiv:2409.09510](https://arxiv.org/abs/2409.09510) (2024) | External memory personality (~14x PEFT effectiveness) |
+| Claim verification | [RefuteClaim](https://aclanthology.org/2024.findings-acl.45/) (ACL 2024) | Debunked claim detection and sponge freeze |
+| Rank fusion | [RRF](https://cormack.uwaterloo.ca/cormacksigir09-rrf.pdf) (SIGIR 2009) | Multi-signal ranking in retrieval and URL selection |
+
+## Documentation
+
+Full documentation is available at the project's GitHub Pages site, built with [Zensical](https://zensical.org):
+
+```bash
+make docs-serve    # Local preview with live reload
+```
+
+Documentation covers:
+
+- [Architecture](docs/architecture/index.md) — System topology, request lifecycle, module dependencies
+- [Core Concepts](docs/concepts/index.md) — ESS, Sponge, belief revision, retrieval pipeline
+- [Design Decisions](docs/design/agentic-loop.md) — Agentic loop, sycophancy resistance, [rejected approaches](docs/design/rejected-approaches.md)
+- [Deployment](docs/deployment/index.md) — Configuration, Docker setup, service inventory
+- [Development](docs/development/index.md) — Testing, code quality, contributing
+
+## License
+
+AGPL-3.0-or-later

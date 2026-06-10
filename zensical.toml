@@ -1,119 +1,111 @@
 [project]
 site_name = "Sonality"
-site_description = "LLM agent with a self-evolving personality via the Sponge architecture — grounded in 200+ academic references"
-site_author = "Sonality"
-site_url = "https://okm165.github.io/Sonality/"
-copyright = "&copy; 2025–2026 Sonality contributors"
-
-extra_css = ["stylesheets/extra.css"]
-
+site_url = "https://sonality.dev/docs/"
+site_description = "LLM agent with self-evolving personality via evidence-gated belief revision"
+docs_dir = "docs"
+site_dir = "site"
 extra_javascript = [
-    "https://unpkg.com/mathjax@3/es5/tex-mml-chtml.js",
-]
-
-nav = [
-    { "Home" = "index.md" },
-    { "Getting Started" = "getting-started.md" },
-    { "Project Structure" = "project-structure.md" },
-    { "Usage and Teaching Plan" = "usage-and-teaching-plan.md" },
-    { "Architecture" = [
-        { "System Overview" = "architecture/overview.md" },
-        { "Memory Model" = "architecture/memory-model.md" },
-        { "Data Flow" = "architecture/data-flow.md" },
-        { "Research Upgrade Plan" = "architecture/research-upgrade-plan.md" },
-        { "Architecture Assessment" = "architecture-assessment.md" },
-    ] },
-    { "Core Concepts" = [
-        { "Evidence Strength Score" = "concepts/ess.md" },
-        { "Opinion Dynamics" = "concepts/opinion-dynamics.md" },
-        { "Reflection" = "concepts/reflection.md" },
-        { "Anti-Sycophancy" = "concepts/anti-sycophancy.md" },
-    ] },
-    { "Design Decisions" = "design-decisions.md" },
-    { "Research" = [
-        { "Background" = "research/background.md" },
-        { "References" = "research/references.md" },
-        { "Web Research Synthesis 2026" = "research/web-research-synthesis-2026.md" },
-    ] },
-    { "Personality Development" = "personality-development.md" },
-    { "Training Guide" = "training-guide.md" },
-    { "Testing & Evaluation" = "testing.md" },
-    { "Model Considerations" = "model-considerations.md" },
-    { "Configuration" = "configuration.md" },
-    { "API Reference" = "api-reference.md" },
+  "https://unpkg.com/mathjax@3/es5/tex-mml-chtml.js",
 ]
 
 [project.theme]
-font.text = "Inter"
-font.code = "JetBrains Mono"
+name = "material"
 features = [
-    "navigation.instant",
-    "navigation.instant.prefetch",
-    "navigation.instant.progress",
-    "navigation.tabs",
-    "navigation.tabs.sticky",
-    "navigation.sections",
-    "navigation.expand",
-    "navigation.top",
-    "navigation.path",
-    "navigation.indexes",
-    "content.code.copy",
-    "content.code.annotate",
-    "toc.follow",
-    "search.highlight",
-    "search.suggest",
+  "navigation.instant",
+  "navigation.tabs",
+  "navigation.sections",
+  "navigation.expand",
+  "navigation.path",
+  "navigation.top",
+  "toc.integrate",
+  "search.suggest",
+  "search.highlight",
+  "content.code.copy",
+  "content.tabs.link",
 ]
 
 [project.theme.icon]
 repo = "fontawesome/brands/github"
 
-# Dark mode first = default
 [[project.theme.palette]]
 scheme = "slate"
-primary = "deep purple"
-accent = "amber"
+primary = "indigo"
+accent = "cyan"
 toggle.icon = "lucide/moon"
 toggle.name = "Switch to light mode"
 
 [[project.theme.palette]]
 scheme = "default"
-primary = "deep purple"
-accent = "amber"
+primary = "indigo"
+accent = "cyan"
 toggle.icon = "lucide/sun"
 toggle.name = "Switch to dark mode"
 
-# Markdown extensions
-[project.markdown_extensions.toc]
-permalink = true
+[project.extra]
+generator = false
 
-[project.markdown_extensions.admonition]
+[[project.extra.social]]
+icon = "fontawesome/brands/github"
+link = "https://github.com/sonality"
 
-[project.markdown_extensions."pymdownx.details"]
-
-[project.markdown_extensions."pymdownx.superfences"]
+[project.markdown_extensions.pymdownx.superfences]
 custom_fences = [
-    { name = "mermaid", class = "mermaid", format = "pymdownx.superfences.fence_code_format" },
+  { name = "mermaid", class = "mermaid", format = "pymdownx.superfences.fence_code_format" }
 ]
 
-[project.markdown_extensions."pymdownx.tabbed"]
-alternate_style = true
-
-[project.markdown_extensions."pymdownx.highlight"]
-anchor_linenums = true
-
-[project.markdown_extensions."pymdownx.inlinehilite"]
-
-[project.markdown_extensions."pymdownx.snippets"]
-
-[project.markdown_extensions."pymdownx.arithmatex"]
+[project.markdown_extensions.pymdownx.arithmatex]
 generic = true
 
-[project.markdown_extensions.tables]
+[project.markdown_extensions.pymdownx.highlight]
+anchor_linenums = true
 
-[project.markdown_extensions.attr_list]
+[project.markdown_extensions.pymdownx.tabbed]
+alternate_style = true
 
-[project.markdown_extensions.md_in_html]
+[[nav]]
+title = "Home"
+url = "index.md"
 
-[project.markdown_extensions.def_list]
+[[nav]]
+title = "Architecture"
+children = [
+  { title = "Overview", url = "architecture/index.md" },
+  { title = "Sonality Engine", url = "architecture/sonality.md" },
+  { title = "Fathom Research", url = "architecture/fathom.md" },
+  { title = "Memory System", url = "architecture/memory.md" },
+  { title = "Shared Infrastructure", url = "architecture/shared.md" },
+]
 
-[project.markdown_extensions.footnotes]
+[[nav]]
+title = "Concepts"
+children = [
+  { title = "Overview", url = "concepts/index.md" },
+  { title = "Evidence Strength Score", url = "concepts/ess.md" },
+  { title = "Sponge Architecture", url = "concepts/sponge.md" },
+  { title = "Belief Revision", url = "concepts/belief-revision.md" },
+  { title = "Retrieval Pipeline", url = "concepts/retrieval.md" },
+]
+
+[[nav]]
+title = "Design Decisions"
+children = [
+  { title = "Agentic Loop", url = "design/agentic-loop.md" },
+  { title = "Sycophancy Resistance", url = "design/sycophancy-resistance.md" },
+  { title = "Rejected Approaches", url = "design/rejected-approaches.md" },
+]
+
+[[nav]]
+title = "Deployment"
+children = [
+  { title = "Overview", url = "deployment/index.md" },
+  { title = "Quick Start", url = "deployment/quickstart.md" },
+  { title = "Configuration", url = "deployment/configuration.md" },
+  { title = "Docker Stack", url = "deployment/docker.md" },
+]
+
+[[nav]]
+title = "Development"
+children = [
+  { title = "Workflow", url = "development/index.md" },
+  { title = "Testing", url = "development/testing.md" },
+]
