@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import random
+import socket
 import threading
 import time
 from collections.abc import Mapping, Sequence
@@ -21,15 +22,9 @@ from urllib.request import Request, urlopen
 import structlog
 
 from ..errors import LLMParseError, ProviderHTTPError, ProviderTransportError
-from .parse import (
-    extract_answer_from_reasoning,
-    message_content_text,
-    strip_thinking_trace,
-    to_nonnegative_int,
-    unwrap_think_tags,
-)
+from .parse import clean_completion, message_content_text, to_nonnegative_int
 
-log = structlog.get_logger()
+log = structlog.get_logger(__name__)
 
 _RETRYABLE_HTTP_STATUSES: Final = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
 _EMPTY_MAPPING: Final[Mapping[str, object]] = {}
@@ -38,7 +33,6 @@ __all__ = [
     "ChatResult",
     "LLMProvider",
     "StreamChunk",
-    "supports_thinking",
 ]
 
 
@@ -56,14 +50,7 @@ class ChatResult:
     input_tokens: int
     output_tokens: int
     raw: dict[str, object]
-
-
-_THINKING_MODELS: Final = frozenset({"qwq", "qwen3", "deepseek-r1", "gemma4", "gemma-4", "glm-4.7"})
-
-
-def supports_thinking(model: str) -> bool:
-    """Return True if the model supports enable_thinking=True."""
-    return any(name in model.lower() for name in _THINKING_MODELS)
+    finish_reason: str = ""
 
 
 class LLMProvider:
@@ -89,7 +76,7 @@ class LLMProvider:
         self.timeout = timeout
         self.max_retries = max_retries
         self.backoff_base = backoff_base
-        self._semaphore = threading.Semaphore(max(1, concurrency))
+        self._semaphore = threading.Semaphore(concurrency)
 
     # -----------------------------------------------------------------
     # HTTP transport
@@ -104,7 +91,6 @@ class LLMProvider:
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
-        log.debug("http_post", path=normalized, bytes=len(body))
         max_attempts = self.max_retries
         for attempt in range(1, max_attempts + 1):
             request = Request(url, data=body, headers=headers, method="POST")
@@ -119,15 +105,12 @@ class LLMProvider:
                         log.error(
                             "http_post_decode_failed",
                             path=normalized,
-                            elapsed=f"{elapsed:.1f}s",
+                            elapsed_s=round(elapsed, 1),
                             error=str(decode_exc),
                         )
-                        raise LLMParseError(
-                            f"Response decode error: {decode_exc}"
-                        ) from decode_exc
+                        raise LLMParseError(f"Response decode error: {decode_exc}") from decode_exc
                 elapsed = time.time() - t0
                 if isinstance(parsed, dict):
-                    log.debug("http_post_ok", path=normalized, elapsed=f"{elapsed:.1f}s")
                     return parsed
                 raise LLMParseError("Provider returned a non-object JSON payload")
             except HTTPError as exc:
@@ -141,18 +124,16 @@ class LLMProvider:
                     "http_post_http_error",
                     path=normalized,
                     http_status=int(exc.code),
-                    elapsed=f"{elapsed:.1f}s",
+                    elapsed_s=round(elapsed, 1),
                     detail=detail[:200],
                 )
                 raise ProviderHTTPError(int(exc.code), detail) from exc
             except URLError as exc:
                 elapsed = time.time() - t0
                 reason = getattr(exc, "reason", None)
-                if isinstance(reason, TimeoutError):
-                    raise ProviderTransportError(f"Timeout after {elapsed:.1f}s") from exc
+                if isinstance(reason, socket.gaierror):
+                    raise ProviderTransportError(f"DNS failure: {reason}") from exc
                 reason_str = str(reason) if reason else str(exc)
-                if "name resolution" in reason_str.lower():
-                    raise ProviderTransportError(f"DNS failure: {reason_str}") from exc
                 if attempt < max_attempts:
                     self._retry_wait(
                         normalized,
@@ -185,8 +166,8 @@ class LLMProvider:
             reason=reason,
             attempt=attempt,
             max_attempts=max_attempts,
-            elapsed=f"{elapsed:.1f}s",
-            retry_in=f"{wait:.1f}s",
+            elapsed_s=round(elapsed, 1),
+            retry_in_s=round(wait, 1),
         )
         time.sleep(wait)
 
@@ -199,26 +180,18 @@ class LLMProvider:
         *,
         model: str,
         messages: Sequence[Mapping[str, object]],
-        max_tokens: int,
+        max_tokens: int = -1,
         temperature: float = -1.0,
         tools: Sequence[Mapping[str, object]] = (),
         tool_choice: str | Mapping[str, object] = _EMPTY_MAPPING,
     ) -> ChatResult:
         """Synchronous chat completion with semaphore protection."""
-        log.info(
-            "llm_completion_requested",
-            model=model,
-            message_count=len(messages),
-            max_tokens=max_tokens,
-            tool_count=len(tools),
-            temperature=temperature if temperature >= 0 else "default",
-        )
         payload: dict[str, object] = {
             "model": model,
             "messages": [{k: v for k, v in m.items() if not k.startswith("_")} for m in messages],
-            "max_tokens": max_tokens,
-            "chat_template_kwargs": {"enable_thinking": supports_thinking(model)},
         }
+        if max_tokens > 0:
+            payload["max_tokens"] = max_tokens
         if temperature >= 0.0:
             payload["temperature"] = temperature
         if tools:
@@ -229,7 +202,6 @@ class LLMProvider:
             )
 
         with self._semaphore:
-            t0 = time.time()
             raw = self._post_json("/chat/completions", payload)
 
         text = ""
@@ -246,36 +218,7 @@ class LLMProvider:
                     )
                 elif not isinstance(raw_reasoning, str):
                     raw_reasoning = str(raw_reasoning) if raw_reasoning else ""
-                log.debug(
-                    "llm_raw_response",
-                    content_chars=len(raw_content),
-                    reasoning_chars=len(raw_reasoning),
-                    finish_reason=first.get("finish_reason", "unknown"),
-                )
-                text = strip_thinking_trace(raw_content)
-                if not text and raw_content.strip():
-                    unwrapped = unwrap_think_tags(raw_content)
-                    text = extract_answer_from_reasoning(unwrapped)
-                    if text:
-                        log.info(
-                            "thinking_wrap_recovered",
-                            chars=len(text),
-                        )
-                    else:
-                        log.warning(
-                            "thinking_wrap_extract_failed",
-                            raw_chars=len(raw_content),
-                            unwrapped_chars=len(unwrapped),
-                        )
-                if not text and raw_reasoning:
-                    text = extract_answer_from_reasoning(raw_reasoning)
-                    if text:
-                        log.info("recovered_from_reasoning", chars=len(text))
-                    else:
-                        log.warning(
-                            "reasoning_extract_failed",
-                            reasoning_chars=len(raw_reasoning),
-                        )
+                text = clean_completion(raw_content, raw_reasoning)
 
         usage = raw.get("usage")
         input_tokens = output_tokens = 0
@@ -287,38 +230,16 @@ class LLMProvider:
                 usage.get("completion_tokens", usage.get("output_tokens", 0))
             )
 
-        elapsed = time.time() - t0
-        has_tool_calls = bool(
-            isinstance(choices, list)
-            and choices
-            and isinstance(choices[0], dict)
-            and isinstance(choices[0].get("message"), dict)
-            and choices[0]["message"].get("tool_calls")
-        )
-        if not text and output_tokens > 100 and not has_tool_calls:
-            log.warning(
-                "llm_empty_output_large_token_count",
-                model=model,
-                output_tokens=output_tokens,
-            )
-        log.info(
-            "llm_completion_finished",
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            text_chars=len(text),
-            elapsed=f"{elapsed:.1f}s",
-        )
+        finish_reason = ""
+        if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+            fr = choices[0].get("finish_reason")
+            if isinstance(fr, str):
+                finish_reason = fr
+
         return ChatResult(
             text=text,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             raw=raw,
+            finish_reason=finish_reason,
         )
-
-    def semaphore_idle(self) -> bool:
-        """Return True if the semaphore is free (advisory, subject to TOCTOU)."""
-        acquired = self._semaphore.acquire(blocking=False)
-        if acquired:
-            self._semaphore.release()
-            return True
-        return False

@@ -12,7 +12,8 @@ WORKDIR /app
 
 ENV UV_COMPILE_BYTECODE=1
 ENV UV_LINK_MODE=copy
-ENV FASTEMBED_CACHE_PATH=/app/models
+ENV UV_NO_PROGRESS=1
+ENV RUST_LOG=warn
 
 COPY pyproject.toml uv.lock README.md ./
 RUN --mount=type=cache,target=/root/.cache/uv \
@@ -22,9 +23,6 @@ COPY src/ src/
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev
-
-RUN uv run --no-dev python -c \
-    "from fastembed import TextEmbedding; list(TextEmbedding('BAAI/bge-large-en-v1.5').embed(['warmup']))"
 
 RUN mkdir -p data
 

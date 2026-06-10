@@ -1,7 +1,7 @@
-"""Neo4j bootstrap helpers shared by sonality and fathom.
+"""Neo4j helpers shared by sonality and fathom.
 
-Provides connect → verify → apply-schema in one call, reducing duplication
-across packages that share the same Neo4j instance.
+``connect``  — bootstrap: connect → verify → apply schema.
+``ping``     — lightweight liveness probe for health endpoints.
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ from neo4j import AsyncGraphDatabase
 if TYPE_CHECKING:
     from neo4j import AsyncDriver
 
-log = structlog.get_logger()
+log = structlog.get_logger(__name__)
 
 
 async def connect(
@@ -49,3 +49,9 @@ async def connect(
         log.info("neo4j_schema_applied", statements=len(schema_statements))
 
     return driver
+
+
+async def ping(driver: AsyncDriver, database: str = "neo4j") -> None:
+    """Lightweight liveness probe — ``RETURN 1`` on the given database."""
+    async with driver.session(database=database) as session:
+        await session.run("RETURN 1")
