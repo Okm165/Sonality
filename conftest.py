@@ -1,13 +1,16 @@
 """Root conftest: configures debug-level file logging for all test sessions.
 
 Every test run writes a timestamped log file to data/ with full DEBUG output
-from the sonality package — ESS decisions, belief updates, knowledge extraction,
-memory retrieval, reflection cycles, and health diagnostics.
+from all workspace packages (sonality, fathom, shared, tests).
+
+A console handler at INFO level is also attached so key events stream to the
+terminal when running with -s (no-capture mode).
 """
+
 from __future__ import annotations
 
 import logging
-import urllib.request
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -15,63 +18,70 @@ import pytest
 
 _LOG_DIR = Path(__file__).parent / "data"
 
+# Loggers that should emit INFO-level messages to the console during test runs.
+_CONSOLE_LOGGERS = ("sonality.agent", "sonality.memory.knowledge_extract")
 
-def _embedding_service_available() -> bool:
-    """Ping the configured embedding endpoint; return True if reachable."""
-    from sonality import config as cfg
-    url = cfg.EMBEDDING_BASE_URL.rstrip("/").replace("/v1", "") + "/api/tags"
-    try:
-        urllib.request.urlopen(url, timeout=3)  # noqa: S310
-        return True
-    except Exception:
-        return False
+# Module-level storage for log handlers (avoids dynamic attrs on pytest.Config)
+_log_state: dict[str, logging.Handler | Path | None] = {}
 
 
 def pytest_configure(config: pytest.Config) -> None:
-    """Attach a rotating file handler to the root 'sonality' logger."""
-    _LOG_DIR.mkdir(parents=True, exist_ok=True)
+    """Attach file and console log handlers to sonality loggers."""
+    del config  # unused - we use module-level storage
     ts = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
-    worker = getattr(config, "workerinput", {}).get("workerid", "")
-    suffix = f"_{worker}" if worker else ""
-    log_file = _LOG_DIR / f"test_run_{ts}{suffix}.log"
+    log_name = f"test_run_{ts}.log"
 
-    handler = logging.FileHandler(log_file, encoding="utf-8")
-    handler.setLevel(logging.DEBUG)
-    handler.setFormatter(
+    log_file: Path | None = None
+    for log_dir in (_LOG_DIR, Path("/tmp/sonality_test_logs")):
+        try:
+            log_dir.mkdir(parents=True, exist_ok=True)
+            candidate = log_dir / log_name
+            candidate.touch()
+            log_file = candidate
+            break
+        except (PermissionError, OSError):
+            continue
+
+    if log_file is None:
+        return
+
+    file_handler = logging.FileHandler(log_file, encoding="utf-8")
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(
         logging.Formatter(
             "%(asctime)s %(levelname)-5s %(name)s:%(lineno)d  %(message)s",
             datefmt="%H:%M:%S",
         )
     )
 
-    for logger_name in ("sonality", "benches", "tests"):
+    console_handler = logging.StreamHandler(sys.stderr)
+    console_handler.setLevel(logging.INFO)
+    console_handler.setFormatter(logging.Formatter("%(levelname)-5s  %(name)s  %(message)s"))
+
+    for logger_name in ("sonality", "fathom", "shared", "tests"):
         logger = logging.getLogger(logger_name)
         logger.setLevel(logging.DEBUG)
-        logger.addHandler(handler)
+        logger.addHandler(file_handler)
 
-    config._sonality_log_file = log_file  # type: ignore[attr-defined]
-    config._sonality_log_handler = handler  # type: ignore[attr-defined]
+    for logger_name in _CONSOLE_LOGGERS:
+        logging.getLogger(logger_name).addHandler(console_handler)
 
-
-def pytest_collection_modifyitems(
-    config: pytest.Config, items: list[pytest.Item]
-) -> None:
-    """Skip live tests that require embeddings if the embedding service is down."""
-    if not any(item.get_closest_marker("live") for item in items):
-        return
-    if _embedding_service_available():
-        return
-    skip = pytest.mark.skip(reason="Embedding service unavailable — start Ollama first")
-    for item in items:
-        if item.get_closest_marker("live"):
-            item.add_marker(skip)
+    _log_state["file_handler"] = file_handler
+    _log_state["console_handler"] = console_handler
 
 
 def pytest_unconfigure(config: pytest.Config) -> None:
-    """Flush and close the file handler at session end."""
-    handler = getattr(config, "_sonality_log_handler", None)
-    if handler:
-        handler.flush()
-        handler.close()
-        for logger_name in ("sonality", "benches", "tests"):
-            logging.getLogger(logger_name).removeHandler(handler)
+    """Flush and close log handlers at session end."""
+    del config  # unused
+    file_handler = _log_state.get("file_handler")
+    if isinstance(file_handler, logging.FileHandler):
+        file_handler.flush()
+        file_handler.close()
+        for logger_name in ("sonality", "fathom", "shared", "tests"):
+            logging.getLogger(logger_name).removeHandler(file_handler)
+
+    console_handler = _log_state.get("console_handler")
+    if isinstance(console_handler, logging.Handler):
+        console_handler.flush()
+        for logger_name in _CONSOLE_LOGGERS:
+            logging.getLogger(logger_name).removeHandler(console_handler)
