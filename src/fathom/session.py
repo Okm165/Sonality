@@ -179,7 +179,7 @@ async def run(
     # Search with both the goal (contains subject name) and decomposed questions.
     # Questions may use pronouns that search engines can't resolve, so the goal
     # query provides a reliable anchor of relevant results.
-    initial_links = await search.search_many([goal] + questions)
+    initial_links = await search.search_many([goal, *questions])
     seed_links = [Link(url=u, anchor_text="", context="seed") for u in seeds]
     all_initial = initial_links + seed_links + suggested_links
 

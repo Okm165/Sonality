@@ -160,7 +160,11 @@ class DeepReflectionResponse(BaseModel):
             return data
         result = dict(data)
         if isinstance(result.get("snapshot_changed"), str):
-            result["snapshot_changed"] = str(result["snapshot_changed"]).lower() in ("true", "yes", "1")
+            result["snapshot_changed"] = str(result["snapshot_changed"]).lower() in (
+                "true",
+                "yes",
+                "1",
+            )
         if isinstance(result.get("belief_updates"), list):
             result["belief_updates"] = result["belief_updates"][:20]
         if isinstance(result.get("new_beliefs"), list):
