@@ -1,9 +1,0 @@
-{
-  "chunks": [
-    {
-      "text": "Test chunk text.",
-      "key_concept": "test",
-      "importance": "medium"
-    }
-  ]
-}
