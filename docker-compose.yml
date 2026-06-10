@@ -4,9 +4,12 @@
 #   sonality   8000–8009   API on 8000
 #   fathom     8010–8019   API on 8010
 #   speaches   8020–8029   API on 8020
+#   llama.cpp  8080        OpenAI-compatible LLM endpoint inside Compose
+#   embed      8090        llama.cpp embedding server (Qwen3-Embedding-4B Q4_K_M, CPU)
 #   (infrastructure services keep standard ports)
 #
 # Both sonality and fathom share the Neo4j instance (separate node labels).
+# Sonality and Fathom use the local llama.cpp endpoint by default in Compose.
 #
 # Note: default passwords are for local dev only. Override in .env for deployment.
 
@@ -31,11 +34,17 @@ services:
     env_file:
       - .env
     environment:
+      SONALITY_BASE_URL: http://llama-cpp:8080/v1
+      SONALITY_API_KEY: local
+      SONALITY_MODEL: ${SONALITY_MODEL:-gemma-4-E4B-it-Q8_0}
       SONALITY_NEO4J_URL: bolt://neo4j:7687
       SONALITY_QDRANT_URL: http://qdrant:6333
+      SONALITY_EMBEDDING_URL: http://llama-cpp-embed:8090
       SONALITY_FATHOM_URL: http://fathom:8010
-      SONALITY_LOG_LEVEL: INFO
-      SONALITY_LLM_CONCURRENCY: 1
+      SONALITY_LOG_LEVEL: DEBUG
+      SONALITY_LLM_CONCURRENCY: 1            # matches llama.cpp --parallel 1
+      SONALITY_CHAT_INPUT_TOKEN_BUDGET: 150000  # 262K ctx × 0.65 - 16K reserve
+      SONALITY_AGENT_TIME_BUDGET: 360
     volumes:
       - ./data:/app/data
     depends_on:
@@ -44,6 +53,10 @@ services:
       qdrant:
         condition: service_healthy
       fathom:
+        condition: service_healthy
+      llama-cpp:
+        condition: service_healthy
+      llama-cpp-embed:
         condition: service_healthy
     restart: unless-stopped
     healthcheck:
@@ -60,7 +73,7 @@ services:
     ports:
       - "8030:3000"
     environment:
-      TIMEOUT: 60000
+      TIMEOUT: 600000
       CONCURRENT: 10
       QUEUED: 20
       HEALTH: "true"
@@ -78,6 +91,7 @@ services:
     build:
       context: .
       dockerfile: docker/fathom.Dockerfile
+    tty: true
     ports:
       - "8010:8010"
     dns:
@@ -86,16 +100,28 @@ services:
     env_file:
       - .env
     environment:
+      FATHOM_BASE_URL: http://llama-cpp:8080/v1
+      FATHOM_API_KEY: local
+      FATHOM_MODEL: ${FATHOM_MODEL:-Qwen3.6-35B-A3B-UD-Q4_K_XL}
       FATHOM_NEO4J_URL: bolt://neo4j:7687
       FATHOM_NEO4J_USER: neo4j
       FATHOM_NEO4J_PASSWORD: sonality_password
+      FATHOM_QDRANT_URL: http://qdrant:6333
+      FATHOM_EMBEDDING_URL: http://llama-cpp-embed:8090
       FATHOM_BROWSER_WS_URL: ws://browserless:3000
-      FATHOM_LOG_LEVEL: INFO
-      FATHOM_LLM_CONCURRENCY: 1
+      FATHOM_LOG_LEVEL: DEBUG
+      FATHOM_LLM_CONCURRENCY: 1              # matches llama.cpp --parallel 1
+      FATHOM_SESSION_TIMEOUT: 7200
     depends_on:
       neo4j:
         condition: service_healthy
+      qdrant:
+        condition: service_healthy
       browserless:
+        condition: service_healthy
+      llama-cpp:
+        condition: service_healthy
+      llama-cpp-embed:
         condition: service_healthy
     restart: unless-stopped
     healthcheck:
@@ -154,6 +180,104 @@ services:
       retries: 5
       start_period: 20s
     restart: unless-stopped
+    logging: *default-logging
+
+  # --- llama.cpp LLM server (ROCm, port 8080) ---
+  llama-cpp:
+    image: ghcr.io/ggml-org/llama.cpp:server-rocm
+    ports:
+      - "8080:8080"
+    devices:
+      - /dev/kfd:/dev/kfd
+      - /dev/dri:/dev/dri
+    group_add:
+      - video
+      - render
+    cap_add:
+      - SYS_PTRACE
+    security_opt:
+      - seccomp=unconfined
+    ipc: host
+    shm_size: 16gb
+    volumes:
+      - ./.models:/models:ro
+    environment:
+      HSA_OVERRIDE_GFX_VERSION: 11.0.0
+      HIP_VISIBLE_DEVICES: "0"
+      ROCR_VISIBLE_DEVICES: "0"
+    command:
+      - --model
+      - /models/${LLM_MODEL:-Qwen3.6-35B-A3B-UD-Q4_K_XL}.gguf
+      - --port
+      - "8080"
+      - --jinja
+      - --reasoning-format
+      - deepseek
+      - --flash-attn
+      - "on"
+      - -ngl
+      - all
+      - --main-gpu
+      - "0"
+      - --ctx-size
+      - "262144"
+      - --parallel
+      - "1"
+      - --kv-unified
+      - --cache-type-k
+      - q4_0
+      - --cache-type-v
+      - q4_0
+      - --cache-ram
+      - "0"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/health || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 120s
+    logging: *default-logging
+
+  # --- llama.cpp Embedding server (CPU, port 8090) ---
+  # Runs on CPU because the LLM model occupies nearly all VRAM.
+  # CPU is viable for embeddings: batch-oriented, not autoregressive.
+  # --parallel 4: process 4 texts concurrently across slots.
+  # --threads-batch 12: use all logical cores (HT helps for batch embedding).
+  # --batch-size/--ubatch-size must match to avoid silent downgrade.
+  llama-cpp-embed:
+    image: ghcr.io/ggml-org/llama.cpp:server-rocm
+    ports:
+      - "8090:8090"
+    volumes:
+      - ./.models:/models:ro
+    command:
+      - --model
+      - /models/${EMBEDDING_MODEL:-Qwen3-Embedding-4B-Q4_K_M}.gguf
+      - --port
+      - "8090"
+      - --embedding
+      - --pooling
+      - last
+      - -ngl
+      - "0"
+      - --ctx-size
+      - "8192"
+      - --parallel
+      - "4"
+      - --batch-size
+      - "2048"
+      - --ubatch-size
+      - "2048"
+      - --threads-batch
+      - "10"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8090/health || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 60s
     logging: *default-logging
 
   # --- Speaches STT/TTS (port 8020) ---
