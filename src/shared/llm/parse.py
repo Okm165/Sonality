@@ -1,11 +1,17 @@
-"""LLM output parsing: JSON extraction, thinking trace removal, tool call parsing.
+"""LLM output cleanup: thinking removal, JSON extraction, tool call parsing.
 
-Pure functions with no I/O or provider dependency.
+All cleanup of raw LLM text lives here — provider and caller import from
+this module exclusively.  Pure functions, no I/O.
+
+Cleanup pipeline (top to bottom):
+  clean_completion   — entry point for raw chat-completion fields
+    _strip_thinking  — remove <think> blocks, reasoning fences, noise
+    _extract_answer  — find structured output buried in reasoning text
+  decode_llm_json    — extract JSON from cleaned text
 """
 
 from __future__ import annotations
 
-import contextlib
 import json
 import re
 from collections.abc import Callable, Mapping
@@ -15,16 +21,16 @@ import structlog
 
 from ..errors import LLMParseError
 
-log = structlog.get_logger()
+log = structlog.get_logger(__name__)
 
-_THINKING_ANSWER_MARKERS: Final = (
-    "Final Output:",
-    "Output:",
-    "Answer:",
-    "Final Answer:",
-    "Response:",
-)
+
+# ---------------------------------------------------------------------------
+# Regex constants — shared across cleanup stages
+# ---------------------------------------------------------------------------
+
 _THINK_BLOCK_RE: Final = re.compile(r"<think>.*?</think>", re.IGNORECASE | re.DOTALL)
+_THINK_UNCLOSED_RE: Final = re.compile(r"<think>(?:(?!</think>).)*$", re.IGNORECASE | re.DOTALL)
+_THINK_TAG_RE: Final = re.compile(r"</?think>", re.IGNORECASE)
 _THINK_CODE_BLOCK_RE: Final = re.compile(
     r"```(?:thinking|thought|reasoning)[\s\S]*?```", re.IGNORECASE
 )
@@ -32,50 +38,78 @@ _ASTERISK_THOUGHT_RE: Final = re.compile(r"^\s*\*[^*\n]+\*?\s*$", re.MULTILINE)
 _SEMANTIC_MARKER_RE: Final = re.compile(r"\[semantic/[^\]]*\][^\n]*\n?", re.IGNORECASE)
 _ANALYSIS_COMPLETE_RE: Final = re.compile(r"<analysis>[\s\S]*?</analysis>", re.IGNORECASE)
 _ANALYSIS_UNCLOSED_RE: Final = re.compile(r"<analysis>[\s\S]*$", re.IGNORECASE)
+_INTERNAL_XML_TAGS: Final = (
+    "research_plan",
+    "planning",
+    "internal",
+    "reasoning",
+    "reflection",
+    "scratch_pad",
+    "scratchpad",
+    "notes",
+    "thought_process",
+    "chain_of_thought",
+)
+_INTERNAL_XML_RE: Final = re.compile(
+    r"<(?:"
+    + "|".join(_INTERNAL_XML_TAGS)
+    + r")>[\s\S]*?</(?:"
+    + "|".join(_INTERNAL_XML_TAGS)
+    + r")>",
+    re.IGNORECASE,
+)
+_INTERNAL_XML_UNCLOSED_RE: Final = re.compile(
+    r"<(?:" + "|".join(_INTERNAL_XML_TAGS) + r")>[\s\S]*$",
+    re.IGNORECASE,
+)
+_ANSWER_MARKERS: Final = (
+    "Final Output:",
+    "Output:",
+    "Answer:",
+    "Final Answer:",
+    "Response:",
+)
 
 
 # ---------------------------------------------------------------------------
-# Thinking trace removal
+# Completion cleanup — the single entry point for provider.py
 # ---------------------------------------------------------------------------
 
 
-def strip_thinking_trace(text: str) -> str:
-    """Remove chain-of-thought traces from model-visible output."""
+def _strip_thinking(text: str) -> str:
+    """Remove all thinking/reasoning traces, return only the answer portion.
+
+    Handles closed <think>...</think> blocks, unclosed <think> tails
+    (truncated by max_tokens), reasoning code fences, asterisk thoughts,
+    and semantic markers.
+    """
     result = _THINK_BLOCK_RE.sub("", text)
+    result = _THINK_UNCLOSED_RE.sub("", result)
     result = _THINK_CODE_BLOCK_RE.sub("", result)
+    result = _INTERNAL_XML_RE.sub("", result)
+    result = _INTERNAL_XML_UNCLOSED_RE.sub("", result)
     result = _ASTERISK_THOUGHT_RE.sub("", result)
     result = _SEMANTIC_MARKER_RE.sub("", result)
     return result.strip()
 
 
-_THINK_TAG_RE: Final = re.compile(r"</?think>", re.IGNORECASE)
+def _extract_answer(text: str) -> str:
+    """Find a structured answer (JSON, marked output) in reasoning text.
 
-
-def unwrap_think_tags(text: str) -> str:
-    """Remove <think>/</think> tags but preserve the content within.
-
-    Used when a model wraps its entire output in think blocks even with
-    enable_thinking=False (e.g. gemma4). strip_thinking_trace would discard
-    everything; this preserves the inner content so structured output (JSON,
-    answer markers) can be extracted from it.
+    Preserves bullet-point content (reasoning blocks legitimately use
+    asterisk lists).  Tries answer markers first, then outermost JSON
+    brackets, then last non-empty line.
     """
-    return _THINK_TAG_RE.sub("", text).strip()
-
-
-def extract_answer_from_reasoning(reasoning: str) -> str:
-    """Extract structured answer (JSON, marked output) from reasoning text.
-
-    Unlike strip_thinking_trace, this preserves bullet-point content since
-    reasoning/thinking blocks legitimately use asterisk lists.
-    """
-    cleaned = _THINK_BLOCK_RE.sub("", reasoning)
+    cleaned = _THINK_BLOCK_RE.sub("", text)
     cleaned = _THINK_CODE_BLOCK_RE.sub("", cleaned)
     cleaned = _ANALYSIS_COMPLETE_RE.sub("", cleaned)
     cleaned = _ANALYSIS_UNCLOSED_RE.sub("", cleaned)
+    cleaned = _INTERNAL_XML_RE.sub("", cleaned)
+    cleaned = _INTERNAL_XML_UNCLOSED_RE.sub("", cleaned)
     cleaned = cleaned.strip()
     if not cleaned:
         return ""
-    for marker in _THINKING_ANSWER_MARKERS:
+    for marker in _ANSWER_MARKERS:
         idx = cleaned.lower().rfind(marker.lower())
         if idx != -1 and (answer := cleaned[idx + len(marker) :].strip()):
             return answer
@@ -96,61 +130,86 @@ def extract_answer_from_reasoning(reasoning: str) -> str:
     return ""
 
 
+def clean_completion(content: str, reasoning: str = "") -> str:
+    """Extract the meaningful answer from raw LLM completion fields.
+
+    This is the single entry point for all thinking/reasoning recovery.
+    Handles models that:
+    - Wrap output in <think>...</think> blocks
+    - Put the entire answer inside reasoning_content
+    - Get truncated mid-think by max_tokens (unclosed <think>)
+    """
+    text = _strip_thinking(content)
+
+    if (not text or text.lstrip().startswith("<think")) and content.strip():
+        text = _extract_answer(_THINK_TAG_RE.sub("", content))
+        if text:
+            log.debug("thinking_wrap_recovered", chars=len(text))
+
+    if not text and reasoning:
+        text = _extract_answer(reasoning)
+        if text:
+            log.debug("recovered_from_reasoning", chars=len(text))
+
+    return text
+
+
 # ---------------------------------------------------------------------------
 # JSON extraction from messy LLM output
 # ---------------------------------------------------------------------------
 
 
+_MD_FENCE_LINE_RE: Final = re.compile(r"^\s*```\w*\s*$", re.MULTILINE)
+
+
 def _strip_markdown_fences(text: str) -> str:
-    return text.replace("```json", "").replace("```", "").strip()
+    return _MD_FENCE_LINE_RE.sub("", text).strip()
 
 
 def _strip_analysis_block(text: str) -> str:
-    """Strip <analysis>...</analysis> scratchpad blocks from LLM output."""
     text = _ANALYSIS_COMPLETE_RE.sub("", text)
     text = _ANALYSIS_UNCLOSED_RE.sub("", text)
     return text.strip()
 
 
-def extract_last_json_object(text: str) -> dict[str, object] | None:
-    """Find the largest (by character span) valid JSON object in text."""
-    cleaned = _strip_markdown_fences(text.strip())
-    cleaned = re.sub(r":\s*\+(\d)", r": \1", cleaned)
+def _extract_last_json_object(text: str) -> dict[str, object] | list[object] | None:
+    """Find the last valid JSON object or array in text.
+
+    Expects input already stripped of markdown fences and analysis blocks.
+    LLMs emit reasoning/examples first and the answer last, so the final
+    successfully-parsed structure is almost always the intended output.
+    Prefers the last dict; falls back to the last array if no dict found.
+    """
+    cleaned = re.sub(r":\s*\+(\d)", r": \1", text.strip())
     decoder = json.JSONDecoder()
 
-    candidates: list[tuple[int, int, dict[str, object]]] = []
+    last_dict: dict[str, object] | None = None
+    last_array: list[object] | None = None
     i = 0
     while i < len(cleaned):
-        if cleaned[i] != "{":
+        if cleaned[i] not in ("{", "["):
             i += 1
             continue
         try:
             obj, end = decoder.raw_decode(cleaned, i)
             if isinstance(obj, dict):
-                candidates.append((i, end, obj))
+                last_dict = obj
+            elif isinstance(obj, list):
+                last_array = obj
             i = end
         except json.JSONDecodeError:
             i += 1
 
-    if candidates:
-        return max(candidates, key=lambda c: c[1] - c[0])[2]
-
-    try:
-        arr = json.loads(cleaned)
-        if isinstance(arr, list) and arr and all(isinstance(x, int) for x in arr):
-            return {"ranking": arr}
-    except json.JSONDecodeError:
-        pass
-    return None
+    return last_dict if last_dict is not None else last_array
 
 
 def decode_llm_json(text: str) -> dict[str, object] | list[object]:
-    """Extract JSON (object or array) from LLM response text.
+    """Extract JSON from LLM response text.
 
-    Strips markdown fences and <analysis> blocks, attempts whole-text parse
-    first (preserving bare arrays), then falls back to extract_last_json_object
-    for messy output. Raises ValueError if no JSON can be extracted.
+    Strips thinking traces, analysis blocks, and markdown fences before
+    parsing. Falls back to scanning for the last valid JSON object.
     """
+    text = _strip_thinking(text) or _THINK_TAG_RE.sub("", text).strip() or text
     cleaned = _strip_markdown_fences(_strip_analysis_block(text))
     if not cleaned:
         raise LLMParseError("Empty LLM response")
@@ -167,7 +226,7 @@ def decode_llm_json(text: str) -> dict[str, object] | list[object]:
                 return parsed
         except json.JSONDecodeError:
             pass
-    obj = extract_last_json_object(cleaned)
+    obj = _extract_last_json_object(cleaned)
     if obj is not None:
         return obj
     raise LLMParseError(f"No valid JSON in LLM response: {text[:120]!r}")
@@ -219,25 +278,6 @@ def extract_tool_calls(raw: Mapping[str, object]) -> list[ParsedToolCall]:
             args = {}
         parsed.append(ParsedToolCall(name=name, args=args, id=str(call.get("id", ""))))
     return parsed
-
-
-def extract_tool_call_arguments(
-    raw_payload: Mapping[str, object], function_name: str
-) -> dict[str, object]:
-    """Extract arguments for a specific tool call by function name."""
-    for call in get_raw_tool_calls(raw_payload):
-        func = call.get("function")
-        if not isinstance(func, dict) or func.get("name") != function_name:
-            continue
-        arguments = func.get("arguments")
-        if isinstance(arguments, dict):
-            return dict(arguments)
-        if isinstance(arguments, str):
-            with contextlib.suppress(json.JSONDecodeError):
-                parsed = json.loads(arguments)
-                if isinstance(parsed, dict):
-                    return dict(parsed)
-    return {}
 
 
 # ---------------------------------------------------------------------------
@@ -309,6 +349,20 @@ def coerce_string_fields(data: object, fields: tuple[str, ...], sep: str = "\n")
     return data
 
 
+def render_labeled(obj: object, labels: dict[str, str]) -> str:
+    """Render a Pydantic model (or any object) as labeled lines.
+
+    ``labels`` maps attribute names to display labels. Empty/missing values
+    are skipped. Returns newline-joined string.
+    """
+    parts: list[str] = []
+    for attr, label in labels.items():
+        val = getattr(obj, attr, "")
+        if val:
+            parts.append(f"{label}: {val}")
+    return "\n".join(parts)
+
+
 def normalize_llm_list_response(
     data: object,
     *,
@@ -348,12 +402,80 @@ def normalize_llm_list_response(
 
 _MD_BOLD: Final = re.compile(r"\*\*(.+?)\*\*")
 _MD_HEADER: Final = re.compile(r"^#{1,4}\s+", re.MULTILINE)
-_MD_CODE_FENCE: Final = re.compile(r"^```\w*\n?|^```$", re.MULTILINE)
+_MD_CODE_FENCE_MARKERS: Final = re.compile(r"^```\w*\s*$", re.MULTILINE)
+_MD_HORIZONTAL_RULE: Final = re.compile(r"^---+\s*$", re.MULTILINE)
+_MD_BLOCKQUOTE: Final = re.compile(r"^>\s+", re.MULTILINE)
+_FAKE_TOOL_XML_RE: Final = re.compile(
+    r"</?(?:tool_?\w*|function(?:_call)?|parameter\b)[^>]*>.*?(?:</(?:tool_?\w*|function(?:_call)?|parameter\b)[^>]*>|$)",
+    re.IGNORECASE | re.DOTALL,
+)
+_FAKE_TOOL_BRACKET_RE: Final = re.compile(
+    r"\[/?tool_?\w*\].*?(?:\[/tool_?\w*\]|$)",
+    re.IGNORECASE | re.DOTALL,
+)
+_LEAKED_SYNTHESIS_RE: Final = re.compile(
+    r"\[Research (?:complete|:\s*\d+ facts)\.?.*?\]\s*", re.DOTALL
+)
+_LEAKED_RESEARCH_NOTES_HEADER_RE: Final = re.compile(
+    r"^(?:#+\s*)?Research notes\s*(?:\([^)]*\))?\s*$", re.MULTILINE | re.IGNORECASE
+)
+_LEAKED_STEPS_HEADER_RE: Final = re.compile(
+    r"^(?:#+\s*)?Steps taken\s*$", re.MULTILINE | re.IGNORECASE
+)
+_BARE_TOOL_CALL_RE: Final = re.compile(
+    r"^\s*(?:recall_memory|web_research|integrate_knowledge)\s*\(.*?\)\s*$",
+    re.MULTILINE,
+)
+_LEAKED_BELIEF_RE: Final = re.compile(r"^.+ — valence:\s*[+-]?\d.*$", re.MULTILINE)
+_LEAKED_STEP_HISTORY_RE: Final = re.compile(
+    r"^\d+\.\s*(?:recall_memory|web_research|integrate_knowledge)\(.*?\)\s*→.*$",
+    re.MULTILINE,
+)
+_LEAKED_PLAN_RE: Final = re.compile(r"^Research Plan:\s*$", re.MULTILINE)
+_LEAKED_PLAN_STEP_RE: Final = re.compile(
+    r"^\d+\.\s*(?:Web research on|Integrate findings into|Recall memory|Look up in memory)\s.*$",
+    re.MULTILINE | re.IGNORECASE,
+)
+_LEAKED_RESEARCHING_RE: Final = re.compile(r"^Researching\s+\S.*\.\.\.\s*$", re.MULTILINE)
+_LEAKED_MEMORY_META_RE: Final = re.compile(
+    r"^(?:Note:\s*)?Memory recall (?:did not|returned).*$", re.MULTILINE | re.IGNORECASE
+)
+_LEAKED_INTERNAL_HEADER_RE: Final = re.compile(
+    r"^(?:#+\s*)?(?:Prior Knowledge|Research Findings|Your Plan|Your Beliefs|Actions Taken)\s*$",
+    re.MULTILINE | re.IGNORECASE,
+)
+_LEAKED_EPISODE_REF_RE: Final = re.compile(r"^-\s*\[\d{4}-\d{2}-\d{2}\]\s+.*$", re.MULTILINE)
+_LEAKED_SEMANTIC_MARKER_RE: Final = re.compile(
+    r"^\[semantic/\w+\]\s*.*$", re.MULTILINE | re.IGNORECASE
+)
+_LEAKED_ESS_METADATA_RE: Final = re.compile(r"\[?ESS[=:]\s*\d+\.?\d*.*?\]?", re.IGNORECASE)
+_LEAKED_ITERATION_RE: Final = re.compile(
+    r"^\[?Iteration\s+\d+(?:\s+of\s+\d+)?\]?\s*$", re.MULTILINE | re.IGNORECASE
+)
 
 
 def strip_markdown(text: str) -> str:
-    """Remove markdown bold, headers, and code fences from LLM output."""
-    text = _MD_CODE_FENCE.sub("", text)
+    """Remove markdown bold, headers, code fences, fake tool-call XML, and leaked prompts."""
+    text = _MD_CODE_FENCE_MARKERS.sub("", text)
     text = _MD_BOLD.sub(r"\1", text)
     text = _MD_HEADER.sub("", text)
+    text = _MD_HORIZONTAL_RULE.sub("", text)
+    text = _MD_BLOCKQUOTE.sub("", text)
+    text = _FAKE_TOOL_XML_RE.sub("", text)
+    text = _FAKE_TOOL_BRACKET_RE.sub("", text)
+    text = _LEAKED_SYNTHESIS_RE.sub("", text)
+    text = _LEAKED_RESEARCH_NOTES_HEADER_RE.sub("", text)
+    text = _LEAKED_STEPS_HEADER_RE.sub("", text)
+    text = _BARE_TOOL_CALL_RE.sub("", text)
+    text = _LEAKED_BELIEF_RE.sub("", text)
+    text = _LEAKED_STEP_HISTORY_RE.sub("", text)
+    text = _LEAKED_PLAN_RE.sub("", text)
+    text = _LEAKED_PLAN_STEP_RE.sub("", text)
+    text = _LEAKED_RESEARCHING_RE.sub("", text)
+    text = _LEAKED_MEMORY_META_RE.sub("", text)
+    text = _LEAKED_INTERNAL_HEADER_RE.sub("", text)
+    text = _LEAKED_EPISODE_REF_RE.sub("", text)
+    text = _LEAKED_SEMANTIC_MARKER_RE.sub("", text)
+    text = _LEAKED_ESS_METADATA_RE.sub("", text)
+    text = _LEAKED_ITERATION_RE.sub("", text)
     return text.strip()

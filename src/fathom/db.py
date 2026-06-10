@@ -13,11 +13,11 @@ from __future__ import annotations
 
 from typing import TypedDict, cast
 
-import structlog
 from neo4j._typing import LiteralString
 
-from neo4j import AsyncDriver, AsyncManagedTransaction
+from neo4j import AsyncDriver
 from shared.neo4j import connect as _neo4j_connect
+from shared.neo4j import ping as _neo4j_ping
 from shared.types import new_id
 
 from .config import settings
@@ -30,7 +30,6 @@ class SessionRow(TypedDict):
     id: str
     goal: str
     status: str
-    document: str
     pages_scraped: int
 
 
@@ -40,7 +39,6 @@ class FrontierRow(TypedDict):
     url: str
     anchor_text: str
     context: str
-    source: str
 
 
 class FactRow(TypedDict):
@@ -48,22 +46,27 @@ class FactRow(TypedDict):
 
     claim: str
     confidence: float
-    has_evidence: bool
+    source_quality: float
     source_url: str
     topic: str
 
-log = structlog.get_logger()
 
 _driver: AsyncDriver | None = None
 
 _DB = settings.neo4j_database
 
 SCHEMA_STATEMENTS: tuple[str, ...] = (
+    # Session-scoped nodes
     "CREATE CONSTRAINT rs_id IF NOT EXISTS FOR (s:ResearchSession) REQUIRE s.id IS UNIQUE",
     "CREATE CONSTRAINT fu_session_url IF NOT EXISTS FOR (u:FrontierURL) REQUIRE (u.session_id, u.url) IS UNIQUE",
     "CREATE INDEX fu_pending IF NOT EXISTS FOR (u:FrontierURL) ON (u.session_id, u.status)",
+    "CREATE CONSTRAINT rf_id IF NOT EXISTS FOR (f:ResearchFact) REQUIRE f.id IS UNIQUE",
     "CREATE INDEX rf_session IF NOT EXISTS FOR (f:ResearchFact) ON (f.session_id)",
-    "CREATE INDEX cq_session IF NOT EXISTS FOR (q:ChecklistQuestion) ON (q.session_id)",
+    # Persistent source map (cross-session learning)
+    "CREATE CONSTRAINT sd_domain IF NOT EXISTS FOR (d:SourceDomain) REQUIRE d.domain IS UNIQUE",
+    "CREATE CONSTRAINT tc_name IF NOT EXISTS FOR (t:TopicCluster) REQUIRE t.name IS UNIQUE",
+    "CREATE INDEX sd_quality IF NOT EXISTS FOR (d:SourceDomain) ON (d.quality_rate)",
+    "CREATE INDEX tc_fact_count IF NOT EXISTS FOR (t:TopicCluster) ON (t.fact_count)",
 )
 
 
@@ -89,6 +92,11 @@ async def close_driver() -> None:
         _driver = None
 
 
+async def check() -> None:
+    """Verify Neo4j is still reachable."""
+    await _neo4j_ping(await get_driver(), _DB)
+
+
 # ---------------------------------------------------------------------------
 # Sessions
 # ---------------------------------------------------------------------------
@@ -101,7 +109,7 @@ async def create_session(driver: AsyncDriver, goal: str) -> str:
             """
             CREATE (s:ResearchSession {
                 id: $id, goal: $goal, status: 'active',
-                document: '', pages_scraped: 0,
+                pages_scraped: 0,
                 created_at: datetime(), completed_at: null
             })
             """,
@@ -128,27 +136,43 @@ async def update_session(
     session_id: str,
     *,
     status: str | None = None,
-    document: str | None = None,
     pages_scraped: int | None = None,
+    fact_count: int | None = None,
 ) -> None:
     sets: list[str] = []
     params: dict[str, str | int | None] = {"id": session_id}
     if status is not None:
         sets.append("s.status = $status")
         params["status"] = status
-    if document is not None:
-        sets.append("s.document = $document")
-        params["document"] = document
     if pages_scraped is not None:
         sets.append("s.pages_scraped = $pages_scraped")
         params["pages_scraped"] = pages_scraped
-    if status == "completed":
+    if fact_count is not None:
+        sets.append("s.fact_count = $fact_count")
+        params["fact_count"] = fact_count
+    if status in ("completed", "timed_out", "failed"):
         sets.append("s.completed_at = datetime()")
     if not sets:
         return
     cypher = f"MATCH (s:ResearchSession {{id: $id}}) SET {', '.join(sets)}"
     async with driver.session(database=_DB) as session:
         await session.run(cast(LiteralString, cypher), parameters=params)  # type: ignore[arg-type]
+
+
+async def cleanup_stale_sessions(driver: AsyncDriver, *, max_age_s: int = 3600) -> int:
+    """Mark 'active' sessions older than max_age_s as 'timed_out'."""
+    async with driver.session(database=_DB) as session:
+        result = await session.run(
+            """
+            MATCH (s:ResearchSession {status: 'active'})
+            WHERE s.created_at < datetime() - duration({seconds: $max_age})
+            SET s.status = 'timed_out', s.completed_at = datetime()
+            RETURN count(s) AS cleaned
+            """,
+            max_age=max_age_s,
+        )
+        record = await result.single()
+        return record["cleaned"] if record else 0
 
 
 # ---------------------------------------------------------------------------
@@ -160,38 +184,25 @@ async def add_urls(
     driver: AsyncDriver,
     session_id: str,
     urls: list[tuple[str, str, str, str]],
-) -> int:
+) -> None:
     """Insert URLs into frontier graph. Ignores duplicates (MERGE)."""
     if not urls:
-        return 0
-
-    async def _tx(tx: AsyncManagedTransaction) -> int:
-        added = 0
-        for url, anchor, ctx, src in urls:
-            result = await tx.run(
-                """
-                MATCH (s:ResearchSession {id: $sid})
-                MERGE (u:FrontierURL {session_id: $sid, url: $url})
-                ON CREATE SET u.anchor_text = $anchor, u.context = $ctx,
-                              u.source = $src, u.status = 'pending',
-                              u.created_at = datetime()
-                WITH s, u
-                MERGE (s)-[:HAS_URL]->(u)
-                RETURN u.status AS status
-                """,
-                sid=session_id,
-                url=url,
-                anchor=anchor,
-                ctx=ctx,
-                src=src,
-            )
-            record = await result.single()
-            if record and record["status"] == "pending":
-                added += 1
-        return added
-
+        return
+    rows = [{"url": u, "anchor": a, "ctx": c, "src": s} for u, a, c, s in urls]
     async with driver.session(database=_DB) as session:
-        return await session.execute_write(_tx)
+        await session.run(
+            """
+            MATCH (s:ResearchSession {id: $sid})
+            UNWIND $rows AS row
+            MERGE (u:FrontierURL {session_id: $sid, url: row.url})
+            ON CREATE SET u.anchor_text = row.anchor, u.context = row.ctx,
+                          u.source = row.src, u.status = 'pending',
+                          u.created_at = datetime()
+            MERGE (s)-[:HAS_URL]->(u)
+            """,
+            sid=session_id,
+            rows=rows,
+        )
 
 
 async def get_pending_urls(driver: AsyncDriver, session_id: str) -> list[FrontierRow]:
@@ -199,10 +210,8 @@ async def get_pending_urls(driver: AsyncDriver, session_id: str) -> list[Frontie
         result = await session.run(
             """
             MATCH (s:ResearchSession {id: $sid})-[:HAS_URL]->(u:FrontierURL {status: 'pending'})
-            WHERE u.session_id = $sid
-            RETURN u.url AS url, u.anchor_text AS anchor_text,
-                   u.context AS context, u.source AS source
-            ORDER BY u.created_at
+            RETURN u.url AS url, u.anchor_text AS anchor_text, u.context AS context
+            ORDER BY rand()
             """,
             sid=session_id,
         )
@@ -239,37 +248,37 @@ async def insert_facts(
     """Insert facts as graph nodes linked to session and source URL."""
     if not facts:
         return 0
-
-    async def _tx(tx: AsyncManagedTransaction) -> int:
-        for fact in facts:
-            await tx.run(
-                """
-                MATCH (s:ResearchSession {id: $sid})
-                CREATE (f:ResearchFact {
-                    id: $fid, session_id: $sid, claim: $claim,
-                    confidence: $conf, has_evidence: $evidence,
-                    source_url: $source_url, topic: $topic,
-                    extracted_at: datetime()
-                })
-                CREATE (s)-[:HAS_FACT]->(f)
-                WITH f
-                OPTIONAL MATCH (u:FrontierURL {session_id: $sid, url: $source_url})
-                FOREACH (_ IN CASE WHEN u IS NOT NULL THEN [1] ELSE [] END |
-                    CREATE (f)-[:EXTRACTED_FROM]->(u)
-                )
-                """,
-                sid=session_id,
-                fid=fact.id,
-                claim=fact.claim,
-                conf=fact.confidence,
-                evidence=fact.has_evidence,
-                source_url=source_url,
-                topic=fact.topic,
-            )
-        return len(facts)
-
+    rows = [
+        {
+            "fid": f.id,
+            "claim": f.claim,
+            "conf": f.confidence,
+            "sq": f.source_quality,
+            "topic": f.topic,
+        }
+        for f in facts
+    ]
     async with driver.session(database=_DB) as session:
-        return await session.execute_write(_tx)
+        await session.run(
+            """
+            MATCH (s:ResearchSession {id: $sid})
+            OPTIONAL MATCH (u:FrontierURL {session_id: $sid, url: $source_url})
+            UNWIND $rows AS row
+            MERGE (f:ResearchFact {id: row.fid})
+            ON CREATE SET f.session_id = $sid, f.claim = row.claim,
+                f.confidence = row.conf, f.source_quality = row.sq,
+                f.source_url = $source_url, f.topic = row.topic,
+                f.extracted_at = datetime()
+            MERGE (s)-[:HAS_FACT]->(f)
+            FOREACH (_ IN CASE WHEN u IS NOT NULL THEN [1] ELSE [] END |
+                MERGE (f)-[:EXTRACTED_FROM]->(u)
+            )
+            """,
+            sid=session_id,
+            source_url=source_url,
+            rows=rows,
+        )
+    return len(facts)
 
 
 async def get_facts(driver: AsyncDriver, session_id: str) -> list[FactRow]:
@@ -278,8 +287,8 @@ async def get_facts(driver: AsyncDriver, session_id: str) -> list[FactRow]:
             """
             MATCH (s:ResearchSession {id: $sid})-[:HAS_FACT]->(f:ResearchFact)
             RETURN f.claim AS claim, f.confidence AS confidence,
-                   f.has_evidence AS has_evidence, f.source_url AS source_url,
-                   f.topic AS topic
+                   f.source_quality AS source_quality,
+                   f.source_url AS source_url, f.topic AS topic
             ORDER BY f.extracted_at
             """,
             sid=session_id,
@@ -298,33 +307,21 @@ async def save_checklist(
     items: list[ChecklistItem],
 ) -> None:
     """Replace entire checklist for a session."""
-
-    async def _tx(tx: AsyncManagedTransaction) -> None:
-        await tx.run(
+    rows = [{"question": i.question} for i in items]
+    async with driver.session(database=_DB) as session:
+        await session.run(
             """
-            MATCH (s:ResearchSession {id: $sid})-[:HAS_QUESTION]->(q:ChecklistQuestion)
-            DETACH DELETE q
+            MATCH (s:ResearchSession {id: $sid})
+            OPTIONAL MATCH (s)-[:HAS_QUESTION]->(old:ChecklistQuestion)
+            DETACH DELETE old
+            WITH DISTINCT s
+            UNWIND $rows AS row
+            CREATE (q:ChecklistQuestion {question: row.question})
+            CREATE (s)-[:HAS_QUESTION]->(q)
             """,
             sid=session_id,
+            rows=rows,
         )
-        for item in items:
-            await tx.run(
-                """
-                MATCH (s:ResearchSession {id: $sid})
-                CREATE (q:ChecklistQuestion {
-                    session_id: $sid, question: $question,
-                    answered: $answered, evidence: $evidence
-                })
-                CREATE (s)-[:HAS_QUESTION]->(q)
-                """,
-                sid=session_id,
-                question=item.question,
-                answered=item.answered,
-                evidence=item.evidence,
-            )
-
-    async with driver.session(database=_DB) as session:
-        await session.execute_write(_tx)
 
 
 async def get_checklist(driver: AsyncDriver, session_id: str) -> list[ChecklistItem]:
@@ -332,16 +329,9 @@ async def get_checklist(driver: AsyncDriver, session_id: str) -> list[ChecklistI
         result = await session.run(
             """
             MATCH (s:ResearchSession {id: $sid})-[:HAS_QUESTION]->(q:ChecklistQuestion)
-            RETURN q.question AS question, q.answered AS answered, q.evidence AS evidence
+            RETURN q.question AS question
             """,
             sid=session_id,
         )
         rows = await result.data()
-    return [
-        ChecklistItem(
-            question=r["question"],
-            answered=r["answered"],
-            evidence=list(r["evidence"]) if r["evidence"] else [],
-        )
-        for r in rows
-    ]
+    return [ChecklistItem(question=r["question"]) for r in rows]

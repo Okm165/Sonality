@@ -9,6 +9,7 @@ real-time agent status.
 from __future__ import annotations
 
 import json
+import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Final
@@ -18,16 +19,13 @@ import structlog
 
 from . import config
 
-log = structlog.get_logger()
+log = structlog.get_logger(__name__)
 
 # Shared tool labels for UX display (no emojis)
 TOOL_LABELS: Final[dict[str, str]] = {
     "recall_memory": "Recalling",
-    "web_search": "Searching web",
-    "web_extract": "Reading page",
+    "web_research": "Researching",
     "integrate_knowledge": "Integrating",
-    "synthesize": "Synthesizing",
-    "quorum_critique": "Cross-checking",
 }
 
 
@@ -37,11 +35,10 @@ def extract_tool_arg_summary(tool_args: str) -> str:
         return ""
     try:
         parsed = json.loads(tool_args)
-        raw = parsed.get(
-            "query",
-            parsed.get("url", parsed.get("focus", parsed.get("topic", parsed.get("text", "")))),
-        )
-        return str(raw)[:60] if raw else ""
+        for key in ("query", "goal", "url", "focus", "topic", "text"):
+            if raw := parsed.get(key):
+                return str(raw)[:60]
+        return ""
     except json.JSONDecodeError:
         return tool_args[:60]
 
@@ -92,7 +89,6 @@ class ProgressEvent:
     tool_name: str = ""
     tool_args: str = ""
     tool_result_summary: str = ""
-    iteration: int = 0
     sources_count: int = 0
 
 
@@ -101,7 +97,8 @@ class SonalityClient:
 
     def __init__(self, max_history: int = 40) -> None:
         self._client = httpx.AsyncClient(
-            base_url=config.settings.sonality_url, timeout=httpx.Timeout(config.settings.http_timeout, connect=10.0)
+            base_url=config.settings.sonality_url,
+            timeout=httpx.Timeout(config.settings.http_timeout, connect=10.0),
         )
         self._history: list[dict[str, str]] = []
         self._max_history = max_history
@@ -114,24 +111,28 @@ class SonalityClient:
         r.raise_for_status()
         d = r.json()
         return HealthStatus(
-            belief_count=d.get("belief_count", 0),
-            snapshot_version=d.get("snapshot_version", 0),
-            uptime_seconds=float(d.get("uptime_seconds", 0)),
-            version=d.get("version", ""),
+            belief_count=int(d.get("belief_count") or 0),
+            snapshot_version=int(d.get("snapshot_version") or 0),
+            uptime_seconds=float(d.get("uptime_seconds") or 0),
+            version=str(d.get("version") or ""),
         )
 
     async def beliefs(self) -> list[Belief]:
         """Fetch all beliefs from the API. Server returns a JSON list."""
         r = await self._client.get("/beliefs")
         r.raise_for_status()
+        items = r.json()
+        if not isinstance(items, list):
+            return []
         return [
             Belief(
-                topic=b.get("topic", ""),
-                valence=float(b.get("valence", 0)),
-                confidence=float(b.get("confidence", 0)),
-                belief_text=b.get("belief_text", ""),
+                topic=str(b.get("topic", "")),
+                valence=float(b.get("valence") or 0),
+                confidence=float(b.get("confidence") or 0),
+                belief_text=str(b.get("belief_text", "")),
             )
-            for b in r.json()
+            for b in items
+            if isinstance(b, dict)
         ]
 
     async def chat_stream(self, message: str) -> AsyncIterator[str | ProgressEvent]:
@@ -141,12 +142,16 @@ class SonalityClient:
         """
         self._history.append({"role": "user", "content": message})
         self._trim_history()
+        trace_id = str(uuid.uuid4())[:12]
+        structlog.contextvars.clear_contextvars()
+        structlog.contextvars.bind_contextvars(trace_id=trace_id)
         log.debug("chat_stream_send", messages=len(self._history), latest_chars=len(message))
         chunks: list[str] = []
         try:
             async with self._client.stream(
                 "POST",
                 "/v1/chat/completions",
+                headers={"X-Trace-ID": trace_id},
                 json={
                     "model": config.settings.model_id,
                     "messages": list(self._history),
@@ -173,19 +178,26 @@ class SonalityClient:
                         continue
 
                     if event_type:
+                        detail = data.get("detail", "")
+                        if event_type == "tool_progress":
+                            log.debug(
+                                "tool_progress_received",
+                                detail=detail[:60],
+                                tool=data.get("tool_name", ""),
+                            )
                         yield ProgressEvent(
                             type=event_type,
-                            detail=data.get("detail", ""),
+                            detail=detail,
                             tool_name=data.get("tool_name", ""),
                             tool_args=data.get("tool_args", ""),
                             tool_result_summary=data.get("tool_result_summary", ""),
-                            iteration=data.get("iteration", 0),
-                            sources_count=data.get("sources_count", 0),
+                            sources_count=int(data.get("sources_count") or 0),
                         )
                         event_type = ""
                         continue
 
-                    if content := data.get("choices", [{}])[0].get("delta", {}).get("content"):
+                    choices = data.get("choices") or []
+                    if content := (choices[0].get("delta", {}).get("content") if choices else None):
                         chunks.append(content)
                         yield content
                     event_type = ""
@@ -194,7 +206,11 @@ class SonalityClient:
             raise
         full_response = "".join(chunks)
         log.debug("chat_stream_received", chars=len(full_response), chunks=len(chunks))
-        self._history.append({"role": "assistant", "content": full_response})
+        if full_response:
+            self._history.append({"role": "assistant", "content": full_response})
+        else:
+            self._history.pop()
+            log.warning("empty_assistant_response")
 
     def _trim_history(self) -> None:
         while len(self._history) > self._max_history:

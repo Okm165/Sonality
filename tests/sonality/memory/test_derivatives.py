@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
+from unittest.mock import AsyncMock
+
 from sonality.memory.derivatives import ChunkingResponse, ChunkItem
-
-
-class _FakeEmbedder:
-    def embed_documents(self, documents: list[str]) -> list[list[float]]:
-        return [[0.1] * 4 for _ in documents]
 
 
 class TestChunkingResponseNormalization:
@@ -30,32 +28,30 @@ class TestChunkingResponseNormalization:
 
 class TestChunkAndEmbed:
     def test_falls_back_on_llm_failure(self, monkeypatch) -> None:
-        from pydantic import BaseModel
-
         from sonality.caller import LLMCallResult
         from sonality.memory.derivatives import chunk_and_embed
 
-        def failing_call[T: BaseModel](
-            *,
-            prompt: str,
-            response_model: type[T],
-            fallback: T,
-            **_: object,
-        ) -> LLMCallResult[T]:
-            del prompt, response_model
+        async def failing_call(**_: object) -> LLMCallResult[ChunkingResponse]:
             return LLMCallResult(
-                value=fallback, success=False, error="Provider timeout", attempts=1, raw_text=""
+                value=ChunkingResponse(chunks=[]),
+                success=False,
+                error="Provider timeout",
+                attempts=1,
+                raw_text="",
             )
 
-        monkeypatch.setattr("sonality.memory.derivatives.llm_call", failing_call)
+        monkeypatch.setattr("sonality.memory.derivatives.async_llm_call", failing_call)
+        monkeypatch.setattr(
+            "sonality.memory.derivatives.async_embed_documents",
+            AsyncMock(return_value=[[0.1] * 4]),
+        )
 
-        results = chunk_and_embed(_FakeEmbedder(), "Some long text about science.", "ep-001")
+        embedder = AsyncMock()
+        results = asyncio.run(chunk_and_embed(embedder, "Some long text about science.", "ep-001"))
         assert len(results) == 1
         assert results[0].node.key_concept == "full_content"
 
-    def test_filters_placeholder_chunks(self) -> None:
-        from unittest.mock import patch
-
+    def test_filters_placeholder_chunks(self, monkeypatch) -> None:
         from sonality.caller import LLMCallResult
         from sonality.memory.derivatives import chunk_and_embed
 
@@ -70,7 +66,16 @@ class TestChunkAndEmbed:
             value=payload, success=True, attempts=1, raw_text=""
         )
 
-        with patch("sonality.memory.derivatives.llm_call", return_value=mock_result):
-            results = chunk_and_embed(_FakeEmbedder(), "Some text.", "ep-002")
+        async def ok_call(**_: object) -> LLMCallResult[ChunkingResponse]:
+            return mock_result
+
+        monkeypatch.setattr("sonality.memory.derivatives.async_llm_call", ok_call)
+        monkeypatch.setattr(
+            "sonality.memory.derivatives.async_embed_documents",
+            AsyncMock(return_value=[[0.1] * 4]),
+        )
+
+        embedder = AsyncMock()
+        results = asyncio.run(chunk_and_embed(embedder, "Some text.", "ep-002"))
         assert len(results) == 1
         assert results[0].node.text == "Real content"

@@ -1,13 +1,14 @@
 """Database schema definitions for Neo4j and Qdrant.
 
 Central schema registry: Qdrant collection configs (vectors, indices, quantization),
-Neo4j constraints/indices, and shared enums (ChatRole, ToolName, EventType,
-SemanticCategory, Collection). Neo4j relationship types live in memory/graph.py
-alongside the Cypher queries that use them.
+Neo4j constraints/indices, and shared enums (ToolName, EventType, SemanticCategory,
+Collection). Neo4j relationship types live in memory/graph.py alongside the Cypher
+queries that use them. ChatRole lives in shared.types.
 """
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Final
@@ -26,8 +27,6 @@ from qdrant_client.models import (
     VectorParams,
 )
 
-from shared.types import ChatRole as ChatRole
-
 from . import config
 
 
@@ -39,7 +38,7 @@ class Collection(StrEnum):
 
 
 class SemanticCategory(StrEnum):
-    """Semantic feature categories for personality extraction."""
+    """Categories for semantic feature and knowledge extraction."""
 
     PERSONALITY = "personality"
     PREFERENCES = "preferences"
@@ -47,14 +46,16 @@ class SemanticCategory(StrEnum):
     RELATIONSHIPS = "relationships"
 
 
+def normalize_topic(raw: str) -> str:
+    """Normalize a topic string to a canonical slug (lowercase, underscores)."""
+    return re.sub(r"[^a-z0-9]+", "_", raw.lower()).strip("_")
+
+
 class ToolName(StrEnum):
     """Canonical tool names — single source of truth for all tool references."""
 
     RECALL_MEMORY = "recall_memory"
-    WEB_SEARCH = "web_search"
-    WEB_EXTRACT = "web_extract"
     WEB_RESEARCH = "web_research"
-    SYNTHESIZE = "synthesize"
     INTEGRATE_KNOWLEDGE = "integrate_knowledge"
 
 
@@ -66,8 +67,18 @@ class EventType(StrEnum):
     TOOL_RESULT = "tool_result"
     CONTEXT_BUILD = "context_build"
     SUMMARIZING = "summarizing"
+    TOOL_PROGRESS = "tool_progress"
 
     DONE = "done"
+
+
+class Phase(StrEnum):
+    """Automaton phases for the agentic loop state machine."""
+
+    THINKING = "thinking"
+    ACTING = "acting"
+    COMPLETED = "completed"
+    FAILED = "failed"
 
 
 DENSE_VECTOR: Final = "dense"
@@ -101,67 +112,69 @@ class CollectionSpec:
     text_index_field: str = ""
 
 
-QDRANT_COLLECTIONS: Final[dict[str, CollectionSpec]] = {
-    Collection.DERIVATIVES: CollectionSpec(
-        vectors_config={
-            DENSE_VECTOR: VectorParams(
-                size=config.settings.embedding_dimensions, distance=Distance.COSINE, on_disk=False
-            ),
-        },
-        payload_schema={
-            "uid": PayloadSchemaType.KEYWORD,
-            "episode_uid": PayloadSchemaType.KEYWORD,
-            "text": PayloadSchemaType.TEXT,
-            "key_concept": PayloadSchemaType.KEYWORD,
-            "sequence_num": PayloadSchemaType.INTEGER,
-            "archived": PayloadSchemaType.BOOL,
-            "created_at": PayloadSchemaType.DATETIME,
-        },
-        text_index_field="text",
-    ),
-    Collection.SEMANTIC_FEATURES: CollectionSpec(
-        vectors_config={
-            DENSE_VECTOR: VectorParams(
-                size=config.settings.embedding_dimensions, distance=Distance.COSINE, on_disk=False
-            ),
-        },
-        payload_schema={
-            "uid": PayloadSchemaType.KEYWORD,
-            "category": PayloadSchemaType.KEYWORD,
-            "tag": PayloadSchemaType.KEYWORD,
-            "feature_name": PayloadSchemaType.KEYWORD,
-            "value": PayloadSchemaType.TEXT,
-            "episode_citations": PayloadSchemaType.KEYWORD,
-            "confidence": PayloadSchemaType.FLOAT,
-            "created_at": PayloadSchemaType.DATETIME,
-            "updated_at": PayloadSchemaType.DATETIME,
-        },
-        text_index_field="value",
-    ),
-}
+def qdrant_collection_specs(dims: int) -> dict[str, CollectionSpec]:
+    """Build Qdrant collection specs for the given embedding dimension."""
+    return {
+        Collection.DERIVATIVES: CollectionSpec(
+            vectors_config={
+                DENSE_VECTOR: VectorParams(size=dims, distance=Distance.COSINE, on_disk=False),
+            },
+            payload_schema={
+                "uid": PayloadSchemaType.KEYWORD,
+                "episode_uid": PayloadSchemaType.KEYWORD,
+                "text": PayloadSchemaType.TEXT,
+                "archived": PayloadSchemaType.BOOL,
+                "prospective_query": PayloadSchemaType.TEXT,
+                "created_at": PayloadSchemaType.DATETIME,
+                "specificity": PayloadSchemaType.FLOAT,
+                "grounding": PayloadSchemaType.FLOAT,
+                "rigor": PayloadSchemaType.FLOAT,
+                "source_quality": PayloadSchemaType.FLOAT,
+                "objectivity": PayloadSchemaType.FLOAT,
+            },
+            text_index_field="text",
+        ),
+        Collection.SEMANTIC_FEATURES: CollectionSpec(
+            vectors_config={
+                DENSE_VECTOR: VectorParams(size=dims, distance=Distance.COSINE, on_disk=False),
+            },
+            payload_schema={
+                "uid": PayloadSchemaType.KEYWORD,
+                "category": PayloadSchemaType.KEYWORD,
+                "tag": PayloadSchemaType.KEYWORD,
+                "feature_name": PayloadSchemaType.KEYWORD,
+                "value": PayloadSchemaType.TEXT,
+                "episode_citations": PayloadSchemaType.KEYWORD,
+                "confidence": PayloadSchemaType.FLOAT,
+                "created_at": PayloadSchemaType.DATETIME,
+                "updated_at": PayloadSchemaType.DATETIME,
+            },
+            text_index_field="value",
+        ),
+    }
+
 
 NEO4J_SCHEMA_STATEMENTS: Final[tuple[str, ...]] = (
     "CREATE CONSTRAINT episode_uid IF NOT EXISTS FOR (e:Episode) REQUIRE e.uid IS UNIQUE",
-    "CREATE CONSTRAINT derivative_uid IF NOT EXISTS FOR (d:Derivative) REQUIRE d.uid IS UNIQUE",
     "CREATE CONSTRAINT topic_name IF NOT EXISTS FOR (t:Topic) REQUIRE t.name IS UNIQUE",
-    "CREATE CONSTRAINT segment_id IF NOT EXISTS FOR (s:Segment) REQUIRE s.segment_id IS UNIQUE",
-    "CREATE CONSTRAINT summary_uid IF NOT EXISTS FOR (s:Summary) REQUIRE s.uid IS UNIQUE",
     "CREATE CONSTRAINT belief_topic IF NOT EXISTS FOR (b:Belief) REQUIRE b.topic IS UNIQUE",
     "CREATE CONSTRAINT identity_session IF NOT EXISTS FOR (n:PersonalitySnapshot) REQUIRE n.session_id IS UNIQUE",
     "CREATE INDEX episode_created_at IF NOT EXISTS FOR (e:Episode) ON (e.created_at)",
-    "CREATE INDEX episode_segment IF NOT EXISTS FOR (e:Episode) ON (e.segment_id)",
-    "CREATE INDEX derivative_episode IF NOT EXISTS FOR (d:Derivative) ON (d.source_episode_uid)",
     "CREATE INDEX episode_archived_created IF NOT EXISTS FOR (e:Episode) ON (e.archived, e.created_at)",
     "CREATE INDEX episode_archived_utility IF NOT EXISTS FOR (e:Episode) ON (e.archived, e.utility_score)",
-    "CREATE INDEX episode_segment_ess IF NOT EXISTS FOR (e:Episode) ON (e.segment_id, e.ess_score)",
 )
 
 
-async def init_qdrant_collections(client: AsyncQdrantClient) -> None:
-    """Initialize Qdrant collections with optimized schemas."""
+async def init_qdrant_collections(client: AsyncQdrantClient, *, dims: int = 0) -> None:
+    """Initialize Qdrant collections with optimized schemas.
+
+    Args:
+        dims: Embedding vector dimensions. When 0 (default), reads from config.
+    """
     from qdrant_client.models import TokenizerType
 
-    for name, spec in QDRANT_COLLECTIONS.items():
+    effective_dims = dims or config.settings.embedding_dimensions
+    for name, spec in qdrant_collection_specs(effective_dims).items():
         if not await client.collection_exists(name):
             await client.create_collection(
                 collection_name=name,
