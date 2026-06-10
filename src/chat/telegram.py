@@ -27,7 +27,7 @@ from .client import (
     pipeline_summary,
 )
 
-log = structlog.get_logger()
+log = structlog.get_logger(__name__)
 router = Router()
 
 
@@ -229,12 +229,23 @@ def _format_step(tool_name: str, args_summary: str) -> str:
     return f"{label}: {args_summary}" if args_summary else label
 
 
+_STATUS_WINDOW = 8
+_STATUS_MAX = 10
+
+
 def _format_status(steps: list[str], current: str, elapsed: float) -> str:
-    parts = [f"[done] {s}" for s in steps[-5:]]
+    """Scrolling status window: show last 8 completed steps + current, max 10 lines."""
+    visible = steps[-_STATUS_WINDOW:]
+    skipped = len(steps) - len(visible)
+    parts: list[str] = []
+    if skipped > 0:
+        parts.append(f"... {skipped} earlier steps")
+    parts.extend(f"[done] {s}" for s in visible)
     if current:
         parts.append(f">> {current}")
+    parts = parts[-_STATUS_MAX:]
     status = "\n".join(parts) or "Thinking..."
-    if elapsed > 1.0:
+    if elapsed > 2.0:
         status += f"\n({elapsed:.0f}s)"
     return status
 
@@ -250,12 +261,6 @@ def _format_done_footer(detail: str, tool_names: list[str]) -> str | None:
         parts.append(pipeline)
     if el := d.get("elapsed"):
         parts.append(f"{el}s")
-    if ess := d.get("ess_score"):
-        parts.append(f"ESS {ess}")
-    if rtype := d.get("reasoning_type"):
-        parts.append(f"({rtype})")
-    if topics := d.get("topics"):
-        parts.append(" ".join(f"#{t}" for t in topics[:3]))
     return " | ".join(parts) if parts else None
 
 
@@ -326,10 +331,13 @@ async def _consume_stream(
                         detail = f" - {item.tool_result_summary[:40]}"
                     result.completed_steps.append(f"{current_step[:40]}{detail}")
                 current_step = ""
+            elif item.type == "tool_progress":
+                log.debug("tg_tool_progress", detail=item.detail[:60])
+                if current_step and current_step != "Working...":
+                    result.completed_steps.append(current_step)
+                current_step = item.detail[:60] if item.detail else "Working..."
             elif item.type == "thinking":
                 current_step = "Thinking..."
-            elif item.type == "reviewing":
-                current_step = item.detail or "Cross-checking evidence..."
             elif item.type == "context_build":
                 current_step = item.detail or "Loading context..."
             elif item.type == "summarizing":
@@ -423,7 +431,13 @@ async def handle_text(msg: Message, bot: Bot, pool: ClientPool, **_: object) -> 
             if result.done_footer:
                 final += f"\n\n<i>{result.done_footer}</i>"
             await msg.answer(final, parse_mode="HTML")
-            log.info("response_complete", user_id=uid, chars=len(result.text), tools=len(result.tool_names), elapsed=f"{time.perf_counter() - t0:.1f}s")
+            log.info(
+                "response_complete",
+                user_id=uid,
+                chars=len(result.text),
+                tools=len(result.tool_names),
+                elapsed_s=round(time.perf_counter() - t0, 1),
+            )
         else:
             log.warning("empty_response", user_id=uid)
             await msg.answer("<i>No response generated. Try rephrasing.</i>", parse_mode="HTML")
@@ -489,6 +503,14 @@ async def handle_voice(msg: Message, bot: Bot, pool: ClientPool, audio: AudioPro
             await _send_voice_reply(msg, result.text, audio)
             if result.done_footer:
                 await msg.answer(f"<i>{result.done_footer}</i>", parse_mode="HTML")
+            log.info(
+                "voice_turn_complete",
+                user_id=uid,
+                elapsed_s=round(time.perf_counter() - t0, 1),
+                stt_chars=len(text),
+                response_chars=len(result.text),
+                tools=result.tool_names,
+            )
         else:
             log.warning("empty_voice_response", user_id=uid)
             await msg.answer("<i>No response generated. Try again.</i>", parse_mode="HTML")
@@ -502,7 +524,11 @@ async def _main() -> None:
     if not config.settings.telegram_token:
         sys.exit("Error: CHAT_TELEGRAM_TOKEN not set")
 
-    log.info("telegram_bot_starting", sonality_url=config.settings.sonality_url, speaches_url=config.settings.speaches_url)
+    log.info(
+        "telegram_bot_starting",
+        sonality_url=config.settings.sonality_url,
+        speaches_url=config.settings.speaches_url,
+    )
 
     bot = Bot(token=config.settings.telegram_token)
     dp = Dispatcher()
@@ -539,7 +565,7 @@ async def _main() -> None:
             polling_task = asyncio.create_task(dp.start_polling(bot))
             shutdown_task = asyncio.create_task(shutdown_event.wait())
             cleanup_task = asyncio.create_task(_periodic_cleanup())
-            _done, pending = await asyncio.wait(
+            _, pending = await asyncio.wait(
                 [polling_task, shutdown_task, cleanup_task],
                 return_when=asyncio.FIRST_COMPLETED,
             )

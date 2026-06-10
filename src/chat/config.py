@@ -7,9 +7,9 @@ TTS optimization defaults to the core Sonality LLM endpoint unless overridden.
 from __future__ import annotations
 
 from dotenv import load_dotenv
+from pydantic import model_validator
 from pydantic_settings import BaseSettings
 
-import sonality.config as sonality_config
 from shared.config import PROJECT_ROOT
 
 load_dotenv(PROJECT_ROOT / ".env", override=False)
@@ -43,22 +43,29 @@ class Settings(BaseSettings):
     tts_optimize_base_url: str = ""
     tts_optimize_api_key: str = ""
     tts_optimize_model: str = ""
-    tts_optimize_max_tokens: int = 8192
+    tts_optimize_max_tokens: int = -1
     tts_optimize_temperature: float = 0.3
     tts_optimize_timeout: float = 60.0
+    tts_optimize_concurrency: int = 1
 
     # HTTP client
     model_id: str = "sonality"
     http_timeout: float = 512.0
-    log_level: str = "INFO"
+    log_level: str = "DEBUG"
+
+    @model_validator(mode="after")
+    def _fill_tts_defaults(self) -> Settings:
+        """Fill TTS optimization defaults from sonality config if not overridden."""
+        if not self.tts_optimize_base_url or not self.tts_optimize_model:
+            import sonality.config as sonality_config
+
+            if not self.tts_optimize_base_url:
+                self.tts_optimize_base_url = sonality_config.settings.base_url
+            if not self.tts_optimize_api_key:
+                self.tts_optimize_api_key = sonality_config.settings.api_key
+            if not self.tts_optimize_model:
+                self.tts_optimize_model = sonality_config.settings.model
+        return self
 
 
 settings = Settings()
-
-# Fill TTS optimization defaults from sonality if not overridden
-if not settings.tts_optimize_base_url:
-    settings.tts_optimize_base_url = sonality_config.settings.base_url
-if not settings.tts_optimize_api_key:
-    settings.tts_optimize_api_key = sonality_config.settings.api_key
-if not settings.tts_optimize_model:
-    settings.tts_optimize_model = sonality_config.settings.model

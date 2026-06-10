@@ -24,7 +24,7 @@ from .client import (
     pipeline_summary,
 )
 
-log = structlog.get_logger()
+log = structlog.get_logger(__name__)
 
 console = Console()
 
@@ -82,8 +82,8 @@ def _progress_action(event: ProgressEvent) -> str:
         return event.detail if event.detail else "Loading context..."
     if event.type == "summarizing":
         return event.detail if event.detail else "Compressing context..."
-    if event.type == "reviewing":
-        return event.detail if event.detail else "Cross-checking evidence..."
+    if event.type == "tool_progress":
+        return event.detail[:60] if event.detail else "Working..."
     if event.type == "tool_call":
         label = TOOL_LABELS.get(event.tool_name, event.tool_name.replace("_", " "))
         query = extract_tool_arg_summary(event.tool_args)
@@ -129,18 +129,6 @@ def _format_done_metadata(detail: str, tool_names: list[str]) -> Text | None:
         if t.plain:
             t.append(" | ", style="dim")
         t.append(f"{el}s", style="dim yellow")
-    if ess := d.get("ess_score"):
-        if t.plain:
-            t.append(" | ", style="dim")
-        ess_f = float(ess)
-        ess_style = "bold green" if ess_f >= 0.5 else "yellow" if ess_f >= 0.2 else "dim"
-        t.append(f"ESS {ess}", style=ess_style)
-    if rtype := d.get("reasoning_type"):
-        t.append(f" ({rtype})", style="dim")
-    if topics := d.get("topics"):
-        if t.plain:
-            t.append(" | ", style="dim")
-        t.append(" ".join(f"#{tp}" for tp in topics[:4]), style="dim cyan")
     return t if t.plain else None
 
 
@@ -269,7 +257,12 @@ async def _chat_loop(client: SonalityClient) -> None:
                 footer.append_text(done_meta)
                 console.print(footer)
 
-            log.info("response_complete", chars=response_chars, tools=len(tool_names_used), elapsed=f"{_time.perf_counter() - t0:.1f}s")
+            log.info(
+                "response_complete",
+                chars=response_chars,
+                tools=len(tool_names_used),
+                elapsed_s=round(_time.perf_counter() - t0, 1),
+            )
         except Exception as e:
             log.error("chat_error", error=str(e), exc_info=True)
             console.print(f"[red]Error: {e}[/red]")
