@@ -10,79 +10,65 @@ are tools the LLM invokes autonomously.
 from __future__ import annotations
 
 import asyncio
-import dataclasses
+import contextlib
 import json
-import re
 import threading
 import time
-from collections.abc import Callable, Coroutine, Iterator
+from collections.abc import Callable, Coroutine, Generator, Iterator
 from concurrent.futures import Future
-from contextvars import Token
-from typing import Final, Literal, NamedTuple
+from uuid import uuid4
 
 import structlog
-from pydantic import BaseModel, model_validator
 
+from shared.llm.caller import compose_guarded
 from shared.llm.parse import (
     ParsedToolCall,
-    coerce_string_fields,
     extract_tool_calls,
     get_raw_tool_calls,
     strip_markdown,
 )
+from shared.types import ChatRole
 
 from . import config
-from .caller import llm_call
-from .ess import ESS_FALLBACK, ESSResult, classify
+from .automaton import (
+    TERMINAL_PHASES,
+    ActingContext,
+    LoopState,
+    LoopStep,
+    MemoryUpdate,
+    build_scaffolding,
+    build_step_context,
+    dedup_tool_calls,
+    summarize_for_step_log,
+    synthesis_prompt,
+)
+from .bookkeeping import (
+    BookkeepingItem,
+    classify_ess,
+    enqueue_bookkeeping,
+    post_ingest,
+    process_bookkeeping,
+)
+from .caller import StreamChunk, llm_call
+from .caller import provider as default_provider
+from .ess import ESS_FALLBACK, ESSResult
 from .memory import (
-    BoundaryDecision,
     DatabaseConnections,
     DualEpisodeStore,
-    Embedder,
-    EventBoundaryDetector,
     MemoryGraph,
-    QueryCategory,
-    RoutingDecision,
-    SemanticIngestionWorker,
-    SemanticMemoryDecision,
-    StoredEpisode,
-    TemporalExpansionDecision,
-    assess_belief_evidence_batch,
-    chain_retrieve,
-    rerank_episodes,
-    route_query,
-    split_retrieve,
+    SemanticFeatureExtractor,
+    retrieve,
 )
-from .memory.consolidation import maybe_consolidate_segment
 from .memory.graph import (
     BeliefNode,
-    EpisodeNode,
     PersonalitySnapshot,
     format_beliefs_for_prompt_from_nodes,
-    format_episode_line,
 )
-from .progress import (
-    CONTEXT_BUILD,
-    DONE,
-    SUMMARIZING,
-    THINKING,
-    TOOL_CALL,
-    TOOL_RESULT,
-    AgentEvent,
-    noop_progress,
-)
+from .progress import AgentEvent, noop_progress
 from .prompts import (
-    INGEST_SYSTEM_PROMPT,
-    LOOP_HANDOFF_PROMPT,
-    STATE_COMPRESSION_PROMPT,
+    CONSOLIDATION_INSTRUCTIONS,
+    build_ingest_system,
     build_system_prompt,
-)
-from .provider import (
-    ChatResult,
-    StreamChunk,
-    default_provider,
-    interaction_active,
-    interaction_in_progress,
 )
 from .request_identity import (
     IdentityBundle,
@@ -90,107 +76,17 @@ from .request_identity import (
     reset_request_identity,
     set_request_identity,
 )
-from .schema import DENSE_VECTOR, ChatRole, Collection, SemanticCategory, ToolName
+from .schema import EventType, Phase, ToolName
 from .token_budget import (
     SUMMARIZE_THRESHOLD,
     message_tokens_budget_for_system,
     summarize_and_trim,
 )
-from .tools import ToolContext, dispatch_tool, get_definitions
-from .tools.reflect import run_forgetting
+from .tools import ToolContext, dispatch_tool, get_definitions, tool_label
+from .tools.reflect import rank_beliefs_by_similarity
 from .web_client import ResearchClient
 
-log = structlog.get_logger()
-_FOLD_PREFIX: Final = "[Folded]"  # marker for folded tool output summaries
-
-
-
-
-class _StateCompressionSchema(BaseModel):
-    """Structured state summary for context compression."""
-
-    findings: str = ""
-    established: str = ""
-    integrated: str = ""
-    open_questions: str = ""
-    guidance: str = ""
-
-    @model_validator(mode="before")
-    @classmethod
-    def coerce_fields(cls, data: object) -> object:
-        if isinstance(data, dict) and "stored" in data and "integrated" not in data:
-            data["integrated"] = data.pop("stored")
-        return coerce_string_fields(
-            data, ("findings", "established", "integrated", "open_questions", "guidance")
-        )
-
-    def render(self) -> str:
-        parts: list[str] = []
-        if self.findings:
-            parts.append(f"Findings: {self.findings}")
-        if self.established:
-            parts.append(f"Established: {self.established}")
-        if self.integrated:
-            parts.append(f"Integrated: {self.integrated}")
-        if self.open_questions:
-            parts.append(f"Open: {self.open_questions}")
-        if self.guidance:
-            parts.append(f"Guidance: {self.guidance}")
-        return "\n".join(parts)
-
-
-class _LoopHandoffSchema(BaseModel):
-    """Pydantic schema for the structured handoff between agent iterations."""
-
-    action: str = "continue"
-    next_focus: str = ""
-    established: list[str] = []
-    gaps: list[str] = []
-    rationale: str = ""
-    guidance: str = ""
-    critique: str = ""
-    knowledge: str = ""
-
-    @model_validator(mode="before")
-    @classmethod
-    def coerce_guidance(cls, data: object) -> object:
-        """Coerce guidance to string — LLM sometimes returns a dict with 'query'/'text' keys."""
-        if isinstance(data, dict):
-            raw = data.get("guidance")
-            if isinstance(raw, dict):
-                data["guidance"] = raw.get("query") or raw.get("text") or json.dumps(raw)
-        return coerce_string_fields(
-            data, ("guidance", "next_focus", "rationale", "critique", "knowledge")
-        )
-
-    @model_validator(mode="after")
-    def normalize_and_trim(self) -> _LoopHandoffSchema:
-        self.action = self.action.strip().lower()
-        self.next_focus = self.next_focus[:120]
-        self.established = [s[:80] for s in self.established[:4] if s.strip()]
-        self.gaps = [s[:80] for s in self.gaps[:3] if s.strip()]
-        self.rationale = self.rationale[:120]
-        self.guidance = self.guidance[:400]
-        self.critique = self.critique[:300]
-        self.knowledge = self.knowledge[:600]
-        return self
-
-
-class _LoopStep(NamedTuple):
-    """Compact record of one tool call for the step-context injector.
-
-    summary — one-sentence digest used in the compact history (older steps).
-    brief   — first ~800 chars of raw output, shown verbatim for recent steps.
-              With Context Folding active, this is the primary source of raw tool
-              output available to subsequent iterations. Older tool messages in
-              llm_messages are folded to their summaries.
-    """
-
-    n: int
-    tool: str
-    query: str
-    summary: str
-    brief: str = ""
+log = structlog.get_logger(__name__)
 
 
 class SonalityAgent:
@@ -224,54 +120,101 @@ class SonalityAgent:
             log.error("memory_init_failed", exc_info=True)
             from shared.errors import ServiceUnavailableError
 
-            raise ServiceUnavailableError("Neo4j + Qdrant required and failed to initialize") from exc
+            raise ServiceUnavailableError(
+                "Neo4j + Qdrant required and failed to initialize"
+            ) from exc
 
-        self._boundary_detector = EventBoundaryDetector()
-        counter = self._run_async(self._graph.get_latest_segment_counter())
-        self._boundary_detector.set_segment_counter(counter)
-        self._semantic_worker = SemanticIngestionWorker(config.settings.qdrant_url, self._embedder)
-        self._semantic_worker.start()
+        self._web_client = (
+            ResearchClient(config.settings.fathom_url) if config.settings.fathom_url else None
+        )
 
-        self._web_client = ResearchClient(config.settings.fathom_url) if config.settings.web_search_enabled else None
-        self._loop_tool_history: list[str] = []
-        self._step_log: list[_LoopStep] = []
-        self._current_handoff: _LoopHandoffSchema | None = None
-        self._knowledge_block: str = ""
-        self._last_assistant_msg = ""
+        self._bookkeep_queue: asyncio.Queue[BookkeepingItem] = asyncio.Queue(maxsize=64)
+        asyncio.run_coroutine_threadsafe(self._bookkeep_worker(), self._loop)
 
         log.info("agent_ready", model=self.model, web="enabled" if self._web_client else "disabled")
 
     async def _init_runtime(self) -> None:
-        """Initialize async resources: databases, embedder, dual store, segment counter."""
-        db = await DatabaseConnections.create()
+        """Initialize all async resources in a single coroutine.
+
+        One ``_run_async`` call in ``__init__`` covers: embedder probe, DB
+        connections, dual store restore, and semantic feature worker creation.
+        """
+        self._embedder = config.settings.make_embedder()
+        db = await DatabaseConnections.create(embedding_dims=self._embedder.dims)
         self._db = db
-        self._embedder = Embedder()
         self._graph = MemoryGraph(db.neo4j_driver)
         self._dual_store = DualEpisodeStore(self._graph, db.qdrant, self._embedder)
         last_uid = await self._graph.get_last_episode_uid()
         if last_uid:
             self._dual_store.restore_last_episode(last_uid)
 
+        self._semantic_worker = SemanticFeatureExtractor(db.qdrant, self._embedder)
+
     def _run_async[T](self, coro: Coroutine[object, object, T]) -> T:
-        """Bridge sync → async: submit coroutine to the agent's event loop and block."""
-        future: Future[T] = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        """Bridge sync → async: submit *coro* to the agent's event loop, block until done."""
+        fut = asyncio.run_coroutine_threadsafe(coro, self._loop)
         try:
-            return future.result(timeout=config.settings.async_timeout)
+            return fut.result(timeout=config.settings.async_timeout)
         except TimeoutError:
-            future.cancel()
+            fut.cancel()
             raise
 
     def shutdown(self) -> None:
-        """Stop background workers and close database connections."""
-        self._semantic_worker.stop()
-        if self._web_client:
-            self._run_async(self._web_client.close())
-        self._run_async(self._db.close())
+        """Stop background workers and close database connections.
+
+        Drains the bookkeeping queue (up to 10s) before closing DB connections
+        to avoid losing episodes that were enqueued but not yet persisted.
+        """
+
+        async def _drain_and_close() -> None:
+            try:
+                await asyncio.wait_for(self._bookkeep_queue.join(), timeout=10.0)
+            except TimeoutError:
+                log.warning("bookkeep_drain_timeout", pending=self._bookkeep_queue.qsize())
+            if self._web_client:
+                await self._web_client.close()
+            await self._db.close()
+
+        self._run_async(_drain_and_close())
         self._loop.call_soon_threadsafe(self._loop.stop)
         self._loop_thread.join(timeout=5)
         log.info("agent_shutdown")
 
+    def check_dependencies(self) -> dict[str, str]:
+        """Verify persistent stores are still reachable."""
+
+        async def _check() -> dict[str, str]:
+            status: dict[str, str] = {}
+            try:
+                from shared.neo4j import ping as neo4j_ping
+
+                await neo4j_ping(self._db.neo4j_driver, config.settings.neo4j_database)
+                status["neo4j"] = "ok"
+            except Exception as exc:
+                status["neo4j"] = f"error: {exc}"
+
+            try:
+                await self._db.qdrant.get_collections()
+                status["qdrant"] = "ok"
+            except Exception as exc:
+                status["qdrant"] = f"error: {exc}"
+            return status
+
+        return self._run_async(_check())
+
     # --- Public API ---
+
+    @staticmethod
+    def _resolve_defaults(
+        max_tokens: int | None,
+        temperature: float | None,
+        on_progress: Callable[[AgentEvent], None] | None,
+    ) -> tuple[int, float, Callable[[AgentEvent], None]]:
+        return (
+            max_tokens if max_tokens is not None else config.settings.llm_max_tokens,
+            temperature if temperature is not None else config.settings.agent_temperature,
+            on_progress or noop_progress,
+        )
 
     def respond(
         self,
@@ -282,13 +225,8 @@ class SonalityAgent:
         on_progress: Callable[[AgentEvent], None] | None = None,
     ) -> str:
         """Generate a response given the full conversation history from the caller."""
-        with interaction_active():
-            return self._respond_inner(
-                messages,
-                max_tokens=max_tokens if max_tokens is not None else config.settings.llm_max_tokens,
-                temperature=temperature if temperature is not None else config.settings.agent_temperature,
-                on_progress=on_progress or noop_progress,
-            )
+        mt, temp, prog = self._resolve_defaults(max_tokens, temperature, on_progress)
+        return self._respond_inner(messages, max_tokens=mt, temperature=temp, on_progress=prog)
 
     def respond_stream(
         self,
@@ -299,13 +237,10 @@ class SonalityAgent:
         on_progress: Callable[[AgentEvent], None] | None = None,
     ) -> Iterator[StreamChunk | AgentEvent]:
         """Streaming response variant. Yields StreamChunk for text and AgentEvent for progress."""
-        with interaction_active():
-            yield from self._respond_stream_inner(
-                messages,
-                max_tokens=max_tokens if max_tokens is not None else config.settings.llm_max_tokens,
-                temperature=temperature if temperature is not None else config.settings.agent_temperature,
-                on_progress=on_progress or noop_progress,
-            )
+        mt, temp, prog = self._resolve_defaults(max_tokens, temperature, on_progress)
+        yield from self._respond_stream_inner(
+            messages, max_tokens=mt, temperature=temp, on_progress=prog
+        )
 
     def ingest(self, text: str, *, topic_override: str = "") -> ESSResult:
         """Non-conversational data ingestion with agentic processing.
@@ -318,7 +253,7 @@ class SonalityAgent:
         inside the user message; it does NOT override ESS topics. The ESS
         model is responsible for extracting topics from the source text.
         """
-        _t0 = time.perf_counter()
+        t0 = time.perf_counter()
         id_token = None
         try:
             bundle = self._run_async(self._fetch_identity_bundle())
@@ -328,21 +263,21 @@ class SonalityAgent:
             log.info(
                 "ingest",
                 ess=f"{ess.score:.2f}",
-                type=ess.reasoning_type,
+                signals=ess.signals.summary_str(),
                 topics=list(ess.topics),
                 text=repr(text[:80]),
             )
 
             if not ess.belief_update_recommended:
-                log.info("ingest_skip", type=ess.reasoning_type, score=f"{ess.score:.3f}")
+                log.info("ingest_skip", score=round(ess.score, 3))
                 return ess
 
             self._ingest_agentic(text, bundle, ess, topic_override=topic_override)
             log.info(
                 "ingest_done",
-                elapsed=f"{time.perf_counter() - _t0:.1f}s",
+                elapsed_s=round(time.perf_counter() - t0, 1),
                 ess=f"{ess.score:.2f}",
-                type=ess.reasoning_type,
+                signals=ess.signals.summary_str(),
                 topics=list(ess.topics),
             )
             return ess
@@ -355,47 +290,68 @@ class SonalityAgent:
     ) -> None:
         """Run the full agentic loop on ingested content.
 
-        The model uses tools (recall, web search, synthesize, integrate_knowledge)
+        The model uses tools (recall_memory, web_research, integrate_knowledge)
         to deeply process the incoming information before it's stored.
         """
-        system_prompt = INGEST_SYSTEM_PROMPT.format(
+        system_prompt = build_ingest_system(
             snapshot_text=bundle.snapshot_text,
             beliefs_text=bundle.beliefs_prompt_text,
         )
         topic_hint = f"\nCategory hint: {topic_override}" if topic_override else ""
         user_content = (
             f"{text}\n\n"
-            f"[ESS: score={ess.score:.2f}, type={ess.reasoning_type}, "
+            f"[ESS: score={ess.score:.2f}, credibility=[{ess.signals.summary_str()}], "
             f"topics={', '.join(ess.topics)}{topic_hint}]"
         )
         conv = [{"role": ChatRole.USER, "content": user_content}]
 
-        agent_response = ""
-        with interaction_active():
-            for item in self._run_agentic_loop(system_prompt, conv, temperature=0.3):
-                if isinstance(item, StreamChunk):
-                    agent_response = item.content
+        state = LoopState(
+            user_message=user_content,
+            run_id=uuid4().hex,
+            loop_start_time=time.perf_counter(),
+        )
+        self._pre_seed_memory(user_content, state)
+        for _item in self._run_agentic_loop(
+            system_prompt, conv, state, temperature=config.settings.ingest_temperature
+        ):
+            pass
 
-        # If the agent didn't integrate during the loop, force integration
-        integrated = ToolName.INTEGRATE_KNOWLEDGE in self._loop_tool_history
-        if not integrated and ess.belief_update_recommended:
-            log.info("ingest_force_integrate", topics=list(ess.topics))
-            from .tools.memory import execute_integrate_knowledge
+        if state.phase == Phase.FAILED:
+            log.error(
+                "ingest_loop_failed",
+                topics=list(ess.topics),
+                steps=len(state.step_log),
+                tools_used=state.tool_history,
+            )
+            return
 
-            topic = topic_override or (ess.topics[0] if ess.topics else "general")
-            ctx = self._make_tool_context([])
-            execute_integrate_knowledge({"text": text[:2000], "topic": topic}, ctx)
+        agent_response = state.last_assistant_msg
+        if ToolName.INTEGRATE_KNOWLEDGE not in state.tool_history:
+            log.warning(
+                "ingest_not_integrated",
+                topics=list(ess.topics),
+                steps=len(state.step_log),
+                tools_used=state.tool_history,
+            )
+
+        self._flush_ltm_to_episode(state)
 
         try:
-            episode_uid = self._store_episode(text, agent_response, ess, "", "")
+            self._run_async(
+                post_ingest(
+                    text,
+                    agent_response,
+                    ess,
+                    graph=self._graph,
+                    dual_store=self._dual_store,
+                    semantic_worker=self._semantic_worker,
+                    qdrant=self._db.qdrant,
+                    embedder=self._embedder,
+                    ltm_content=state.long_term_memory,
+                )
+            )
         except Exception:
-            log.error("ingest_episode_storage_failed", exc_info=True)
-            raise
-        self._assess_provenance(list(ess.topics), episode_uid, text, ess)
-        content = f"Content: {text}\nESS: {ess.score:.2f} ({ess.reasoning_type})"
-        if agent_response:
-            content += f"\nAnalysis: {agent_response[:500]}"
-        self._semantic_worker.enqueue(episode_uid, content, (SemanticCategory.KNOWLEDGE,))
+            log.error("post_ingest_failed", exc_info=True)
 
     def get_all_beliefs(self) -> list[BeliefNode]:
         """Return all belief nodes from graph."""
@@ -411,9 +367,15 @@ class SonalityAgent:
 
     def get_health(self) -> tuple[int, int]:
         """Return (belief_count, snapshot_version)."""
-        beliefs = self._run_async(self._graph.get_all_beliefs())
-        snapshot = self._run_async(self._graph.get_personality_snapshot())
-        return len(beliefs), snapshot.version
+
+        async def _h() -> tuple[int, int]:
+            beliefs, snapshot = await asyncio.gather(
+                self._graph.get_all_beliefs(),
+                self._graph.get_personality_snapshot(),
+            )
+            return len(beliefs), snapshot.version
+
+        return self._run_async(_h())
 
     # --- Response pipeline ---
 
@@ -422,17 +384,23 @@ class SonalityAgent:
         messages: list[dict[str, str]],
         max_tokens: int,
         on_progress: Callable[[AgentEvent], None],
-    ) -> tuple[Token[IdentityBundle | None], str, str, list[dict[str, str]]]:
-        """Load identity, build system prompt, trim messages."""
+    ) -> tuple[IdentityBundle, str, str, list[dict[str, str]]]:
+        """Load identity, build system prompt, trim messages.
+
+        Returns the IdentityBundle (not the ContextVar token). Callers are
+        responsible for calling ``set_request_identity`` inside their own
+        try/finally to guarantee cleanup.
+        """
         bundle = self._run_async(self._fetch_identity_bundle())
-        id_token = set_request_identity(bundle)
-        on_progress(AgentEvent(type=CONTEXT_BUILD, detail="Loading identity..."))
+        on_progress(AgentEvent(type=EventType.CONTEXT_BUILD, detail="Loading identity..."))
 
         user_message = next(
             (m.get("content", "") for m in reversed(messages) if m.get("role") == ChatRole.USER),
             "",
         )
-        log.info("context", snapshot_chars=len(bundle.snapshot_text), beliefs=len(bundle.all_beliefs))
+        log.debug(
+            "context", snapshot_chars=len(bundle.snapshot_text), beliefs=len(bundle.all_beliefs)
+        )
         system_prompt = build_system_prompt(
             snapshot_text=bundle.snapshot_text,
             beliefs_text=bundle.beliefs_prompt_text,
@@ -450,11 +418,11 @@ class SonalityAgent:
         if len(conv) < msg_count_before and msg_count_before >= SUMMARIZE_THRESHOLD:
             on_progress(
                 AgentEvent(
-                    type=SUMMARIZING,
+                    type=EventType.SUMMARIZING,
                     detail=f"Compressed {msg_count_before} messages to {len(conv)}",
                 )
             )
-        return id_token, user_message, system_prompt, conv
+        return bundle, user_message, system_prompt, conv
 
     def _respond_inner(
         self,
@@ -464,36 +432,38 @@ class SonalityAgent:
         temperature: float,
         on_progress: Callable[[AgentEvent], None],
     ) -> str:
-        """Execute full respond pipeline: prepare context → agentic loop → bookkeep."""
-        _t0 = time.perf_counter()
-        log.info("request", messages=len(messages), max_tokens=max_tokens, temp=f"{temperature:.2f}")
+        """Execute full respond pipeline: prepare context → agentic loop → enqueue bookkeeping."""
+        t0 = time.perf_counter()
         id_token = None
         try:
-            id_token, user_message, system_prompt, conv = self._prepare_context(
-                messages, max_tokens, on_progress
+            bundle, user_message, system_prompt, conv = self._prepare_context(
+                messages,
+                max_tokens,
+                on_progress,
             )
-            log.info("user_message", text=user_message[:120])
-
-            assistant_msg = self._agentic_loop(
-                system_prompt,
-                conv,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                on_progress=on_progress,
+            id_token = set_request_identity(bundle)
+            state = LoopState(user_message=user_message, run_id=uuid4().hex, loop_start_time=t0)
+            self._pre_seed_memory(user_message, state)
+            for item in self._run_agentic_loop(
+                system_prompt, conv, state, max_tokens=max_tokens, temperature=temperature
+            ):
+                if isinstance(item, AgentEvent):
+                    on_progress(item)
+            self._flush_ltm_to_episode(state)
+            self.last_ess = ess = self._classify_ess(user_message)
+            enqueue_bookkeeping(
+                self._bookkeep_queue,
+                self._loop,
+                user_message,
+                state.last_assistant_msg,
+                ess,
+                state.long_term_memory,
             )
-            log.info("agent_response", text=assistant_msg[:200])
-            elapsed = time.perf_counter() - _t0
-            log.info("response_ready", elapsed=f"{elapsed:.1f}s")
-            threading.Thread(
-                target=self._bookkeep,
-                args=(user_message, assistant_msg),
-                daemon=True,
-                name="bookkeep",
-            ).start()
-            return assistant_msg
+            return state.last_assistant_msg
         finally:
             if id_token is not None:
-                reset_request_identity(id_token)
+                with contextlib.suppress(ValueError):
+                    reset_request_identity(id_token)
 
     def _respond_stream_inner(
         self,
@@ -503,47 +473,69 @@ class SonalityAgent:
         temperature: float,
         on_progress: Callable[[AgentEvent], None],
     ) -> Iterator[StreamChunk | AgentEvent]:
-        """Agentic streaming: tool calls yield AgentEvents, final text yields StreamChunks."""
-        _t0 = time.perf_counter()
-        log.info("stream_request", messages=len(messages), max_tokens=max_tokens, temp=f"{temperature:.2f}")
-        id_token = None
-        try:
-            id_token, user_message, system_prompt, conv = self._prepare_context(
-                messages, max_tokens, on_progress
-            )
-            log.info("user_message_stream", text=user_message[:120])
+        """Agentic streaming: tool calls yield AgentEvents, final text yields StreamChunks.
 
+        Flush + bookkeeping run in ``finally`` so they execute even if the
+        consumer disconnects mid-stream (GeneratorExit during a yield).
+        """
+        t0 = time.perf_counter()
+        id_token = None
+        state: LoopState | None = None
+        user_message = ""
+        try:
+            bundle, user_message, system_prompt, conv = self._prepare_context(
+                messages,
+                max_tokens,
+                on_progress,
+            )
+            id_token = set_request_identity(bundle)
+            state = LoopState(
+                user_message=user_message,
+                run_id=uuid4().hex,
+                loop_start_time=t0,
+            )
+            self._pre_seed_memory(user_message, state)
             yield from self._run_agentic_loop(
                 system_prompt,
                 conv,
+                state,
                 max_tokens=max_tokens,
                 temperature=temperature,
             )
-
-            elapsed = time.perf_counter() - _t0
+            elapsed = time.perf_counter() - t0
             yield AgentEvent(
-                type=DONE,
+                type=EventType.DONE,
                 detail=json.dumps(
                     {
-                        "tool_count": len(self._loop_tool_history),
+                        "run_id": state.run_id,
+                        "tool_count": len(state.tool_history),
                         "elapsed": round(elapsed, 1),
                     }
                 ),
             )
-            log.info("stream_done", elapsed=f"{elapsed:.1f}s")
-            threading.Thread(
-                target=self._bookkeep,
-                args=(user_message, self._last_assistant_msg),
-                daemon=True,
-                name="bookkeep",
-            ).start()
         finally:
+            if state is not None:
+                self._flush_ltm_to_episode(state)
+                self.last_ess = ess = self._classify_ess(user_message)
+                enqueue_bookkeeping(
+                    self._bookkeep_queue,
+                    self._loop,
+                    user_message,
+                    state.last_assistant_msg,
+                    ess,
+                    state.long_term_memory,
+                )
             if id_token is not None:
-                reset_request_identity(id_token)
+                with contextlib.suppress(ValueError):
+                    reset_request_identity(id_token)
 
     # --- Tool context and loop status ---
 
-    def _make_tool_context(self, llm_messages: list[dict[str, object]]) -> ToolContext:
+    def _make_tool_context(
+        self,
+        state: LoopState,
+        progress: Callable[[str], None] | None = None,
+    ) -> ToolContext:
         """Create ToolContext bridging agent state to the tools package."""
         return ToolContext(
             run_async=self._run_async,
@@ -553,505 +545,573 @@ class SonalityAgent:
             qdrant=self._db.qdrant,
             embedder=self._embedder,
             identity=get_request_identity(),
-            llm_messages=llm_messages,
-            retrieve=lambda q: self._run_async(self._retrieve(q)),
-        )
-
-    def _summarize_for_step_log(self, tool: str, args: dict[str, object], result: str) -> str:
-        """First sentence or 150-char prefix of tool result for the step log."""
-        text = result.strip()[:200]
-        for sep in (". ", ".\n"):
-            idx = text.find(sep)
-            if idx > 0:
-                return text[: idx + 1]
-        return text[:150]
-
-    def _fold_prior_tool_results(
-        self, llm_messages: list[dict[str, object]], current_batch_start: int
-    ) -> None:
-        """Replace older tool results with step-log summaries (Context Folding).
-
-        Only the current batch (messages at index >= current_batch_start) retains
-        raw tool output — the LLM will reason over it now. All earlier tool results
-        are replaced with their 1-sentence summary from the step log.
-
-        Matches tool messages to step-log entries via _step_n tag (set during
-        dispatch), so folding remains correct even after compression removes
-        earlier messages and shifts indices.
-        """
-        step_map = {s.n: s for s in self._step_log}
-        folded = 0
-        for i in range(current_batch_start):
-            msg = llm_messages[i]
-            if msg.get("role") != ChatRole.TOOL:
-                continue
-            raw = str(msg.get("content", ""))
-            if len(raw) <= config.settings.episode_content_limit or raw.startswith(_FOLD_PREFIX):
-                continue
-            step_n = msg.get("_step_n")
-            if isinstance(step_n, int) and step_n in step_map:
-                s = step_map[step_n]
-                msg["content"] = f"{_FOLD_PREFIX} {s.tool}({s.query[:60]}) → {s.summary}"
-                folded += 1
-        if folded:
-            log.info("context_folded", compacted=folded)
-
-    def _generate_handoff(
-        self, llm_messages: list[dict[str, object]], iteration: int
-    ) -> _LoopHandoffSchema:
-        """Produce a structured assessment of loop state + knowledge synthesis.
-
-        Single LLM call that replaces both _update_knowledge and the old handoff.
-        The handoff is injected into the next iteration so the agent knows what's
-        established, what gaps remain, and what to focus on.
-        """
-        step_history = "\n".join(
-            f"  {s.n}. {s.tool}({s.query[:50]!r}) → {s.summary}" for s in self._step_log[-5:]
-        )
-        recent_results = "\n".join(
-            f"- {s.tool}({s.query[:40]}): {s.brief[:300]}" for s in self._step_log[-3:]
-        )
-        tool_context = (
-            f"Recent results:\n{recent_results}\n"
-            f"Prior knowledge: {self._knowledge_block[:400] or '(none yet)'}"
-        )
-        result = llm_call(
-            prompt=LOOP_HANDOFF_PROMPT.format(
-                iteration=iteration + 1,
-                step_history=step_history or "(none yet)",
-                tool_context=tool_context,
+            retrieve=lambda q: self._run_async(
+                retrieve(
+                    q,
+                    graph=self._graph,
+                    dual_store=self._dual_store,
+                    qdrant=self._db.qdrant,
+                    embedder=self._embedder,
+                )
             ),
-            response_model=_LoopHandoffSchema,
-            fallback=_LoopHandoffSchema(),
+            research_transcript=lambda: (
+                f"LTM:\n{state.long_term_memory}\n\nSTM:\n{state.short_term_memory}"
+            ),
+            short_term_memory=state.short_term_memory,
+            progress=progress or (lambda _: None),
         )
-        h = result.value
-        if h.knowledge.strip():
-            self._knowledge_block = h.knowledge
 
-        rationale = h.rationale or (
-            f"Investigating: {h.gaps[0][:60] if h.gaps else h.next_focus[:60] or 'further detail needed'}"
-        )
-        action: Literal["finish", "continue"] = "finish" if h.action == "finish" else "continue"
+    # --- Memory seeding and flushing ---
 
-        handoff = _LoopHandoffSchema(
-            action=action,
-            next_focus=h.next_focus,
-            established=h.established,
-            gaps=h.gaps,
-            rationale=rationale,
-            guidance=h.guidance,
-            critique=h.critique,
-        )
-        log.info(
-            "handoff",
-            step=iteration + 1,
-            action=handoff.action,
-            gaps=handoff.gaps,
-            rationale=handoff.rationale[:80],
-            guidance=handoff.guidance[:60] if handoff.guidance else "",
-        )
-        return handoff
+    def _pre_seed_memory(self, user_message: str, state: LoopState) -> None:
+        """Seed LTM from episodic store and beliefs from graph before the loop starts.
 
-    def _compress_messages(
-        self,
-        llm_messages: list[dict[str, object]],
-        iteration: int,
-    ) -> list[dict[str, object]]:
-        """Compress accumulated messages to prevent context explosion.
-
-        Second layer of context management (tool output folding is first layer).
-        With folding active, tool results in the middle section are already compact.
-        This compression targets assistant reasoning and system messages that have
-        accumulated beyond the threshold. Preserves head (system + user) and tail.
+        Failures are isolated — a transient DB error degrades to empty LTM/beliefs
+        rather than killing the entire response.
         """
-        if len(llm_messages) <= config.settings.agent_compress_threshold:
-            return llm_messages
-
-        preserve_head = llm_messages[:2]
-        keep_tail = config.settings.agent_compress_keep_tail
-        compress_section = llm_messages[2:-keep_tail]
-        preserve_tail = llm_messages[-keep_tail:]
-
-        history = "\n\n".join(
-            f"[{msg.get('role', 'unknown')}]: {str(msg.get('content', ''))[:600]}"
-            for msg in compress_section
-            if msg.get("content")
-        )
-        if not history:
-            return llm_messages
-
-        comp_result = llm_call(
-            prompt=STATE_COMPRESSION_PROMPT.format(history=history),
-            response_model=_StateCompressionSchema,
-            fallback=_StateCompressionSchema(findings=history[:500]),
-            model=config.settings.structured_model,
-        )
-        summary = comp_result.value.render()
-        if len(summary) < 50:
-            log.warning("compress_too_short", chars=len(summary))
-            return llm_messages
-        log.info(
-            "context_compressed",
-            iteration=iteration + 1,
-            messages=len(compress_section),
-            summary_chars=len(summary),
-        )
-        compressed: dict[str, object] = {
-            "role": ChatRole.SYSTEM,
-            "content": f"[State summary — {len(compress_section)} messages compressed]:\n{summary}",
-        }
-        return [*preserve_head, compressed, *preserve_tail]
-
-    def _build_step_context(self, iteration: int) -> str:
-        """Build a structured context block injected each iteration.
-
-        Three separated channels (cf. ContextWeaver 2025, HiAgent 2025):
-
-        1. **Thread State** — handoff guidance, current reasoning direction. This is
-           the "prompt from the previous agent" that tells the next iteration what to do.
-        2. **Tool Execution Log** — compact history of every tool call with 1-line
-           summaries (older) and a raw excerpt for the most recent step. The agent uses
-           this to avoid redundant calls and reason about what's been tried.
-        3. **Knowledge Anchor** — accumulated verified facts. A persistent, growing
-           summary that outlives message compression and folding.
-        """
-        header = f"[Iteration {iteration + 1}]"
-        if not self._step_log and self._current_handoff is None:
-            return header
-
-        sections: list[str] = [header]
-
-        # --- Section 1: Thread State (handoff as "prompt to next agent") ---
-        if self._current_handoff is not None:
-            h = self._current_handoff
-            thread: list[str] = ["## Thread State"]
-            if h.guidance:
-                thread.append(f"Instructions: {h.guidance}")
-            if h.next_focus:
-                thread.append(f"Focus: {h.next_focus}")
-            if h.established:
-                thread.append("Confirmed: " + "; ".join(h.established))
-            if h.gaps:
-                thread.append("Open: " + "; ".join(h.gaps))
-            if h.rationale:
-                thread.append(f"Rationale: {h.rationale}")
-            sections.append("\n".join(thread))
-
-        # --- Section 2: Tool Execution Log ---
-        if self._step_log:
-            recent_threshold = max(1, len(self._step_log) - 1)
-            lines: list[str] = []
-            for s in self._step_log:
-                lines.append(f"  {s.n}. {s.tool}({s.query[:50]!r}) → {s.summary}")
-                if s.n > recent_threshold and s.brief:
-                    lines.append(f"     [Raw]: {s.brief[:400]}")
-            log.debug(
-                "iteration_steps",
-                iteration=iteration + 1,
-                steps=len(self._step_log),
-                tools=" | ".join(f"{s.tool}({s.query[:25]!r})" for s in self._step_log),
+        try:
+            episodes = self._run_async(
+                retrieve(
+                    user_message,
+                    graph=self._graph,
+                    dual_store=self._dual_store,
+                    qdrant=self._db.qdrant,
+                    embedder=self._embedder,
+                )
             )
-            sections.append("## Tool Execution Log\n" + "\n".join(lines))
+            if episodes:
+                state.long_term_memory = "## Prior Knowledge\n" + "\n".join(
+                    f"- {ep[:200]}" for ep in episodes[:5]
+                )
+        except Exception:
+            log.warning("pre_seed_retrieval_failed", exc_info=True)
+        try:
+            beliefs = self._rank_beliefs(user_message)
+            if beliefs:
+                state.relevant_beliefs = beliefs
+        except Exception:
+            log.warning("pre_seed_beliefs_failed", exc_info=True)
 
-        # --- Section 3: Knowledge Anchor ---
-        if self._knowledge_block:
-            sections.append(f"## Verified Knowledge\n{self._knowledge_block}")
+    def _flush_ltm_to_episode(self, state: LoopState) -> None:
+        """Enqueue LTM research findings for storage and bookkeeping.
 
-        return "\n\n".join(sections)
-
-    _STEP_CTX_TAG: Final = "__step_context__"
-
-    def _prepare_iteration(
-        self,
-        iteration: int,
-        llm_messages: list[dict[str, object]],
-    ) -> list[dict[str, object]]:
-        """Per-iteration setup: replace (not accumulate) step context and return tool definitions.
-
-        A tagged USER message carries the latest step context. On subsequent
-        iterations the previous one is overwritten, preventing stale handoff
-        data and tool-log duplicates from piling up in the conversation.
+        The LTM content gets its own ESS classification. Bookkeeping
+        handles both storage (as an episode) and downstream processing
+        (provenance, semantic features, knowledge extraction, forgetting).
         """
-        ctx_msg: dict[str, object] = {
-            "role": ChatRole.USER,
-            "content": self._build_step_context(iteration),
-            "_tag": self._STEP_CTX_TAG,
-        }
-        for i in range(len(llm_messages) - 1, -1, -1):
-            if llm_messages[i].get("_tag") == self._STEP_CTX_TAG:
-                llm_messages[i] = ctx_msg
-                break
-        else:
-            llm_messages.append(ctx_msg)
-        return get_definitions()
+        if len(state.long_term_memory) < 50:
+            return
+        try:
+            ltm_text = state.long_term_memory[: config.settings.episode_content_limit * 10]
+            ltm_ess = self._classify_ess(ltm_text[:2000])
+            enqueue_bookkeeping(
+                self._bookkeep_queue,
+                self._loop,
+                state.user_message[:500],
+                ltm_text,
+                ltm_ess,
+                ltm_text,
+            )
+        except Exception:
+            log.warning("ltm_flush_failed", exc_info=True)
+
+    def _rank_beliefs(self, context: str) -> str:
+        """Return formatted beliefs relevant to the given context.
+
+        Isolated from embedder failures — returns empty string rather than
+        aborting the request, since beliefs are supplementary context.
+        """
+        identity = get_request_identity()
+        if not identity or not identity.all_beliefs:
+            return ""
+        try:
+            relevant = rank_beliefs_by_similarity(
+                context, list(identity.all_beliefs), self._embedder, max_results=8
+            )
+            return format_beliefs_for_prompt_from_nodes(relevant) if relevant else ""
+        except Exception:
+            log.warning("belief_ranking_failed", exc_info=True)
+            return format_beliefs_for_prompt_from_nodes(list(identity.all_beliefs[:8]))
 
     # --- Agentic tool-calling loop ---
-
-    def _dedup_tool_calls(
-        self,
-        tool_calls: list[ParsedToolCall],
-        recent_calls: set[tuple[str, str]],
-    ) -> list[ParsedToolCall]:
-        """Filter exact duplicate tool calls (same name + same args) as a safety measure.
-
-        No warnings or behavioral nudges are injected — the LLM manages its own
-        tool strategy via prompts. This only prevents wasting compute on truly
-        identical repeat calls.
-        """
-        calls: list[ParsedToolCall] = []
-        for tc in tool_calls:
-            sig = (tc.name, json.dumps(tc.args, sort_keys=True))
-            if sig in recent_calls:
-                log.info("dedup_skip", tool=tc.name)
-            else:
-                recent_calls.add(sig)
-                calls.append(tc)
-        return calls
 
     def _dispatch_tools(
         self,
         calls: list[ParsedToolCall],
-        llm_messages: list[dict[str, object]],
-    ) -> list[tuple[ParsedToolCall, str]]:
-        """Execute tool calls, record results, and append a compressed step-log entry."""
-        ctx = self._make_tool_context(llm_messages)
-        results: list[tuple[ParsedToolCall, str]] = []
+        state: LoopState,
+    ) -> Iterator[AgentEvent | tuple[ParsedToolCall, str]]:
+        """Execute tool calls, yielding tool progress events and (call, result) tuples.
+
+        All tools can emit progress via ctx.progress(). For sync tools, events
+        are collected in a list and yielded after the tool returns. For web_research,
+        events stream live from Fathom's SSE via a thread-safe queue.
+        """
+        pending_progress: list[str] = []
+
+        def _progress_sink(detail: str) -> None:
+            pending_progress.append(detail)
+
+        ctx = self._make_tool_context(state, progress=_progress_sink)
         for tc in calls:
-            step_n = len(self._step_log) + 1
-            key_arg = str(
-                tc.args.get("query")
-                or tc.args.get("goal")
-                or tc.args.get("url")
-                or tc.args.get("focus")
-                or tc.args.get("topic")
-                or tc.args.get("text")
-                or ""
-            )[:120]
+            step_n = len(state.step_log) + 1
+            key_arg = tool_label(tc.name, tc.args)
             log.info("tool_start", step=step_n, tool=tc.name, arg=key_arg)
             t_tool = time.perf_counter()
-            result_text = dispatch_tool(tc.name, tc.args, ctx)
+            pending_progress.clear()
+
+            if tc.name == ToolName.WEB_RESEARCH and self._web_client:
+                log.info("dispatch_streaming_research", tool=tc.name)
+                result_text = yield from self._dispatch_streaming_research(
+                    tc,
+                    short_term_memory=state.short_term_memory,
+                )
+            else:
+                result_text = dispatch_tool(tc.name, tc.args, ctx)
+                for detail in pending_progress:
+                    yield AgentEvent(type=EventType.TOOL_PROGRESS, detail=detail, tool_name=tc.name)
+
             tool_elapsed = time.perf_counter() - t_tool
-            self._loop_tool_history.append(tc.name)
-            llm_messages.append(
-                {
-                    "role": ChatRole.TOOL,
-                    "content": result_text,
-                    "tool_call_id": tc.id,
-                    "_step_n": step_n,
-                }
-            )
-            summary = self._summarize_for_step_log(tc.name, tc.args, result_text)
+            state.tool_history.append(tc.name)
+            summary = summarize_for_step_log(result_text)
             log.info(
                 "tool_done",
                 step=step_n,
                 tool=tc.name,
                 summary=summary[:100],
-                elapsed=f"{tool_elapsed:.1f}s",
+                elapsed_s=round(tool_elapsed, 1),
                 chars=len(result_text),
             )
-            self._step_log.append(
-                _LoopStep(
-                    n=step_n, tool=tc.name, query=key_arg, summary=summary, brief=result_text[:800]
+            state.step_log.append(
+                LoopStep(
+                    step_index=step_n,
+                    tool=tc.name,
+                    query=key_arg,
+                    summary=summary,
+                    raw_output=result_text[:2000],
                 )
             )
-            results.append((tc, result_text))
-        return results
+            yield (tc, result_text)
+
+    def _dispatch_streaming_research(
+        self,
+        tc: ParsedToolCall,
+        *,
+        short_term_memory: str = "",
+    ) -> Generator[AgentEvent, None, str]:
+        """Run web_research with live SSE progress streaming via a thread-safe queue.
+
+        Yields AgentEvent(TOOL_PROGRESS) as Fathom streams, then returns
+        the final result text (via generator return value consumed by yield from).
+        """
+        import queue as thread_queue
+
+        from .tools.web import format_facts, merge_facts, parse_research_args
+
+        ra = parse_research_args(tc.args)
+        if not ra.goal:
+            return "Error: no research goal provided."
+
+        goal, depth, seeds = ra.goal, ra.depth, ra.seeds
+        max_pages, n = ra.max_pages, ra.pages_per_round
+        if short_term_memory:
+            goal = f"{goal} [Context: {short_term_memory[:200]}]"
+        web_client = self._web_client
+        assert web_client is not None  # Caller verifies _web_client is truthy
+
+        progress_q: thread_queue.Queue[object] = thread_queue.Queue()
+        log.info("streaming_research_start", goal=goal[:60], depth=depth)
+        yield AgentEvent(
+            type=EventType.TOOL_PROGRESS,
+            detail=f"Starting research: {goal[:50]}",
+            tool_name=tc.name,
+        )
+
+        async def _stream_research():
+            session = await web_client.start_research(
+                goal,
+                depth=depth,
+                seeds=seeds,
+                max_pages=max_pages,
+                n=n,
+            )
+            log.info("research_session_created", session_id=session.session_id[:12])
+            event_count = 0
+            async for progress in web_client.stream_research(session.session_id):
+                event_count += 1
+                progress_q.put(progress)
+                if progress.event in ("complete", "error"):
+                    break
+            log.info("research_stream_done", events=event_count)
+            result = await web_client.get_research_result(session.session_id)
+            progress_q.put(None)
+            return result
+
+        future: Future[object] = asyncio.run_coroutine_threadsafe(
+            _stream_research(),
+            self._loop,
+        )
+
+        from .web_client import ResearchFact, ResearchProgress, ResearchResult
+
+        accumulated_facts: list[ResearchFact] = []
+        yielded_count = 0
+        stream_deadline = time.perf_counter() + config.settings.async_timeout
+
+        def _handle(item: object) -> AgentEvent | None:
+            if isinstance(item, ResearchProgress):
+                if item.partial_facts:
+                    accumulated_facts.extend(item.partial_facts)
+                nonlocal yielded_count
+                yielded_count += 1
+                return AgentEvent(
+                    type=EventType.TOOL_PROGRESS,
+                    detail=item.detail or item.event,
+                    tool_name=tc.name,
+                )
+            return None
+
+        while not future.done():
+            if time.perf_counter() > stream_deadline:
+                log.error("streaming_research_timeout")
+                future.cancel()
+                break
+            try:
+                item = progress_q.get(timeout=0.3)
+            except thread_queue.Empty:
+                continue
+            if item is None:
+                break
+            evt = _handle(item)
+            if evt:
+                yield evt
+
+        while not progress_q.empty():
+            evt = _handle(progress_q.get_nowait())
+            if evt:
+                yield evt
+
+        log.info(
+            "streaming_research_events_yielded",
+            count=yielded_count,
+            accumulated_facts=len(accumulated_facts),
+        )
+
+        try:
+            result = future.result()
+        except Exception as exc:
+            log.error("research_failed", error=str(exc), exc_info=True)
+            if accumulated_facts:
+                formatted = format_facts(tuple(accumulated_facts))
+                return (
+                    f"[Research failed but recovered {len(accumulated_facts)} facts]\n\n{formatted}"
+                )
+            return f"Research failed: {exc}"
+
+        pages = result.pages_scraped if isinstance(result, ResearchResult) else 0
+        final_facts = merge_facts(
+            accumulated_facts, result.facts if isinstance(result, ResearchResult) else ()
+        )
+        if not final_facts:
+            return f"Research completed but found no facts ({pages} pages scraped)."
+        formatted = format_facts(final_facts)
+        return f"[Research: {len(final_facts)} facts from {pages} pages]\n\n{formatted}"
 
     def _run_agentic_loop(
         self,
         system_prompt: str,
         conv: list[dict[str, str]],
+        state: LoopState,
         *,
         max_tokens: int = config.settings.llm_max_tokens,
         temperature: float = config.settings.agent_temperature,
     ) -> Iterator[AgentEvent | StreamChunk]:
-        """Core agentic loop — yields events during reasoning, StreamChunk for the final answer.
+        """2-phase automaton: THINKING ↔ ACTING → COMPLETED | FAILED.
 
-        The LLM decides the full workflow via tool calls. Stall detection and
-        dedup prevent infinite loops. A generous hard ceiling is a pure circuit breaker.
+        Scaffolding is built once. Each step dispatches to the current phase handler.
+        The hard ceiling forces a nudge (synthesis) rather than terminating silently.
         """
-        self._loop_tool_history.clear()
-        self._step_log.clear()
-        self._current_handoff = None
-        self._knowledge_block = ""
-        llm_messages: list[dict[str, object]] = [
-            {"role": ChatRole.SYSTEM, "content": system_prompt},
-        ]
-        llm_messages.extend(dict(m) for m in conv)
-        completion = ChatResult(text="", input_tokens=0, output_tokens=0, raw={})
-
-        t_loop_start = time.perf_counter()
-        for iteration in range(config.settings.agent_loop_hard_ceiling):
-            t_iter = time.perf_counter()
-            recent_calls: set[tuple[str, str]] = set()
-            yield AgentEvent(type=THINKING, iteration=iteration, detail="Analyzing...")
-            log.debug("loop_step", iteration=iteration + 1)
-
-            llm_messages = self._compress_messages(llm_messages, iteration)
-            tools = self._prepare_iteration(iteration, llm_messages)
-            ctx_chars = sum(len(str(m.get("content", ""))) for m in llm_messages)
-            log.info(
-                "iteration_context",
-                iteration=iteration + 1,
-                messages=len(llm_messages),
-                chars_k=ctx_chars // 1000,
-            )
-            finishing = (
-                self._current_handoff is not None and self._current_handoff.action == "finish"
-            )
-            finish_budget = max(max_tokens, config.settings.llm_max_tokens) if finishing else max_tokens
-            try:
-                completion = default_provider.chat_completion(
-                    model=self.model,
-                    max_tokens=finish_budget,
-                    temperature=temperature,
-                    messages=llm_messages,
-                    tools=tools if not finishing else [],
-                    tool_choice="none" if finishing else "auto",
-                )
-            except Exception:
-                log.error("llm_failed", step=iteration, exc_info=True)
-                completion = ChatResult(
-                    text="I encountered a processing error. Please try again.",
-                    input_tokens=0,
-                    output_tokens=0,
-                    raw={},
-                )
-                break
-
-            tool_calls = extract_tool_calls(completion.raw)
-            llm_elapsed = time.perf_counter() - t_iter
-            log.info(
-                "iteration_llm",
-                iteration=iteration + 1,
-                elapsed=f"{llm_elapsed:.1f}s",
-                in_tokens=completion.input_tokens,
-                out_tokens=completion.output_tokens,
-                tools=len(tool_calls),
-                text_chars=len(completion.text),
-            )
-            if not tool_calls:
-                if self._step_log:
-                    log.info(
-                        "loop_finished",
-                        step=iteration + 1,
-                        elapsed=f"{time.perf_counter() - t_loop_start:.1f}s",
-                        trace=" → ".join(f"{s.tool}({s.query[:25]!r})" for s in self._step_log),
+        scaffolding = build_scaffolding(system_prompt, conv)
+        state.phase = Phase.THINKING
+        while state.phase not in TERMINAL_PHASES:
+            if state.iteration >= config.settings.agent_loop_hard_ceiling:
+                log.warning("loop_ceiling", iterations=state.iteration)
+                state.nudged = True
+                state.context_messages = [
+                    {"role": ChatRole.SYSTEM, "content": synthesis_prompt(state)}
+                ]
+            match state.phase:
+                case Phase.THINKING:
+                    yield from self._phase_thinking(
+                        scaffolding,
+                        state,
+                        max_tokens=max_tokens,
+                        temperature=temperature,
                     )
-                clean = strip_markdown(completion.text)
-                self._last_assistant_msg = clean
-                yield StreamChunk(clean)
-                return
+                case Phase.ACTING:
+                    yield from self._phase_acting(state)
 
-            calls_to_run = self._dedup_tool_calls(tool_calls, recent_calls)
-            if not calls_to_run:
-                # All calls deduplicated; append assistant message WITHOUT tool_calls
-                # to avoid leaving dangling tool_calls without results.
-                llm_messages.append(
-                    {
-                        "role": ChatRole.ASSISTANT,
-                        "content": completion.text or "",
-                    }
-                )
-                continue
-
-            assistant_msg: dict[str, object] = {
-                "role": ChatRole.ASSISTANT,
-                "content": completion.text or "",
-            }
-            raw_tc = get_raw_tool_calls(completion.raw)
-            if raw_tc:
-                assistant_msg["tool_calls"] = raw_tc
-            llm_messages.append(assistant_msg)
-
-            for tc in calls_to_run:
-                yield AgentEvent(
-                    type=TOOL_CALL,
-                    tool_name=tc.name,
-                    tool_args=json.dumps(tc.args),
-                    iteration=iteration,
-                )
-            batch_start = len(llm_messages)
-            t_dispatch = time.perf_counter()
-            for tc, result_text in self._dispatch_tools(calls_to_run, llm_messages):
-                yield AgentEvent(
-                    type=TOOL_RESULT,
-                    tool_name=tc.name,
-                    tool_result_summary=result_text[:200],
-                    iteration=iteration,
-                    sources_count=(
-                        result_text.count("[SOURCE ") if tc.name == ToolName.WEB_SEARCH else 0
-                    ),
-                )
-            log.info("tool_dispatch", calls=len(calls_to_run), elapsed=f"{time.perf_counter() - t_dispatch:.1f}s")
-            self._fold_prior_tool_results(llm_messages, batch_start)
-
-            t_meta = time.perf_counter()
-            self._current_handoff = self._generate_handoff(llm_messages, iteration)
-
-            if self._current_handoff.critique:
-                llm_messages.append(
-                    {
-                        "role": ChatRole.SYSTEM,
-                        "content": (
-                            f"[Problem identified — address this next]: "
-                            f"{self._current_handoff.critique}"
-                        ),
-                    }
-                )
-                log.info("critique_injected", text=self._current_handoff.critique[:100])
-
-            log.info(
-                "handoff_done",
-                handoff_elapsed=f"{time.perf_counter() - t_meta:.1f}s",
-                iteration=iteration + 1,
-                iter_total=f"{time.perf_counter() - t_iter:.1f}s",
-            )
-            if self._current_handoff.action == "finish":
-                log.info("handoff_finish_signal")
-                h = self._current_handoff
-                wrap_parts = ["[Loop coordinator]: Research complete."]
-                if self._knowledge_block:
-                    wrap_parts.append(f"Verified knowledge:\n{self._knowledge_block}")
-                if h.established:
-                    wrap_parts.append("Confirmed: " + "; ".join(h.established))
-                if h.guidance:
-                    wrap_parts.append(f"Guidance: {h.guidance}")
-                wrap_parts.append(
-                    "Now give your final response. Lead with your conclusion, "
-                    "then support it with the strongest evidence. When multiple "
-                    "sources agree, say so. When claims rest on limited evidence, "
-                    "note the limitation. If something remains genuinely uncertain, "
-                    "say what you'd need to resolve it."
-                )
-                llm_messages.append(
-                    {
-                        "role": ChatRole.SYSTEM,
-                        "content": "\n\n".join(wrap_parts),
-                    }
-                )
-
-        log.warning("loop_ceiling", steps=config.settings.agent_loop_hard_ceiling)
-        clean = strip_markdown(completion.text)
-        self._last_assistant_msg = clean
-        yield StreamChunk(clean)
-
-    def _agentic_loop(
+    def _phase_thinking(
         self,
-        system_prompt: str,
-        conv: list[dict[str, str]],
+        scaffolding: list[dict[str, object]],
+        state: LoopState,
         *,
         max_tokens: int,
         temperature: float,
-        on_progress: Callable[[AgentEvent], None],
-    ) -> str:
-        """Non-streaming wrapper: forwards events to on_progress, returns final text."""
-        for item in self._run_agentic_loop(
-            system_prompt, conv, max_tokens=max_tokens, temperature=temperature
-        ):
-            if isinstance(item, AgentEvent):
-                on_progress(item)
-        return self._last_assistant_msg
+    ) -> Iterator[AgentEvent | StreamChunk]:
+        """THINKING phase: LLM call → classify response → transition.
+
+        Three response cases:
+        - Empty: stall → nudge if max_stalls reached
+        - Text only: final answer (or extend if truncated)
+        - Tool calls: dedup → transition to ACTING
+        """
+        yield AgentEvent(type=EventType.THINKING, iteration=state.iteration, detail="Analyzing...")
+
+        inputs = list(state.context_messages)
+        if not state.nudged:
+            step_ctx = build_step_context(state)
+            if step_ctx:
+                inputs.append({"role": ChatRole.SYSTEM, "content": step_ctx})
+
+        llm_messages = compose_guarded(
+            default_provider,
+            scaffolding=scaffolding,
+            inputs=inputs,
+            model=self.model,
+            context_char_limit=config.settings.context_char_limit,
+        )
+
+        tools = [] if state.nudged else get_definitions()
+        tool_choice = "none" if state.nudged else "auto"
+        try:
+            completion = default_provider.chat_completion(
+                model=self.model,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                messages=llm_messages,
+                tools=tools,
+                tool_choice=tool_choice,
+            )
+        except Exception:
+            log.error("llm_failed", iteration=state.iteration, exc_info=True)
+            state.last_assistant_msg = "I encountered a processing error. Please try again."
+            yield StreamChunk(state.last_assistant_msg)
+            state.phase = Phase.FAILED
+            return
+
+        tool_calls = extract_tool_calls(completion.raw)
+
+        # Case 1: Empty response — stall
+        if not tool_calls and not completion.text.strip():
+            state.stall_count += 1
+            log.warning("empty_stall", iteration=state.iteration, stall=state.stall_count)
+            if state.stall_count >= config.settings.max_stalls:
+                if state.nudged:
+                    log.error("nudge_failed_empty", stalls=state.stall_count)
+                    state.last_assistant_msg = (
+                        state.long_term_memory or "I was unable to formulate a response."
+                    )
+                    state.phase = Phase.FAILED
+                    yield StreamChunk(state.last_assistant_msg)
+                    return
+                log.warning("stall_limit_nudge", stalls=state.stall_count)
+                state.nudged = True
+                state.context_messages = [
+                    {"role": ChatRole.SYSTEM, "content": synthesis_prompt(state)}
+                ]
+            return
+
+        # Case 2: Text only — final answer or extend
+        if not tool_calls:
+            if completion.finish_reason == "length" and completion.text:
+                state.output_buffer += completion.text
+                state.extend_count += 1
+                state.stall_count = 0
+                if state.extend_count >= config.settings.max_extends:
+                    state.last_assistant_msg = state.output_buffer
+                    state.phase = Phase.COMPLETED
+                else:
+                    state.context_messages = [
+                        {"role": ChatRole.ASSISTANT, "content": completion.text},
+                        {"role": ChatRole.SYSTEM, "content": "Continue from where you left off."},
+                    ]
+                log.info("extend", count=state.extend_count, buffer_chars=len(state.output_buffer))
+                yield StreamChunk(completion.text)
+                return
+
+            clean = strip_markdown(completion.text)
+            final_text = (state.output_buffer + clean) if state.output_buffer else clean
+            state.last_assistant_msg = final_text
+            if state.step_log:
+                log.debug(
+                    "loop_finished",
+                    iteration=state.iteration,
+                    elapsed_s=round(time.perf_counter() - state.loop_start_time, 1),
+                    trace=" → ".join(f"{s.tool}({s.query[:25]!r})" for s in state.step_log),
+                )
+            state.phase = Phase.COMPLETED
+            yield StreamChunk(clean)
+            return
+
+        # Case 3: Tool calls — transition to ACTING
+        if completion.text and completion.text.strip():
+            state.last_assistant_msg = completion.text.strip()
+
+        calls_to_run = dedup_tool_calls(tool_calls, state.recent_calls)
+        if not calls_to_run:
+            state.stall_count += 1
+            log.warning("dedup_stall", iteration=state.iteration, stall=state.stall_count)
+            raw_tc = get_raw_tool_calls(completion.raw)
+            if raw_tc:
+                state.context_messages.append(
+                    {
+                        "role": ChatRole.ASSISTANT,
+                        "content": completion.text or "",
+                        "tool_calls": raw_tc,
+                    }
+                )
+                for tc in tool_calls:
+                    state.context_messages.append(
+                        {
+                            "role": ChatRole.TOOL,
+                            "tool_call_id": tc.id,
+                            "content": "(duplicate — already executed)",
+                        }
+                    )
+            if state.stall_count >= config.settings.max_stalls:
+                if state.nudged:
+                    log.error("nudge_failed_dedup", stalls=state.stall_count)
+                    state.last_assistant_msg = (
+                        state.long_term_memory or "I was unable to formulate a response."
+                    )
+                    state.phase = Phase.FAILED
+                    yield StreamChunk(state.last_assistant_msg)
+                    return
+                log.warning("dedup_stall_nudge", stalls=state.stall_count)
+                state.nudged = True
+                state.context_messages = [
+                    {"role": ChatRole.SYSTEM, "content": synthesis_prompt(state)}
+                ]
+            return
+
+        state.stall_count = 0
+        state.acting_ctx = ActingContext(completion=completion, calls=tuple(calls_to_run))
+        state.phase = Phase.ACTING
+        state.iteration += 1
+
+    def _phase_acting(
+        self,
+        state: LoopState,
+    ) -> Iterator[AgentEvent | StreamChunk]:
+        """ACTING phase: dispatch tools → mandatory consolidation → transition to THINKING.
+
+        Raw tool results never reach the THINKING phase. After dispatch, a consolidation
+        LLM call distills results into LTM/STM. Only minimal protocol acks are kept
+        in context_messages for the next THINKING call.
+
+        If any step raises, we transition to FAILED to prevent re-entry from
+        the outer while-loop (which would re-dispatch the same tools).
+        """
+        assert state.acting_ctx is not None
+        calls = list(state.acting_ctx.calls)
+        completion = state.acting_ctx.completion
+
+        for tc in calls:
+            yield AgentEvent(
+                type=EventType.TOOL_CALL,
+                tool_name=tc.name,
+                tool_args=json.dumps(tc.args),
+                iteration=state.iteration,
+            )
+
+        try:
+            raw_results: list[tuple[ParsedToolCall, str]] = []
+            for item in self._dispatch_tools(calls, state):
+                if isinstance(item, AgentEvent):
+                    yield item
+                    continue
+                tc, result_text = item
+                raw_results.append((tc, result_text))
+                yield AgentEvent(
+                    type=EventType.TOOL_RESULT,
+                    tool_name=tc.name,
+                    tool_result_summary=result_text[:200],
+                    iteration=state.iteration,
+                    sources_count=0,
+                )
+
+            new_observations = "\n".join(
+                f"- {s.tool}({s.query[:40]}): {s.raw_output[:800]}"
+                for s in state.step_log[-len(raw_results) :]
+            )
+            if new_observations.strip():
+                elapsed_s = int(time.perf_counter() - state.loop_start_time)
+                data = (
+                    f"## User Question\n{state.user_message[:300]}\n\n"
+                    f"## Previous Findings\n{state.long_term_memory or 'None yet.'}\n\n"
+                    f"## New Results\n{new_observations}\n\n"
+                    f"## Agent Reasoning\n{state.last_assistant_msg or 'N/A'}\n\n"
+                    f"## Progress\nIteration {state.iteration} of "
+                    f"{config.settings.agent_loop_hard_ceiling}. {elapsed_s}s elapsed."
+                )
+                consolidation_msgs = compose_guarded(
+                    default_provider,
+                    scaffolding=[{"role": ChatRole.SYSTEM, "content": CONSOLIDATION_INSTRUCTIONS}],
+                    inputs=[{"role": ChatRole.USER, "content": data}],
+                    model=config.settings.structured_model,
+                    context_char_limit=config.settings.context_char_limit,
+                )
+                instructions_str = "\n\n".join(
+                    str(m.get("content", "")) for m in consolidation_msgs
+                )
+                result = llm_call(
+                    instructions=instructions_str,
+                    response_model=MemoryUpdate,
+                    fallback=MemoryUpdate(
+                        long_term_memory=state.long_term_memory,
+                        short_term_memory="",
+                    ),
+                    model=config.settings.structured_model,
+                )
+                update = result.value
+                if update.long_term_memory.strip():
+                    state.long_term_memory = update.long_term_memory
+                state.short_term_memory = update.short_term_memory.strip()
+                state.relevant_beliefs = self._rank_beliefs(state.long_term_memory)
+                log.info(
+                    "consolidation",
+                    iteration=state.iteration,
+                    ltm_chars=len(state.long_term_memory),
+                    stm_chars=len(state.short_term_memory),
+                )
+        except Exception:
+            log.error("acting_phase_failed", iteration=state.iteration, exc_info=True)
+            state.last_assistant_msg = state.long_term_memory or "I encountered a processing error."
+            state.phase = Phase.FAILED
+            yield StreamChunk(state.last_assistant_msg)
+            return
+
+        executed_ids = {tc.id for tc in calls}
+        raw_tc = [tc for tc in get_raw_tool_calls(completion.raw) if tc.get("id") in executed_ids]
+        state.context_messages = []
+        assistant_msg: dict[str, object] = {
+            "role": ChatRole.ASSISTANT,
+            "content": completion.text or "",
+        }
+        if raw_tc:
+            assistant_msg["tool_calls"] = raw_tc
+        state.context_messages.append(assistant_msg)
+        for tc, _ in raw_results:
+            state.context_messages.append(
+                {
+                    "role": ChatRole.TOOL,
+                    "tool_call_id": tc.id,
+                    "content": "Result processed. See Research Findings.",
+                }
+            )
+
+        state.acting_ctx = None
+        state.phase = Phase.THINKING
 
     # --- Identity loading ---
 
@@ -1067,240 +1127,31 @@ class SonalityAgent:
             all_beliefs=tuple(all_beliefs),
         )
 
-    # --- Retrieval ---
+    # --- Bookkeeping (async queue) ---
 
-    async def _retrieve(self, user_message: str) -> list[str]:
-        """Full retrieval pipeline: route → category-specific search → expand → rerank."""
-        if not self._dual_store.has_episodes:
-            return []
-
-        decision = await asyncio.to_thread(route_query, user_message)
-        log.debug("route", category=decision.category, n=decision.n_results)
-        if decision.category == QueryCategory.NONE:
-            return []
-
-        episodes = await self._fetch_episodes_for_category(decision, user_message)
-        episodes = list({ep.uid: ep for ep in episodes}.values())
-
-        if decision.temporal_expansion is TemporalExpansionDecision.EXPAND and episodes:
-            expanded_uids: set[str] = set()
-            for ep in episodes:
-                for n in await self._graph.traverse_temporal_context(ep.uid):
-                    expanded_uids.add(n.uid)
-            new_uids = [u for u in expanded_uids if u not in {e.uid for e in episodes}]
-            if new_uids:
-                episodes.extend(await self._graph.get_episodes(new_uids))
-
-        if len(episodes) > 1 and len(episodes) > decision.n_results:
-            episodes = await asyncio.to_thread(rerank_episodes, user_message, episodes)
-
-        selected = episodes[: decision.n_results]
-        semantic_context: list[str] = []
-        if decision.semantic_memory is SemanticMemoryDecision.SEARCH:
-            semantic_context = await self._search_semantic_features(
-                user_message, top_k=decision.n_results
-            )
-
-        episode_context = [
-            format_episode_line(
-                created_at=ep.created_at,
-                summary=ep.summary,
-                content=ep.content,
-                content_limit=config.settings.episode_content_limit,
-            )
-            for ep in selected
-        ]
-        log.info("retrieval", category=decision.category, episodes=len(selected), semantic=len(semantic_context))
-        return [*episode_context, *semantic_context]
-
-    async def _fetch_episodes_for_category(
-        self, decision: RoutingDecision, user_message: str
-    ) -> list[EpisodeNode]:
-        """Dispatch episode fetching based on query category."""
-        cat = decision.category
-        over_fetch = decision.n_results * config.settings.retrieval_over_fetch_factor
-
-        if cat in (QueryCategory.TEMPORAL, QueryCategory.AGGREGATION):
-            return await chain_retrieve(
-                self._dual_store, self._graph, user_message, base_n=decision.n_results
-            )
-
-        if cat == QueryCategory.MULTI_ENTITY and decision.should_decompose:
-            return await split_retrieve(
-                self._dual_store, self._graph, user_message, n_per_sub=decision.n_results
-            )
-
-        vector_hits = await self._dual_store.vector_search(user_message, top_k=over_fetch)
-        vector_uids = list({h.episode_uid for h in vector_hits})
-        topic_hits = await self._graph.find_topic_related_episodes(user_message, limit=over_fetch)
-        belief_hits = (
-            await self._graph.find_belief_related_episodes(user_message, limit=over_fetch)
-            if cat == QueryCategory.BELIEF_QUERY
-            else []
-        )
-        return belief_hits + topic_hits + await self._graph.get_episodes(vector_uids)
-
-    async def _search_semantic_features(self, query: str, *, top_k: int) -> list[str]:
-        query_embedding = await asyncio.to_thread(self._embedder.embed_query, query)
-        response = await self._db.qdrant.query_points(
-            collection_name=Collection.SEMANTIC_FEATURES,
-            query=query_embedding,
-            using=DENSE_VECTOR,
-            limit=top_k,
-            with_payload=True,
-        )
-        return [
-            f"[semantic/{p.payload.get('category', '')}] "
-            f"{p.payload.get('tag', '')}.{p.payload.get('feature_name', '')}: "
-            f"{p.payload.get('value', '')} "
-            f"(conf={float(p.payload.get('confidence', 0)):.2f}, score={p.score:.3f})"
-            for p in response.points
-            if p.payload
-        ]
-
-    # --- Bookkeeping ---
-
-    def _bookkeep(self, user_message: str, agent_response: str) -> None:
-        """Mechanical bookkeeping after the agent responds.
-
-        ESS classification, episode storage, provenance assessment,
-        semantic feature ingestion, and periodic forgetting.
-        Yields to new interactions — aborts if another request arrives.
-        """
-        try:
-            ess = self._classify_ess(user_message)
-        except Exception:
-            log.error("ess_classification_failed", exc_info=True)
-            ess = ESS_FALLBACK
-        self.last_ess = ess
-        log.info(
-            "ess_result",
-            score=f"{ess.score:.2f}",
-            type=ess.reasoning_type,
-            update=ess.belief_update_recommended,
-            topics=list(ess.topics),
-        )
-
-        if interaction_in_progress():
-            log.info("bookkeeping_yield_after_ess")
-            return
-
-        previous_segment_id = self._boundary_detector.current_segment_id
-        segment_id = segment_label = ""
-        closed_segment_id = ""
-        try:
-            boundary = self._boundary_detector.check_boundary(user_message)
-            segment_id = boundary.segment_id
-            if boundary.boundary_decision is BoundaryDecision.BOUNDARY:
-                closed_segment_id = previous_segment_id
-                segment_label = boundary.label
-        except Exception:
-            log.error("boundary_detection_failed", exc_info=True)
-
-        try:
-            episode_uid = self._store_episode(
-                user_message, agent_response, ess, segment_id, segment_label
-            )
-        except Exception:
-            log.error("episode_storage_failed", exc_info=True)
-            return
-
-        if interaction_in_progress():
-            log.info("bookkeeping_yield_after_store")
-            return
-
-        if closed_segment_id:
+    async def _bookkeep_worker(self) -> None:
+        """Consume bookkeeping queue sequentially."""
+        while True:
+            item = await self._bookkeep_queue.get()
             try:
-                self._run_async(maybe_consolidate_segment(self._graph, closed_segment_id))
+                await process_bookkeeping(
+                    item,
+                    graph=self._graph,
+                    dual_store=self._dual_store,
+                    semantic_worker=self._semantic_worker,
+                    qdrant=self._db.qdrant,
+                    embedder=self._embedder,
+                )
             except Exception:
-                log.warning("consolidation_failed", segment=closed_segment_id, exc_info=True)
-
-        if episode_uid:
-            if ess.belief_update_recommended:
-                try:
-                    self._assess_provenance(list(ess.topics), episode_uid, user_message, ess)
-                except Exception:
-                    log.error("provenance_assessment_failed", episode_uid=episode_uid[:8], exc_info=True)
-
-            content = (
-                f"User: {user_message}\nAssistant: {agent_response}\n"
-                f"ESS: {ess.score:.2f} ({ess.reasoning_type})"
-                if agent_response
-                else f"Content: {user_message}\nESS: {ess.score:.2f} ({ess.reasoning_type})"
-            )
-            categories = (SemanticCategory.KNOWLEDGE,) if not agent_response else ()
-            self._semantic_worker.enqueue(episode_uid, content, categories)
-
-        if not interaction_in_progress():
-            ctx = self._make_tool_context([])
-            run_forgetting(ctx)
+                log.error("bookkeeping_failed", exc_info=True)
+            finally:
+                self._bookkeep_queue.task_done()
 
     def _classify_ess(self, user_message: str) -> ESSResult:
-        """Run ESS classification."""
-        result = classify(user_message)
-        if result.topics:
-            normalized = tuple(
-                re.sub(r"[^a-z0-9]+", "_", t.lower()).strip("_") for t in result.topics
-            )
-            result = dataclasses.replace(result, topics=normalized)
-        return result
-
-    def _store_episode(
-        self,
-        user_message: str,
-        agent_response: str,
-        ess: ESSResult,
-        segment_id: str,
-        segment_label: str,
-    ) -> str:
-        stored: StoredEpisode = self._run_async(
-            self._dual_store.store(
-                user_message=user_message,
-                agent_response=agent_response,
-                summary=ess.summary[:300],
-                topics=list(ess.topics),
-                ess_score=ess.score,
-                reasoning_type=ess.reasoning_type,
-                segment_id=segment_id,
-                segment_label=segment_label,
-            )
-        )
-        log.info(
-            "episode_stored",
-            uid=stored.episode_uid[:8],
-            segment=segment_id[:8] if segment_id else "none",
-            topics=list(ess.topics),
-        )
-        return stored.episode_uid
-
-    def _assess_provenance(
-        self,
-        topics: list[str],
-        episode_uid: str,
-        content: str,
-        ess: ESSResult,
-    ) -> None:
-        """Create provenance edges (SUPPORTS/CONTRADICTS) for relevant beliefs."""
-        if not topics:
-            return
-        topics = [re.sub(r"[^a-z0-9]+", "_", t.lower()).strip("_") for t in topics if t]
-        if not topics:
-            return
-        bundle = get_request_identity()
-        if bundle is not None:
-            beliefs_dict = {b.topic: b for b in bundle.all_beliefs}
-        else:
-            all_beliefs = self._run_async(self._graph.get_all_beliefs())
-            beliefs_dict = {b.topic: b for b in all_beliefs}
-        self._run_async(
-            assess_belief_evidence_batch(
-                topics=topics,
-                episode_uid=episode_uid,
-                episode_content=content,
-                ess_score=ess.score,
-                reasoning_type=ess.reasoning_type,
-                source_reliability=ess.source_reliability,
-                beliefs=beliefs_dict,
-                graph=self._graph,
-            )
-        )
+        """Run ESS classification with existing topic context."""
+        try:
+            topics = self._run_async(self._graph.get_topic_names())
+            return classify_ess(user_message, ", ".join(topics))
+        except Exception:
+            log.error("ess_classification_failed", exc_info=True)
+            return ESS_FALLBACK

@@ -25,23 +25,29 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Field
-from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
-from starlette.responses import Response
 
-from shared.types import new_id
+from shared.server import (
+    HealthResponse as _BaseHealthResponse,
+)
+from shared.server import (
+    RequestIDMiddleware,
+    check_health_dependencies,
+    http_dependency_status,
+)
+from shared.types import ChatRole, new_id
 
 from . import __version__, config
 from .agent import SonalityAgent
-from .ess import ESSResult, ReasoningType, UrgencyLevel
+from .caller import StreamChunk
+from .ess import ESSResult
 from .memory.graph import BeliefNode
 from .progress import AgentEvent
-from .provider import StreamChunk
-from .schema import ChatRole
+from .schema import EventType
 from .token_budget import estimate_tokens_utf8
 
 MODEL_ID: Final = "sonality"
 
-log = structlog.get_logger()
+log = structlog.get_logger(__name__)
 
 _agent_store: dict[str, SonalityAgent] = {}
 _agent_lock: asyncio.Lock | None = None
@@ -79,20 +85,10 @@ _ingest_worker_task: asyncio.Task[None] | None = None
 _api_key_header = APIKeyHeader(name="Authorization", auto_error=False)
 
 
-class RequestIDMiddleware(BaseHTTPMiddleware):
-    """Attach X-Request-ID to response and bind into structlog context for tracing."""
-
-    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
-        request_id = request.headers.get("X-Request-ID") or new_id()[:16]
-        structlog.contextvars.clear_contextvars()
-        structlog.contextvars.bind_contextvars(request_id=request_id)
-        response = await call_next(request)
-        response.headers["X-Request-ID"] = request_id
-        return response
-
-
 async def verify_api_key(request: Request, api_key: str | None = Depends(_api_key_header)) -> None:
     """Verify API key if SONALITY_HTTP_API_KEY is set. Skip auth for health endpoints."""
+    import hmac
+
     if not config.settings.http_api_key:
         return
     if request.url.path in ("/health", "/v1/health"):
@@ -100,7 +96,7 @@ async def verify_api_key(request: Request, api_key: str | None = Depends(_api_ke
     if not api_key:
         raise HTTPException(status_code=401, detail="Missing API key")
     expected = f"Bearer {config.settings.http_api_key}"
-    if api_key != expected:
+    if not hmac.compare_digest(api_key, expected):
         raise HTTPException(status_code=401, detail="Invalid API key")
 
 
@@ -193,7 +189,7 @@ class ChatCompletionRequest(BaseModel):
     model: str = Field(default=MODEL_ID)
     messages: list[ChatMessage] = Field(..., description="Full conversation history")
     temperature: float = Field(default=0.7, ge=0.0, le=2.0)
-    max_tokens: int = Field(default=1024, ge=1, le=8192)
+    max_tokens: int | None = Field(default=None, ge=1, le=131072)
     stream: bool = Field(default=False)
 
 
@@ -240,9 +236,13 @@ async def chat_completions(
     user_messages = [m for m in request.messages if m.role is ChatRole.USER]
     if not user_messages:
         raise HTTPException(status_code=400, detail="No user message provided")
+    if not user_messages[-1].content.strip():
+        raise HTTPException(status_code=400, detail="User message content is empty")
 
     messages = [{"role": m.role, "content": m.content} for m in request.messages]
-    eff_max = max(1, min(request.max_tokens, config.settings.llm_max_tokens))
+    eff_max = (
+        request.max_tokens if request.max_tokens is not None else config.settings.llm_max_tokens
+    )
 
     if request.stream:
         chunk_id = f"chatcmpl-{new_id()[:24]}"
@@ -255,40 +255,47 @@ async def chat_completions(
             return f"event: {event_type}\ndata: {json.dumps(data)}\n\n"
 
         async def generate() -> AsyncIterator[str]:
-            async with _get_lock():
-                # Build the stream iterator in a thread (agent setup is synchronous),
-                # then consume items via to_thread so each blocking LLM/tool step
-                # doesn't block the asyncio event loop.
-                loop = asyncio.get_event_loop()
-                stream_iter = await loop.run_in_executor(
-                    None,
-                    partial(
-                        agent.respond_stream,
-                        messages,
-                        max_tokens=eff_max,
-                        temperature=request.temperature,
-                    ),
-                )
-                it = iter(stream_iter)
-                _sentinel = object()
-                while True:
-                    item = await asyncio.to_thread(next, it, _sentinel)
-                    if item is _sentinel:
-                        break
-                    if isinstance(item, AgentEvent):
-                        yield sse_event(
-                            item.type,
-                            {
-                                "detail": item.detail,
-                                "tool_name": item.tool_name,
-                                "tool_args": item.tool_args,
-                                "tool_result_summary": item.tool_result_summary,
-                                "iteration": item.iteration,
-                                "sources_count": item.sources_count,
-                            },
-                        )
-                    elif isinstance(item, StreamChunk) and item.content:
-                        yield sse_chunk({"content": item.content})
+            try:
+                async with _get_lock():
+                    loop = asyncio.get_running_loop()
+                    stream_iter = await loop.run_in_executor(
+                        None,
+                        partial(
+                            agent.respond_stream,
+                            messages,
+                            max_tokens=eff_max,
+                            temperature=request.temperature,
+                        ),
+                    )
+                    it = iter(stream_iter)
+                    _sentinel = object()
+                    while True:
+                        item = await asyncio.to_thread(next, it, _sentinel)
+                        if item is _sentinel:
+                            break
+                        if isinstance(item, AgentEvent):
+                            if item.type == EventType.TOOL_PROGRESS:
+                                log.debug(
+                                    "sse_tool_progress",
+                                    detail=item.detail[:60],
+                                    tool=item.tool_name,
+                                )
+                            yield sse_event(
+                                item.type,
+                                {
+                                    "detail": item.detail,
+                                    "tool_name": item.tool_name,
+                                    "tool_args": item.tool_args,
+                                    "tool_result_summary": item.tool_result_summary,
+                                    "iteration": item.iteration,
+                                    "sources_count": item.sources_count,
+                                },
+                            )
+                        elif isinstance(item, StreamChunk) and item.content:
+                            yield sse_chunk({"content": item.content})
+            except Exception:
+                log.error("stream_generate_failed", exc_info=True)
+                yield sse_event("error", {"detail": "Internal error during generation"})
             yield sse_chunk({}, "stop")
             yield "data: [DONE]\n\n"
 
@@ -342,55 +349,20 @@ async def get_model(model_id: str) -> ModelInfo:
     return ModelInfo(id=MODEL_ID, created=int(time.time()), owned_by=MODEL_ID)
 
 
-# --- Simple Chat Endpoint ---
-
-
-class SimpleChatRequest(BaseModel):
-    message: str = Field(..., description="User message")
-    context: list[ChatMessage] = Field(
-        default_factory=list, description="Optional conversation history"
-    )
-
-
-class SimpleChatResponse(BaseModel):
-    response: str
-    ess_score: float
-    reasoning_type: ReasoningType
-    topics: list[str]
-
-
-@app.post("/chat", response_model=SimpleChatResponse)
-async def simple_chat(request: SimpleChatRequest) -> SimpleChatResponse:
-    """Simple chat endpoint. Optionally accepts context for multi-turn."""
-    log.info("simple_chat", context_len=len(request.context))
-    agent = _get_agent()
-    messages = [{"role": m.role, "content": m.content} for m in request.context]
-    messages.append({"role": ChatRole.USER, "content": request.message})
-    async with _get_lock():
-        response_text = await asyncio.to_thread(agent.respond, messages)
-        ess = agent.last_ess
-    return SimpleChatResponse(
-        response=response_text,
-        ess_score=ess.score,
-        reasoning_type=ess.reasoning_type,
-        topics=list(ess.topics),
-    )
-
-
 # --- Sonality-Specific Endpoints ---
 
 
 class IngestRequest(BaseModel):
-    text: str = Field(..., description="Content to ingest", max_length=500_000)
+    text: str = Field(..., description="Content to ingest", min_length=1, max_length=500_000)
     topic_override: str = Field(default="", max_length=200)
 
 
 class IngestResponse(BaseModel):
     success: bool
-    score: float
-    reasoning_type: ReasoningType
+    score: float = Field(ge=0.0, le=1.0)
+    signals: dict[str, float]
     belief_update_recommended: bool
-    urgency: UrgencyLevel
+    urgency: float = Field(ge=0.0, le=1.0)
     topics: list[str]
     summary: str
 
@@ -410,10 +382,10 @@ class IngestJobStatus(BaseModel):
 
 class BeliefResponse(BaseModel):
     topic: str
-    valence: float
-    confidence: float
-    evidence_count: int
-    uncertainty: float
+    valence: float = Field(ge=-1.0, le=1.0)
+    confidence: float = Field(ge=0.0, le=1.0)
+    evidence_count: int = Field(ge=0)
+    uncertainty: float = Field(ge=0.0, le=1.0)
     belief_text: str
 
     @classmethod
@@ -428,11 +400,12 @@ class BeliefResponse(BaseModel):
         )
 
 
-class HealthResponse(BaseModel):
+class HealthResponse(_BaseHealthResponse):
+    """Sonality health — extends shared base with agent-specific fields."""
+
     belief_count: int
     snapshot_version: int
     uptime_seconds: float = 0.0
-    version: str = ""
 
 
 @app.post("/ingest", response_model=IngestAccepted, status_code=202)
@@ -467,7 +440,7 @@ async def ingest_status(job_id: str) -> IngestJobStatus:
         result = IngestResponse(
             success=True,
             score=ess.score,
-            reasoning_type=ess.reasoning_type,
+            signals=ess.signals.as_dict(),
             belief_update_recommended=ess.belief_update_recommended,
             urgency=ess.urgency,
             topics=list(ess.topics),
@@ -498,13 +471,31 @@ async def get_belief_endpoint(topic: str) -> BeliefResponse:
 async def health() -> HealthResponse:
     """Return agent health: belief count, snapshot version, uptime."""
     agent = _get_agent()
-    belief_count, snapshot_version = await asyncio.to_thread(agent.get_health)
+    dependencies: dict[str, str] = {}
+    try:
+        belief_count, snapshot_version = await asyncio.to_thread(agent.get_health)
+    except Exception as exc:
+        belief_count, snapshot_version = 0, 0
+        dependencies["agent_health"] = f"error: {exc}"
+    try:
+        dependencies.update(await asyncio.to_thread(agent.check_dependencies))
+    except Exception as exc:
+        dependencies["stores"] = f"error: {exc}"
+    dependencies["llm"] = await asyncio.to_thread(
+        http_dependency_status, f"{config.settings.base_url.rstrip('/')}/models"
+    )
+    if config.settings.fathom_url:
+        dependencies["fathom"] = await asyncio.to_thread(
+            http_dependency_status, f"{config.settings.fathom_url.rstrip('/')}/health"
+        )
     uptime = time.time() - _startup_time if _startup_time > 0 else 0.0
+    check_health_dependencies(dependencies)
     return HealthResponse(
         belief_count=belief_count,
         snapshot_version=snapshot_version,
         uptime_seconds=round(uptime, 2),
         version=__version__,
+        dependencies=dependencies,
     )
 
 
