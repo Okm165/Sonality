@@ -1,13 +1,13 @@
-"""Retrieval pipeline: routing, chain/split search, reranking.
+"""Retrieval pipeline: routing, search orchestration, and reranking.
 
-The router classifies queries and selects strategy; chain_retrieve does
-iterative refinement; split_retrieve decomposes multi-entity queries;
-rerank_episodes applies LLM listwise reranking to final candidates.
+Public entry point is ``retrieve()`` — a single async function that hides
+query routing, multi-pass vector/graph search, temporal expansion,
+reranking, and semantic feature search.
 """
 
 from __future__ import annotations
 
-from .chain import chain_retrieve
+from .pipeline import retrieve
 from .reranker import rerank_episodes
 from .router import (
     QueryCategory,
@@ -16,15 +16,13 @@ from .router import (
     TemporalExpansionDecision,
     route_query,
 )
-from .split import split_retrieve
 
 __all__ = [
     "QueryCategory",
     "RoutingDecision",
     "SemanticMemoryDecision",
     "TemporalExpansionDecision",
-    "chain_retrieve",
     "rerank_episodes",
+    "retrieve",
     "route_query",
-    "split_retrieve",
 ]

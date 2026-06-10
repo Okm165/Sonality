@@ -6,8 +6,9 @@ Three base categories cover every failure mode:
   - ConfigError: missing or invalid configuration at startup
 
 Modules raise the most specific subclass that applies. Callers catch at
-whatever granularity they need — catching LLMError handles all LLM failures,
-catching ProviderTransportError handles only network-level issues.
+whatever granularity they need — catching LLMError handles all LLM failures.
+ProviderHTTPError ⊂ ProviderTransportError ⊂ LLMError: catch in that order
+to distinguish non-retryable HTTP errors from transient transport failures.
 """
 
 from __future__ import annotations
@@ -36,10 +37,6 @@ class ProviderHTTPError(ProviderTransportError):
 
 class LLMParseError(LLMError):
     """LLM returned text that could not be parsed as valid JSON."""
-
-
-class LLMValidationError(LLMError):
-    """LLM JSON parsed but failed Pydantic schema validation."""
 
 
 # ---------------------------------------------------------------------------
