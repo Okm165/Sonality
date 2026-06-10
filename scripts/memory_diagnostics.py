@@ -4,23 +4,24 @@ Checks consistency, orphan detection, collection integrity, cross-store sync,
 temporal chain integrity, payload completeness, and isolated node detection.
 
 Usage:
-    uv run python scripts/memory_diagnostics.py [--fix-orphans]
+    uv run python scripts/memory_diagnostics.py
 """
 
 from __future__ import annotations
 
-import argparse
 import asyncio
 import logging
 import sys
 from dataclasses import dataclass, field
+from typing import cast
 
-from neo4j import AsyncGraphDatabase
+from neo4j._typing import LiteralString
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.models import FieldCondition, Filter, MatchValue
 
+from neo4j import AsyncGraphDatabase
 from sonality import config
-from sonality.memory.graph import MemoryGraph
+from sonality.schema import Collection
 
 log = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
@@ -28,8 +29,8 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
 @dataclass
 class DiagnosticsReport:
+    """Aggregate health metrics from Neo4j + Qdrant. Unhealthy if issues is non-empty."""
     neo4j_episodes: int = 0
-    neo4j_derivatives: int = 0
     neo4j_segments: int = 0
     neo4j_topics: int = 0
     neo4j_beliefs: int = 0
@@ -38,7 +39,6 @@ class DiagnosticsReport:
     qdrant_derivatives_archived: int = 0
     qdrant_semantic_features: int = 0
     orphan_qdrant_only: list[str] = field(default_factory=list)
-    orphan_neo4j_only: list[str] = field(default_factory=list)
     # Chain integrity
     temporal_chain_gaps: int = 0
     episodes_without_segments: int = 0
@@ -56,39 +56,34 @@ class DiagnosticsReport:
         return not self.issues
 
 
-async def _qdrant_collection_count(qdrant: AsyncQdrantClient, collection: str) -> int:
-    try:
-        info = await qdrant.get_collection(collection)
-        return info.points_count or 0
-    except Exception:
-        return -1
+async def run_diagnostics() -> DiagnosticsReport:
+    """Run all diagnostic checks and return a populated report.
 
-
-async def run_diagnostics(fix_orphans: bool = False) -> DiagnosticsReport:
+    Connects to Neo4j and Qdrant, checks node counts, structural integrity
+    (temporal chains, segments), cross-store consistency, and payload completeness.
+    """
     report = DiagnosticsReport()
     driver = AsyncGraphDatabase.driver(
-        config.NEO4J_URL,
-        auth=(config.NEO4J_USER, config.NEO4J_PASSWORD),
+        config.settings.neo4j_url,
+        auth=(config.settings.neo4j_user, config.settings.neo4j_password),
     )
-    graph = MemoryGraph(driver)
-    qdrant = AsyncQdrantClient(url=config.QDRANT_URL)
+    qdrant = AsyncQdrantClient(url=config.settings.qdrant_url)
 
     try:
         # ── Neo4j counts ────────────────────────────────────────────────
-        async with driver.session(database=config.NEO4J_DATABASE) as session:
+        async with driver.session(database=config.settings.neo4j_database) as session:
             for label, attr in [
                 ("Episode", "neo4j_episodes"),
-                ("Derivative", "neo4j_derivatives"),
                 ("Segment", "neo4j_segments"),
                 ("Topic", "neo4j_topics"),
                 ("Belief", "neo4j_beliefs"),
             ]:
-                result = await session.run(f"MATCH (n:{label}) RETURN count(n) AS cnt")
+                result = await session.run(cast(LiteralString, f"MATCH (n:{label}) RETURN count(n) AS cnt"))
                 record = await result.single()
                 setattr(report, attr, record["cnt"] if record else 0)
 
         # ── Neo4j structural checks ──────────────────────────────────────
-        async with driver.session(database=config.NEO4J_DATABASE) as session:
+        async with driver.session(database=config.settings.neo4j_database) as session:
             # Temporal chain gaps: episodes with no TEMPORAL_NEXT edge AND not the latest
             # (episodes that have a successor in time but the edge is missing)
             result = await session.run("""
@@ -132,8 +127,8 @@ async def run_diagnostics(fix_orphans: bool = False) -> DiagnosticsReport:
         collections = await qdrant.get_collections()
         coll_names = {c.name for c in collections.collections}
 
-        if "derivatives" in coll_names:
-            info = await qdrant.get_collection("derivatives")
+        if Collection.DERIVATIVES in coll_names:
+            info = await qdrant.get_collection(Collection.DERIVATIVES)
             report.qdrant_derivatives_total = info.points_count or 0
 
             # Active vs archived counts
@@ -141,7 +136,7 @@ async def run_diagnostics(fix_orphans: bool = False) -> DiagnosticsReport:
             offset = None
             while True:
                 results, offset = await qdrant.scroll(
-                    collection_name="derivatives",
+                    collection_name=Collection.DERIVATIVES,
                     scroll_filter=Filter(
                         must=[FieldCondition(key="archived", match=MatchValue(value=False))]
                     ),
@@ -157,7 +152,7 @@ async def run_diagnostics(fix_orphans: bool = False) -> DiagnosticsReport:
 
             # Payload completeness: sample up to 5000 points for missing required fields
             sample_results, _ = await qdrant.scroll(
-                collection_name="derivatives",
+                collection_name=Collection.DERIVATIVES,
                 limit=5000,
                 with_payload=["uid", "text", "episode_uid"],
             )
@@ -168,51 +163,38 @@ async def run_diagnostics(fix_orphans: bool = False) -> DiagnosticsReport:
                 if not payload.get("text"):
                     report.qdrant_missing_content += 1
         else:
-            report.warnings.append("Qdrant 'derivatives' collection does not exist")
+            report.warnings.append(f"Qdrant '{Collection.DERIVATIVES}' collection does not exist")
 
-        if "semantic_features" in coll_names:
-            info = await qdrant.get_collection("semantic_features")
+        if Collection.SEMANTIC_FEATURES in coll_names:
+            info = await qdrant.get_collection(Collection.SEMANTIC_FEATURES)
             report.qdrant_semantic_features = info.points_count or 0
 
         # ── Cross-store consistency check ───────────────────────────────
-        if "derivatives" in coll_names:
+        if Collection.DERIVATIVES in coll_names:
             qdrant_results, _ = await qdrant.scroll(
-                collection_name="derivatives",
+                collection_name=Collection.DERIVATIVES,
                 limit=50000,
-                with_payload=["uid"],
+                with_payload=["uid", "episode_uid"],
             )
-            qdrant_uids = {str(p.payload.get("uid", "")) for p in qdrant_results if p.payload}
-            neo4j_uids = await graph.list_derivative_uids()
+            qdrant_episode_uids = {
+                str(p.payload.get("episode_uid", ""))
+                for p in qdrant_results
+                if p.payload and p.payload.get("episode_uid")
+            }
 
-            orphan_qdrant = sorted(qdrant_uids - neo4j_uids)
-            orphan_neo4j = sorted(neo4j_uids - qdrant_uids)
+            async with driver.session(database=config.settings.neo4j_database) as session:
+                result = await session.run("MATCH (e:Episode) RETURN e.uid AS uid")
+                neo4j_episode_uids = {record["uid"] async for record in result}
 
-            report.orphan_qdrant_only = orphan_qdrant[:50]
-            report.orphan_neo4j_only = orphan_neo4j[:50]
+            orphan_qdrant_episodes = sorted(qdrant_episode_uids - neo4j_episode_uids)
 
-            if orphan_qdrant:
-                msg = f"{len(orphan_qdrant)} orphan derivatives in Qdrant (not in Neo4j)"
+            if orphan_qdrant_episodes:
+                report.orphan_qdrant_only = orphan_qdrant_episodes[:50]
+                msg = f"{len(orphan_qdrant_episodes)} derivatives in Qdrant reference missing Neo4j episodes"
                 report.issues.append(msg)
                 log.warning(msg)
-                if fix_orphans:
-                    await qdrant.delete(
-                        collection_name="derivatives",
-                        points_selector=orphan_qdrant[:50],
-                    )
-                    log.info("Deleted %d Qdrant-only orphans", len(orphan_qdrant[:50]))
-
-            if orphan_neo4j:
-                msg = f"{len(orphan_neo4j)} orphan derivatives in Neo4j (not in Qdrant)"
-                report.issues.append(msg)
-                log.warning(msg)
-                if fix_orphans:
-                    await graph.delete_derivatives(orphan_neo4j[:50])
-                    log.info("Deleted %d Neo4j-only orphans", len(orphan_neo4j[:50]))
 
         # ── Structural health checks ────────────────────────────────────
-        if report.neo4j_episodes > 0 and report.neo4j_derivatives == 0:
-            report.issues.append("Episodes exist in Neo4j but no derivatives — broken storage")
-
         active_ratio = (
             report.qdrant_derivatives_active / max(report.qdrant_derivatives_total, 1)
             if report.qdrant_derivatives_total > 0
@@ -221,17 +203,6 @@ async def run_diagnostics(fix_orphans: bool = False) -> DiagnosticsReport:
         if active_ratio < 0.5:
             report.warnings.append(
                 f"High archive ratio: {1 - active_ratio:.0%} of Qdrant derivatives are archived"
-            )
-
-        if report.neo4j_episodes > 0:
-            avg_derivs = report.neo4j_derivatives / report.neo4j_episodes
-            if avg_derivs < 1.0:
-                report.issues.append(
-                    f"Low derivative density: {avg_derivs:.1f} derivatives/episode (expected ≥ 1)"
-                )
-            elif avg_derivs > 50:
-                report.warnings.append(
-                    f"High derivative density: {avg_derivs:.1f} derivatives/episode"
                 )
 
         if report.temporal_chain_gaps > 0:
@@ -277,7 +248,6 @@ def _print_report(report: DiagnosticsReport) -> None:
     print()
     print("Neo4j:")
     print(f"  Episodes:    {report.neo4j_episodes}")
-    print(f"  Derivatives: {report.neo4j_derivatives}")
     print(f"  Segments:    {report.neo4j_segments}")
     print(f"  Topics:      {report.neo4j_topics}")
     print(f"  Beliefs:     {report.neo4j_beliefs}")
@@ -300,10 +270,6 @@ def _print_report(report: DiagnosticsReport) -> None:
         print(f"Qdrant-only orphans ({len(report.orphan_qdrant_only)} shown, may be truncated):")
         for uid in report.orphan_qdrant_only[:10]:
             print(f"  {uid}")
-    if report.orphan_neo4j_only:
-        print(f"Neo4j-only orphans ({len(report.orphan_neo4j_only)} shown, may be truncated):")
-        for uid in report.orphan_neo4j_only[:10]:
-            print(f"  {uid}")
     if report.issues:
         print("Issues:")
         for issue in report.issues:
@@ -317,18 +283,11 @@ def _print_report(report: DiagnosticsReport) -> None:
     print()
 
 
-async def _main(fix_orphans: bool) -> int:
-    report = await run_diagnostics(fix_orphans=fix_orphans)
+async def _main() -> int:
+    report = await run_diagnostics()
     _print_report(report)
     return 0 if report.healthy else 1
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Memory health diagnostics")
-    parser.add_argument(
-        "--fix-orphans",
-        action="store_true",
-        help="Auto-delete orphan derivatives from both stores",
-    )
-    args = parser.parse_args()
-    sys.exit(asyncio.run(_main(fix_orphans=args.fix_orphans)))
+    sys.exit(asyncio.run(_main()))
