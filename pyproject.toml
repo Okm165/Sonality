@@ -3,48 +3,64 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["sonality", "chat"]
+packages = ["src/sonality", "src/fathom", "src/shared", "src/chat"]
 
 [project]
 name = "sonality"
 version = "0.1.0"
-description = "Stateless LLM agent with self-evolving personality backed by Neo4j and Qdrant"
+description = "Multi-agent workspace: Sonality personality engine, Fathom research agent, shared LLM infrastructure"
 readme = "README.md"
+license = "AGPL-3.0-or-later"
+license-files = ["LICENSE"]
 requires-python = ">=3.12"
 dependencies = [
-    "fastembed>=0.3.0",
+    "ddgs>=7.0.0",
     "fastapi>=0.115.0",
     "httpx>=0.28.0",
     "neo4j>=5.0.0",
+    "playwright>=1.49.0",
     "pydantic>=2.0.0",
+    "pydantic-settings>=2.7.0",
     "python-dotenv>=1.0.0",
     "qdrant-client>=1.12.0",
+    "rich>=14.0.0",
+    "selectolax>=0.3.0",
+    "structlog>=25.0.0",
+    "trafilatura>=2.0.0",
     "uvicorn>=0.34.0",
 ]
 
 [project.optional-dependencies]
-chat = ["aiogram>=3.26.0", "rich>=14.0.0"]
-scripts = ["feedparser>=6.0.0", "gnews>=0.4.0", "rich>=14.0.0"]
-dev = ["pyright>=1.1.0", "pytest>=8.0.0", "pytest-timeout>=2.3.0", "ruff>=0.8.0"]
-bench = ["openai>=2.29.0", "rich>=14.0.0"]
+chat = ["aiogram>=3.26.0"]
+scripts = ["feedparser>=6.0.0", "gnews>=0.4.0"]
+dev = [
+    "pyright>=1.1.0",
+    "pytest>=8.0.0",
+    "pytest-timeout>=2.3.0",
+    "ruff>=0.8.0",
+]
+
+[dependency-groups]
+docs = ["zensical"]
 
 [project.scripts]
 sonality = "sonality.cli:main"
 sonality-server = "sonality.api:serve"
 sonality-chat = "chat.terminal:main"
 sonality-telegram = "chat.telegram:main"
+fathom-server = "fathom.api:serve"
 
 [tool.ruff]
 target-version = "py312"
 line-length = 100
-src = ["sonality", "chat", "tests", "benches"]
+src = ["src/sonality", "src/fathom", "src/shared", "src/chat", "tests"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "UP", "B", "SIM", "RUF"]
 ignore = ["E501", "RUF001", "RUF002"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["sonality", "chat"]
+known-first-party = ["sonality", "fathom", "shared", "chat"]
 
 [tool.pyright]
 pythonVersion = "3.12"
@@ -52,10 +68,9 @@ typeCheckingMode = "standard"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["."]
-addopts = "-v --tb=short -m 'not live and not bench'"
+pythonpath = ["src"]
+addopts = "-v --tb=short -m 'not live'"
 timeout = 1800
 markers = [
-    "live: tests/benches requiring external model API access",
-    "bench: evaluation benchmark suites (run: make bench-*)",
+    "live: tests requiring external model API access",
 ]

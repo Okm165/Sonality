@@ -204,7 +204,8 @@ def _ingest_one(
     key = article.link or article.title
     if not key or key in seen:
         return ok, total
-    if not article.title or len(article.description) < MIN_DESC_LEN:
+    stripped_desc = _HTML_TAG.sub("", article.description).strip()
+    if not article.title or len(stripped_desc) < MIN_DESC_LEN:
         return ok, total
     seen.add(key)
 
