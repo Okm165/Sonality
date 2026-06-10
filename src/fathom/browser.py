@@ -17,7 +17,7 @@ from shared.errors import ServiceUnavailableError
 
 from .config import settings
 
-log = structlog.get_logger()
+log = structlog.get_logger(__name__)
 
 _pw_context_manager = None
 _pw: Playwright | None = None
@@ -57,6 +57,15 @@ async def launch() -> None:
         log.info("browser_ready", url=settings.browser_ws_url)
 
 
+async def check() -> None:
+    """Verify browserless is currently accepting CDP connections."""
+    if _pw is None:
+        await launch()
+        return
+    browser = await _pw.chromium.connect_over_cdp(settings.browser_ws_url)
+    await browser.close()
+
+
 async def close() -> None:
     """Shut down Playwright."""
     global _pw_context_manager, _pw
@@ -81,14 +90,33 @@ async def _fetch_pw(browser: Browser, url: str, timeout_ms: int) -> str:
         await ctx.close()
 
 
-async def fetch(url: str, timeout_ms: int = 15_000) -> str:
-    """Fetch a single page via CDP."""
+async def fetch_preview_batch(urls: list[str]) -> list[str | Exception]:
+    """Lightweight Playwright fetch for page previews — no extra wait, short timeout.
+
+    Returns raw HTML (or Exception) per URL. Caller runs extract_preview on successes.
+    """
     if _pw is None:
         await launch()
     assert _pw is not None
+
     browser = await _pw.chromium.connect_over_cdp(settings.browser_ws_url)
+    sem = asyncio.Semaphore(settings.browser_concurrency)
+
+    async def _one(url: str) -> str | Exception:
+        async with sem:
+            ctx = await browser.new_context()
+            page = await ctx.new_page()
+            try:
+                await page.goto(url, wait_until="domcontentloaded", timeout=5000)
+                return await page.content()
+            except Exception as exc:
+                return exc
+            finally:
+                await page.close()
+                await ctx.close()
+
     try:
-        return await _fetch_pw(browser, url, timeout_ms)
+        return await asyncio.gather(*[_one(u) for u in urls])
     finally:
         with contextlib.suppress(Exception):
             await browser.close()
@@ -101,7 +129,7 @@ async def fetch_batch(urls: list[str]) -> list[str | Exception]:
     assert _pw is not None
 
     browser = await _pw.chromium.connect_over_cdp(settings.browser_ws_url)
-    sem = asyncio.Semaphore(settings.n)
+    sem = asyncio.Semaphore(settings.browser_concurrency)
 
     async def _one(url: str) -> str | Exception:
         async with sem:

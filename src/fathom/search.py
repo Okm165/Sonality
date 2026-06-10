@@ -14,7 +14,7 @@ from ddgs import DDGS
 from .config import settings
 from .models import Link
 
-log = structlog.get_logger()
+log = structlog.get_logger(__name__)
 
 _semaphore: asyncio.Semaphore | None = None
 
@@ -26,12 +26,18 @@ def _get_semaphore() -> asyncio.Semaphore:
     return _semaphore
 
 
+_SEARCH_TIMEOUT: float = 30.0
+
+
 async def query(q: str, max_results: int = 10) -> list[Link]:
-    """Run a single DuckDuckGo search. Returns Links with anchor_text=title, context=snippet."""
+    """Run a single DuckDuckGo search with timeout. Returns Links."""
     sem = _get_semaphore()
     async with sem:
         loop = asyncio.get_running_loop()
-        results = await loop.run_in_executor(None, _sync_search, q, max_results)
+        results = await asyncio.wait_for(
+            loop.run_in_executor(None, _sync_search, q, max_results),
+            timeout=_SEARCH_TIMEOUT,
+        )
     log.info("search_complete", query=q, results=len(results))
     return results
 
