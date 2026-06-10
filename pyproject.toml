@@ -10,10 +10,11 @@ name = "sonality"
 version = "0.1.0"
 description = "Multi-agent workspace: Sonality personality engine, Fathom research agent, shared LLM infrastructure"
 readme = "README.md"
+license = "AGPL-3.0-or-later"
+license-files = ["LICENSE"]
 requires-python = ">=3.12"
 dependencies = [
     "ddgs>=7.0.0",
-    "fastembed>=0.3.0",
     "fastapi>=0.115.0",
     "httpx>=0.28.0",
     "neo4j>=5.0.0",
@@ -37,21 +38,22 @@ dev = [
     "pytest>=8.0.0",
     "pytest-timeout>=2.3.0",
     "ruff>=0.8.0",
-    "testcontainers[neo4j,qdrant]>=4.0.0",
 ]
+
+[dependency-groups]
+docs = ["zensical"]
 
 [project.scripts]
 sonality = "sonality.cli:main"
 sonality-server = "sonality.api:serve"
 sonality-chat = "chat.terminal:main"
 sonality-telegram = "chat.telegram:main"
-fathom = "fathom.cli:main"
 fathom-server = "fathom.api:serve"
 
 [tool.ruff]
 target-version = "py312"
 line-length = 100
-src = ["src/sonality", "src/fathom", "src/shared", "src/chat", "tests", "benches"]
+src = ["src/sonality", "src/fathom", "src/shared", "src/chat", "tests"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "UP", "B", "SIM", "RUF"]
@@ -67,9 +69,8 @@ typeCheckingMode = "standard"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
-addopts = "-v --tb=short -m 'not live and not bench'"
+addopts = "-v --tb=short -m 'not live'"
 timeout = 1800
 markers = [
-    "live: tests/benches requiring external model API access",
-    "bench: evaluation benchmark suites (run: make bench-*)",
+    "live: tests requiring external model API access",
 ]
