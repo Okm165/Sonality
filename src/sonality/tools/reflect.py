@@ -1,47 +1,153 @@
-"""Belief reflection — deep reflection, belief graph updates, forgetting.
+"""Belief reflection — deep reflection and belief graph updates.
 
 Called by integrate_knowledge (not exposed as a standalone tool). The pipeline:
-1. Select relevant beliefs via LLM reranking
-2. Run deep reflection via multi-model consensus to produce belief patches (REASONING + STRUCTURED models)
+1. Rank beliefs by relevance (embedding similarity + graph proximity)
+2. Run deep reflection via LLM to produce belief patches
 3. Apply patches to Neo4j (upsert beliefs, update personality snapshot)
-4. Run forgetting cycle to prune low-value memories
 """
 
 from __future__ import annotations
 
-import re
+import math
 import time
+from dataclasses import dataclass
 
 import structlog
 from pydantic import BaseModel, Field, model_validator
 
+from shared.embedder import EmbedderProtocol, cosine_similarity
 from shared.errors import BeliefUpdateError
+from shared.ranking import rrf_score, scores_to_ranks
 
 from .. import config
-from ..caller import consensus_call, llm_call
-from ..memory.forgetting import assess_and_forget
+from ..caller import format_prompt, llm_call
 from ..memory.graph import BeliefNode, format_beliefs_for_prompt_from_nodes
-from ..prompts import BELIEF_RELEVANCE_PROMPT, REFLECTION_DEEP_PROMPT, REFLECTION_WEB_SECTION
+from ..prompts import REFLECTION_DEEP_PROMPT, WEB_EVIDENCE_HEADER
 from ..request_identity import get_request_identity
+from ..schema import normalize_topic
 from . import ToolContext
 
-log = structlog.get_logger()
+log = structlog.get_logger(__name__)
+
+
+# --- Belief Ranking (pure embeddings) ---
+
+
+def rank_beliefs_by_similarity(
+    context: str,
+    beliefs: list[BeliefNode],
+    embedder: EmbedderProtocol,
+    *,
+    max_results: int = 8,
+) -> list[BeliefNode]:
+    """Rank beliefs by embedding similarity to context. Used by agent for quick filtering."""
+    if not beliefs or not context.strip():
+        return beliefs[:max_results]
+    if len(beliefs) <= max_results:
+        return beliefs
+
+    ctx_emb = embedder.embed_query(context[:1500])
+    texts = [b.belief_text or b.topic for b in beliefs]
+    embs = embedder.embed_documents(texts)
+
+    if len(embs) != len(beliefs):
+        log.warning("embed_count_mismatch", beliefs=len(beliefs), embeddings=len(embs))
+        return beliefs[:max_results]
+    scored = [
+        (belief, cosine_similarity(ctx_emb, emb)) for belief, emb in zip(beliefs, embs, strict=True)
+    ]
+    scored.sort(key=lambda x: x[1], reverse=True)
+    return [b for b, _ in scored[:max_results]]
+
+
+@dataclass(slots=True)
+class _ScoredBelief:
+    """Belief with RRF-fused relevance score."""
+
+    belief: BeliefNode
+    rrf_score: float = 0.0
+
+
+def rank_beliefs_algorithmically(
+    evidence: str,
+    all_beliefs: list[BeliefNode],
+    ctx: ToolContext,
+    *,
+    max_results: int = 15,
+) -> list[BeliefNode]:
+    """Rank beliefs using RRF fusion of embedding similarity + graph signals.
+
+    Two ranking signals fused with RRF:
+    1. Embedding similarity: semantic match between evidence and belief text
+    2. Graph strength: belief confidence × evidence_count (from Neo4j)
+    """
+    if not all_beliefs:
+        return []
+    if len(all_beliefs) <= max_results:
+        return all_beliefs
+
+    # --- Signal 1: Embedding similarity (dense vectors) ---
+    evidence_embedding = ctx.embedder.embed_query(evidence[:1500])
+    belief_texts = [b.belief_text or b.topic for b in all_beliefs]
+    belief_embeddings = ctx.embedder.embed_documents(belief_texts)
+    if len(belief_embeddings) != len(all_beliefs):
+        return all_beliefs[:max_results]
+
+    embedding_scores = [
+        max(0.0, cosine_similarity(evidence_embedding, emb)) for emb in belief_embeddings
+    ]
+
+    # --- Signal 2: Graph strength (confidence * log evidence, Weber-Fechner) ---
+    graph_scores = [
+        b.confidence * (1.0 + math.log1p(b.evidence_count) / math.log(21)) for b in all_beliefs
+    ]
+
+    # --- RRF fusion ---
+    emb_ranks = scores_to_ranks(embedding_scores)
+    graph_ranks = scores_to_ranks(graph_scores)
+
+    scored = [
+        _ScoredBelief(belief=belief, rrf_score=rrf_score([emb_ranks[i], graph_ranks[i]]))
+        for i, belief in enumerate(all_beliefs)
+    ]
+
+    scored.sort(key=lambda s: s.rrf_score, reverse=True)
+
+    if scored:
+        log.debug(
+            "belief_ranking",
+            top=[(s.belief.topic[:30], round(s.rrf_score, 4)) for s in scored[:3]],
+            total=len(all_beliefs),
+        )
+
+    return [s.belief for s in scored[:max_results]]
 
 
 class BeliefPatch(BaseModel):
     """Single belief create/update from LLM reflection."""
 
-    topic: str = ""
-    valence: float = 0.0
-    confidence: float = 0.5
-    belief_text: str = ""
-    reasoning: str = ""
+    topic: str = Field(default="", max_length=200)
+    valence: float = Field(default=0.0, ge=-1.0, le=1.0)
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+    belief_text: str = Field(default="", max_length=2000)
+    reasoning: str = Field(default="", max_length=1000)
+
+    @model_validator(mode="before")
+    @classmethod
+    def clamp_floats(cls, data: object) -> object:
+        if not isinstance(data, dict):
+            return data
+        for key, lo, hi in (("valence", -1.0, 1.0), ("confidence", 0.0, 1.0)):
+            v = data.get(key)
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                data[key] = max(lo, min(hi, float(v)))
+        return data
 
 
 class DeepReflectionResponse(BaseModel):
-    belief_updates: list[BeliefPatch] = Field(default_factory=list)
-    new_beliefs: list[BeliefPatch] = Field(default_factory=list)
-    snapshot_revision: str = ""
+    belief_updates: list[BeliefPatch] = Field(default_factory=list, max_length=20)
+    new_beliefs: list[BeliefPatch] = Field(default_factory=list, max_length=10)
+    snapshot_revision: str = Field(default="", max_length=5000)
     snapshot_changed: bool = False
 
     @model_validator(mode="before")
@@ -50,63 +156,49 @@ class DeepReflectionResponse(BaseModel):
         """Handle bare list from LLM — wraps [{"topic":...}] as {"belief_updates": [...]}."""
         if isinstance(data, list):
             return {"belief_updates": data}
-        if isinstance(data, dict):
-            data.pop("followup_queries", None)
-            if isinstance(data.get("snapshot_changed"), str):
-                data["snapshot_changed"] = str(data["snapshot_changed"]).lower() in ("true", "yes", "1")
-        return data
-
-
-def _merge_reflections(
-    a: DeepReflectionResponse, b: DeepReflectionResponse
-) -> DeepReflectionResponse:
-    """Merge two reflections: union belief patches, prefer more conservative confidence."""
-    seen_updates: dict[str, BeliefPatch] = {}
-    for patch in [*a.belief_updates, *b.belief_updates]:
-        if not patch.topic:
-            continue
-        existing = seen_updates.get(patch.topic)
-        if existing is None:
-            seen_updates[patch.topic] = patch
-        else:
-            seen_updates[patch.topic] = BeliefPatch(
-                topic=patch.topic,
-                valence=(existing.valence + patch.valence) / 2,
-                confidence=min(existing.confidence, patch.confidence),
-                belief_text=existing.belief_text or patch.belief_text,
-                reasoning=f"{existing.reasoning} | {patch.reasoning}"[:400],
-            )
-    seen_new: dict[str, BeliefPatch] = {}
-    for patch in [*a.new_beliefs, *b.new_beliefs]:
-        if patch.topic and patch.topic not in seen_updates:
-            seen_new.setdefault(patch.topic, patch)
-    return DeepReflectionResponse(
-        belief_updates=list(seen_updates.values()),
-        new_beliefs=list(seen_new.values()),
-        snapshot_revision=a.snapshot_revision or b.snapshot_revision,
-        snapshot_changed=a.snapshot_changed or b.snapshot_changed,
-    )
+        if not isinstance(data, dict):
+            return data
+        result = dict(data)
+        if isinstance(result.get("snapshot_changed"), str):
+            result["snapshot_changed"] = str(result["snapshot_changed"]).lower() in ("true", "yes", "1")
+        if isinstance(result.get("belief_updates"), list):
+            result["belief_updates"] = result["belief_updates"][:20]
+        if isinstance(result.get("new_beliefs"), list):
+            result["new_beliefs"] = result["new_beliefs"][:10]
+        return result
 
 
 def _enrich_web(queries: list[str], existing: str, ctx: ToolContext) -> str:
-    """Run web searches for reflection enrichment and merge into existing context."""
+    """Run lightweight web research for reflection enrichment.
+
+    Uses a glance-depth research session (1 page) through the same pipeline
+    as all other web access — symmetric architecture, no separate endpoints.
+    """
     if not queries or not ctx.web_client:
         return existing
 
     try:
-        capped = queries[: config.settings.reflection_web_queries]
-        responses = ctx.run_async(ctx.web_client.multi_search(capped, max_results=5))
-        lines: list[str] = []
-        seen: set[str] = set()
-        for resp in responses:
-            for r in resp.results:
-                if r.url not in seen:
-                    seen.add(r.url)
-                    content = r.markdown or r.description
-                    lines.append(f"[{r.title}] ({r.url})\n{content[:300]}")
-        text = "\n\n".join(lines[:8])
+        goal = "; ".join(queries[: config.settings.reflection_web_queries])
+
+        async def _research():
+            client = ctx.web_client
+            assert client is not None
+            sess = await client.start_research(goal, depth="glance")
+            async for progress in client.stream_research(sess.session_id):
+                if progress.event in ("complete", "error"):
+                    break
+            return await client.get_research_result(sess.session_id)
+
+        result = ctx.run_async(_research())
+        if not result.facts:
+            return existing
+
+        lines = [
+            f"[{f.source_url}] {f.claim} (confidence: {f.confidence:.1f})" for f in result.facts[:8]
+        ]
+        text = "\n".join(lines)
         if text:
-            log.info("web_enrichment", sources=len(seen), queries=len(capped))
+            log.info("web_enrichment", facts=len(result.facts), pages=result.pages_scraped)
             return f"{existing}\n\n{text}" if existing else text
     except Exception:
         log.warning("web_enrichment_failed", exc_info=True)
@@ -116,7 +208,7 @@ def _enrich_web(queries: list[str], existing: str, ctx: ToolContext) -> str:
 def apply_reflection(
     reflection: DeepReflectionResponse, episode_uid: str, ctx: ToolContext
 ) -> None:
-    """Write belief updates and snapshot revision to graph, then run forgetting."""
+    """Write belief updates and snapshot revision to graph."""
     log.debug(
         "apply_reflection",
         updates=len(reflection.belief_updates),
@@ -124,14 +216,14 @@ def apply_reflection(
         snapshot_changed=reflection.snapshot_changed,
     )
     all_updates = [
-        *((b, f"reflection:{episode_uid[:8]}") for b in reflection.belief_updates),
-        *((b, f"new_belief:{episode_uid[:8]}") for b in reflection.new_beliefs),
+        *((b, f"reflection:{episode_uid[:12]}") for b in reflection.belief_updates),
+        *((b, f"new_belief:{episode_uid[:12]}") for b in reflection.new_beliefs),
     ]
     errors: list[str] = []
     for patch, provenance in all_updates:
         if not patch.topic:
             continue
-        topic = re.sub(r"[^a-z0-9]+", "_", patch.topic.lower()).strip("_")
+        topic = normalize_topic(patch.topic)
         try:
             ctx.run_async(
                 ctx.graph.upsert_belief(
@@ -146,93 +238,21 @@ def apply_reflection(
                 "belief_upserted",
                 action=provenance.split(":")[0],
                 topic=topic,
-                valence=f"{patch.valence:+.2f}",
-                confidence=f"{patch.confidence:.2f}",
+                valence=round(patch.valence, 2),
+                confidence=round(patch.confidence, 2),
                 reason=patch.reasoning[:100],
             )
         except Exception:
             log.error("belief_upsert_failed", topic=topic, exc_info=True)
             errors.append(topic)
 
+    if errors:
+        raise BeliefUpdateError(f"Belief upsert failed for: {errors}")
+
     if reflection.snapshot_changed and reflection.snapshot_revision:
         text = reflection.snapshot_revision[:2000]
         ctx.run_async(ctx.graph.upsert_personality_snapshot(text))
         log.info("snapshot_updated", chars=len(text))
-
-    if errors:
-        raise BeliefUpdateError(f"Belief upsert failed for: {errors}")
-
-    run_forgetting(ctx)
-
-
-def run_forgetting(ctx: ToolContext) -> None:
-    """Evaluate and forget low-value memories."""
-    try:
-        candidates = ctx.run_async(
-            ctx.graph.get_forgetting_candidates(limit=config.settings.forgetting_candidate_limit)
-        )
-        if candidates:
-            snapshot = ctx.run_async(ctx.graph.get_personality_snapshot())
-            ctx.run_async(
-                assess_and_forget(
-                    candidates,
-                    ctx.graph,
-                    ctx.dual_store,
-                    snapshot_excerpt=snapshot.text[:500],
-                )
-            )
-    except Exception:
-        log.warning("forgetting_cycle_failed", exc_info=True)
-
-
-class _BeliefRelevance(BaseModel):
-    """Single belief's relevance assessment."""
-
-    index: int = 0
-    relevance: float = 0.0
-
-
-class _BeliefRanking(BaseModel):
-    """LLM-judged relevance ranking of beliefs to evidence."""
-
-    ranked: list[_BeliefRelevance] = Field(default_factory=list)
-
-
-def _select_relevant_beliefs(
-    topic: str, evidence: str, all_beliefs: list[BeliefNode]
-) -> list[BeliefNode]:
-    """LLM-based belief reranker — returns beliefs the LLM deems relevant.
-
-    The LLM scores all beliefs for relevance. We trust its ranking:
-    any belief the LLM includes (relevance > 0) is used, sorted by score.
-    """
-    if not all_beliefs:
-        return []
-
-    capped_beliefs = all_beliefs[:50]
-    numbered = "\n".join(
-        f"{i + 1}. [{b.topic}] {b.belief_text[:80]}" for i, b in enumerate(capped_beliefs)
-    )
-    prompt = BELIEF_RELEVANCE_PROMPT.format(
-        topic=topic,
-        evidence=evidence[:500],
-        numbered_beliefs=numbered,
-    )
-    result = llm_call(
-        prompt=prompt,
-        response_model=_BeliefRanking,
-        fallback=_BeliefRanking(),
-        model=config.settings.structured_model,
-    )
-    if result.success and result.value.ranked:
-        ranked = sorted(result.value.ranked, key=lambda r: r.relevance, reverse=True)
-        selected = [all_beliefs[r.index - 1] for r in ranked if 0 < r.index <= len(capped_beliefs)][
-            : config.settings.belief_prompt_window
-        ]
-        if selected:
-            return selected
-
-    return all_beliefs[: config.settings.belief_prompt_window]
 
 
 def execute_reflect_inner(
@@ -245,13 +265,12 @@ def execute_reflect_inner(
 ) -> str:
     """Core reflection logic — called by integrate_knowledge, not directly as a tool.
 
-    web_context: pre-fetched web context (e.g. from prior web_search in the agentic loop).
+    web_context: pre-fetched web context (e.g. from prior web_research in the agentic loop).
     When provided, skips redundant web enrichment searches.
     episode_uid: provenance anchor for belief updates.
 
     Returns a human-readable summary of belief changes, or empty string on failure.
     """
-    evidence = evidence[:800]
     if not topic or not evidence:
         return ""
     log.info("reflect", topic=topic[:60], evidence_chars=len(evidence))
@@ -259,12 +278,18 @@ def execute_reflect_inner(
 
     identity = ctx.identity or get_request_identity()
     if identity is None:
-        log.warning("reflect: identity not loaded")
+        log.warning("reflect_identity_not_loaded")
         return ""
 
-    belief_nodes = _select_relevant_beliefs(topic, evidence, list(identity.all_beliefs))
+    # Rank beliefs via RRF (embedding similarity + graph signals) — no LLM
+    belief_nodes = rank_beliefs_algorithmically(
+        evidence=evidence,
+        all_beliefs=list(identity.all_beliefs),
+        ctx=ctx,
+        max_results=config.settings.belief_prompt_window,
+    )
     beliefs_text = format_beliefs_for_prompt_from_nodes(belief_nodes)
-    log.info("reflect_beliefs_selected", selected=len(belief_nodes), total=len(identity.all_beliefs))
+    log.info("reflect_beliefs_ranked", count=len(belief_nodes), total=len(identity.all_beliefs))
 
     if web_context:
         reflection_web = web_context
@@ -272,38 +297,32 @@ def execute_reflect_inner(
     else:
         topic_phrase = topic.replace("_", " ")
         reflection_web = _enrich_web([topic_phrase], "", ctx)
-    web_section = (
-        REFLECTION_WEB_SECTION.format(web_content=reflection_web) if reflection_web else ""
-    )
+    web_section = f"{WEB_EVIDENCE_HEADER}{reflection_web}" if reflection_web else ""
 
-    deep_prompt = REFLECTION_DEEP_PROMPT.format(
-        snapshot=identity.snapshot_text[:2000],
-        beliefs=beliefs_text[:3000],
-        user_message=evidence,
-        web_context_section=web_section[:2000],
-    )
-    deep_result = consensus_call(
-        prompt=deep_prompt,
+    deep_result = llm_call(
+        instructions=format_prompt(
+            REFLECTION_DEEP_PROMPT,
+            snapshot=identity.snapshot_text,
+            beliefs=beliefs_text,
+            user_message=evidence,
+            web_context_section=web_section,
+        ),
         response_model=DeepReflectionResponse,
         fallback=DeepReflectionResponse(),
-        models=(config.settings.reasoning_model, config.settings.structured_model),
-        merge=_merge_reflections,
+        model=config.settings.reasoning_model,
     )
     if not deep_result.success:
         log.warning("reflect_failed", error=deep_result.error)
         return "Reflection attempted but failed."
 
     reflection = deep_result.value
-    if not episode_uid:
-        from shared.types import new_id
-        episode_uid = new_id()
-    apply_reflection(reflection, episode_uid=episode_uid, ctx=ctx)
+    apply_reflection(reflection, episode_uid=episode_uid or "inline_reflection", ctx=ctx)
     elapsed = time.perf_counter() - t0
     log.info(
         "reflect_done",
         updates=len(reflection.belief_updates),
         new_beliefs=len(reflection.new_beliefs),
-        elapsed=f"{elapsed:.1f}s",
+        elapsed_s=round(elapsed, 1),
     )
     parts: list[str] = []
     if reflection.belief_updates:
@@ -312,6 +331,6 @@ def execute_reflect_inner(
         parts.append(f"Formed {len(reflection.new_beliefs)} new beliefs.")
     if reflection.snapshot_changed:
         parts.append("Personality snapshot updated.")
-    if not reflection.belief_updates and not reflection.new_beliefs:
+    if not parts:
         parts.append("No belief changes needed.")
     return " ".join(parts)

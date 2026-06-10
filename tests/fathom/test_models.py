@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from fathom.models import Checklist, Fact, PageAnalysisResult, QueryGeneration, URLScoring
+from fathom.models import Checklist, Fact, PageAnalysisResult, QueryGeneration
 
 
 class TestStructuralCoercion:
@@ -29,15 +29,10 @@ class TestStructuralCoercion:
         f = Fact.model_validate({"claim": "test"})
         assert len(f.id) == 36
 
-    def test_url_scoring_coerces_string_scores(self):
-        s = URLScoring.model_validate({"scores": ["0.8", "0.5"], "concentration": 5})
-        assert s.scores == [0.8, 0.5]
-
-    def test_url_scoring_clamps_concentration(self):
-        s = URLScoring.model_validate({"scores": [0.5], "concentration": 15})
-        assert s.concentration == 10.0
-
-    def test_page_analysis_infers_worth_from_facts(self):
+    def test_page_analysis_parses_facts(self):
         p = PageAnalysisResult.model_validate({"facts": [{"claim": "test"}]})
-        assert p.worth_extracting is True
+        assert len(p.facts) == 1
+
+    def test_page_analysis_from_bare_list(self):
+        p = PageAnalysisResult.model_validate([{"claim": "test"}])
         assert len(p.facts) == 1

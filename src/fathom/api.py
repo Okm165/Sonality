@@ -1,9 +1,8 @@
 """FastAPI routes + SSE streaming.
 
-Three service tiers:
-  /search, /extract  — lightweight, synchronous-style endpoints for sonality's web tools
-  /research          — full autonomous research session with SSE progress stream
-  /health            — liveness probe
+Endpoints:
+  /research — full autonomous research session with SSE progress stream
+  /health   — liveness probe
 """
 
 from __future__ import annotations
@@ -16,106 +15,132 @@ from contextlib import asynccontextmanager
 import structlog
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from qdrant_client import AsyncQdrantClient
 
-from . import browser, db, search, session
-from .extract import extract_content
+from shared.embedder import probe_embedding_dims
+from shared.server import (
+    HealthResponse,
+    RequestIDMiddleware,
+    check_health_dependencies,
+    http_dependency_status,
+)
+
+from . import browser, config, db, session
 from .models import (
+    FactWithSource,
     ResearchRequest,
     ResearchResponse,
     SessionStatus,
-    WebExtractRequest,
-    WebExtractResponse,
-    WebSearchRequest,
-    WebSearchResponse,
-    WebSearchResult,
 )
+from .source_memory import init_source_collection
 
-log = structlog.get_logger()
+log = structlog.get_logger(__name__)
+
+_qdrant_client: AsyncQdrantClient | None = None
+
+
+async def get_qdrant() -> AsyncQdrantClient:
+    """Get or create Qdrant client with probed embedding dimensions."""
+    global _qdrant_client
+    if _qdrant_client is None:
+        dims = min(
+            config.settings.embedding_dimensions,
+            await asyncio.to_thread(probe_embedding_dims, config.settings.embedding_url),
+        )
+        _qdrant_client = AsyncQdrantClient(url=config.settings.qdrant_url)
+        await init_source_collection(_qdrant_client, dims=dims)
+        log.info("qdrant_ready", url=config.settings.qdrant_url, dims=dims)
+    return _qdrant_client
+
+
+async def close_qdrant() -> None:
+    """Close Qdrant client."""
+    global _qdrant_client
+    if _qdrant_client is not None:
+        await _qdrant_client.close()
+        _qdrant_client = None
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
-    """Startup: init Neo4j driver + schema + browser. Shutdown: close both."""
-    await db.get_driver()
+    """Startup: init Neo4j + Qdrant + browser + cleanup stale sessions. Shutdown: close all."""
+    driver = await db.get_driver()
+    await get_qdrant()
     await browser.launch()
+    cleaned = await db.cleanup_stale_sessions(driver, max_age_s=config.settings.session_timeout)
+    if cleaned:
+        log.info("stale_sessions_cleaned", count=cleaned)
     yield
     await browser.close()
+    await close_qdrant()
     await db.close_driver()
 
 
 app = FastAPI(title="Fathom", description="Autonomous web research agent", lifespan=lifespan)
+app.add_middleware(RequestIDMiddleware)
 
-_tasks: dict[str, asyncio.Task[object]] = {}
-
-
-# ---------------------------------------------------------------------------
-# Lightweight search / extract — used by sonality's web tools
-# ---------------------------------------------------------------------------
-
-
-@app.post("/search", response_model=WebSearchResponse)
-async def web_search(req: WebSearchRequest) -> WebSearchResponse:
-    """Quick DuckDuckGo search returning URLs, titles, and snippets."""
-    links = await search.query(req.query, max_results=req.max_results)
-    results: list[WebSearchResult] = []
-    for link in links:
-        results.append(
-            WebSearchResult(
-                url=link.url,
-                title=link.anchor_text,
-                snippet=link.context,
-            )
-        )
-    log.info("web_search", query=req.query, results=len(results))
-    return WebSearchResponse(results=results, query=req.query)
-
-
-@app.post("/extract", response_model=WebExtractResponse)
-async def web_extract(req: WebExtractRequest) -> WebExtractResponse:
-    """Fetch a single URL via Playwright, extract clean text via trafilatura."""
-    try:
-        html = await browser.fetch(req.url)
-        page = extract_content(html, req.url)
-    except Exception as exc:
-        log.error("extract_failed", url=req.url, exc_info=True)
-        raise HTTPException(status_code=502, detail=f"Failed to extract: {exc}") from exc
-    content = page.markdown[:8000] if page.has_content else ""
-    log.info("web_extract", url=req.url, chars=len(content))
-    return WebExtractResponse(url=req.url, title=page.title, content=content)
-
-
-# ---------------------------------------------------------------------------
-# Full research sessions
-# ---------------------------------------------------------------------------
+_session_queues: dict[str, asyncio.Queue[dict[str, object] | None]] = {}
+_MAX_CONCURRENT_SESSIONS = 2
 
 
 @app.post("/research", response_model=ResearchResponse)
 async def start_research(req: ResearchRequest) -> ResearchResponse:
     """Start a new research session. Returns immediately; research runs in background."""
+    if len(_session_queues) >= _MAX_CONCURRENT_SESSIONS:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Max {_MAX_CONCURRENT_SESSIONS} concurrent sessions; try again later",
+        )
     driver = await db.get_driver()
+    qdrant = await get_qdrant()
     session_id = await db.create_session(driver, req.goal)
+    event_queue: asyncio.Queue[dict[str, object] | None] = asyncio.Queue()
+    _session_queues[session_id] = event_queue
 
     async def _guarded_run() -> None:
         try:
             await session.run(
-                driver, session_id, req.goal, req.seeds,
-                n=req.n, max_pages=req.max_pages, depth=req.depth,
+                driver,
+                qdrant,
+                session_id,
+                req.goal,
+                req.seeds,
+                n=req.n,
+                max_pages=req.max_pages,
+                depth=req.depth,
+                event_queue=event_queue,
             )
         except Exception:
-            log.error("session_failed", session_id=session_id, exc_info=True)
+            log.error("session_failed", session_id=session_id[:12], exc_info=True)
+            event_queue.put_nowait({"event": "error", "status": "failed"})
             for attempt in range(3):
                 try:
                     await db.update_session(driver, session_id, status="failed")
                     break
                 except Exception:
-                    log.error("session_status_update_failed", session_id=session_id, attempt=attempt + 1)
+                    log.error(
+                        "session_status_update_failed",
+                        session_id=session_id[:12],
+                        attempt=attempt + 1,
+                    )
                     await asyncio.sleep(1.0)
+        finally:
+            event_queue.put_nowait(None)
 
-    log.info("research_accepted", session_id=session_id, depth=req.depth, max_pages=req.max_pages, seeds=len(req.seeds), goal_len=len(req.goal))
+    log.info(
+        "research_accepted",
+        session_id=session_id[:12],
+        depth=req.depth,
+        max_pages=req.max_pages,
+        seeds=len(req.seeds),
+        goal_len=len(req.goal),
+    )
     task = asyncio.create_task(_guarded_run())
-    task.add_done_callback(lambda _t: _tasks.pop(session_id, None))
-    _tasks[session_id] = task
+
+    def _cleanup(_t: object) -> None:
+        _session_queues.pop(session_id, None)
+
+    task.add_done_callback(_cleanup)
 
     return ResearchResponse(id=session_id, status="active")
 
@@ -131,82 +156,90 @@ async def get_research(session_id: str) -> SessionStatus:
     checklist = await db.get_checklist(driver, session_id)
     fact_rows = await db.get_facts(driver, session_id)
 
+    facts = [
+        FactWithSource(
+            claim=r["claim"],
+            confidence=r["confidence"],
+            source_quality=r.get("source_quality") or 0.5,
+            source_url=r["source_url"],
+            topic=r.get("topic", ""),
+        )
+        for r in fact_rows
+    ]
     return SessionStatus(
         id=row["id"],
         status=row["status"],
         goal=row["goal"],
-        document=row["document"],
         pages_scraped=row["pages_scraped"],
-        facts_gathered=len(fact_rows),
+        facts=facts,
         checklist=checklist,
     )
 
 
 @app.get("/research/{session_id}/stream")
 async def stream_research(session_id: str) -> StreamingResponse:
-    """SSE stream of research progress events.
+    """SSE stream of rich research progress events.
 
-    Events emitted:
-      progress — pages scraped, facts gathered, checklist state
-      complete — final document length; stream ends
+    Events are pushed directly from the session loop via an asyncio.Queue,
+    giving real-time visibility into decomposition, fetching, analysis, and facts.
     """
-    driver = await db.get_driver()
-    row = await db.get_session(driver, session_id)
-    if row is None:
-        raise HTTPException(status_code=404, detail="Session not found")
+    queue = _session_queues.get(session_id)
+    if queue is None:
+        driver = await db.get_driver()
+        row = await db.get_session(driver, session_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Session not found")
+        raise HTTPException(
+            status_code=410,
+            detail="Stream no longer available (session already finished or queue expired)",
+        )
 
     async def event_stream():
-        last_pages = 0
         while True:
-            current = await db.get_session(driver, session_id)
-            if current is None:
+            try:
+                item = await asyncio.wait_for(queue.get(), timeout=config.settings.session_timeout)
+            except TimeoutError:
+                yield f"event: error\ndata: {json.dumps({'status': 'stream_timeout'})}\n\n"
                 break
-
-            pages = current["pages_scraped"]
-            status = current["status"]
-            if pages != last_pages:
-                last_pages = pages
-                facts = await db.get_facts(driver, session_id)
-                checklist = await db.get_checklist(driver, session_id)
-                answered = sum(1 for i in checklist if i.answered)
-                data = json.dumps(
-                    {
-                        "pages": pages,
-                        "facts": len(facts),
-                        "checklist_answered": answered,
-                        "checklist_total": len(checklist),
-                        "status": status,
-                    }
-                )
-                yield f"event: progress\ndata: {data}\n\n"
-
-            if status in ("completed", "failed"):
-                event_name = "complete" if status == "completed" else "error"
-                data = json.dumps(
-                    {
-                        "status": status,
-                        "document_length": len(current["document"]),
-                        "pages_scraped": pages,
-                    }
-                )
-                yield f"event: {event_name}\ndata: {data}\n\n"
+            if item is None:
                 break
-
-            await asyncio.sleep(2)
+            event_type = item.get("event", "progress")
+            yield f"event: {event_type}\ndata: {json.dumps(item)}\n\n"
+            if event_type in ("complete", "error"):
+                break
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
-class _HealthResponse(BaseModel):
-    status: str = "ok"
-    version: str = ""
-
-
 @app.get("/health")
-async def health() -> _HealthResponse:
+async def health() -> HealthResponse:
     from . import __version__
 
-    return _HealthResponse(version=__version__)
+    dependencies: dict[str, str] = {}
+    try:
+        await db.check()
+        dependencies["neo4j"] = "ok"
+    except Exception as exc:
+        dependencies["neo4j"] = f"error: {exc}"
+
+    try:
+        qdrant = await get_qdrant()
+        await qdrant.get_collections()
+        dependencies["qdrant"] = "ok"
+    except Exception as exc:
+        dependencies["qdrant"] = f"error: {exc}"
+
+    try:
+        await browser.check()
+        dependencies["browserless"] = "ok"
+    except Exception as exc:
+        dependencies["browserless"] = f"error: {exc}"
+
+    dependencies["llm"] = await asyncio.to_thread(
+        http_dependency_status, f"{config.settings.base_url.rstrip('/')}/models"
+    )
+    check_health_dependencies(dependencies)
+    return HealthResponse(version=__version__, dependencies=dependencies)
 
 
 def serve() -> None:

@@ -9,11 +9,12 @@ from collections.abc import Callable
 
 import structlog
 
+from shared.types import ChatRole
+
 from . import __version__, config
 from .agent import SonalityAgent
-from .schema import ChatRole
 
-log = structlog.get_logger()
+log = structlog.get_logger(__name__)
 
 BANNER = """\
 ============================================================
@@ -65,7 +66,9 @@ COMMAND_HANDLERS: dict[str, CommandHandler] = {
 def main() -> None:
     """Run the interactive Sonality REPL."""
     parser = argparse.ArgumentParser(prog="sonality", description="Interactive Sonality REPL")
-    parser.add_argument("--model", default=config.settings.agent_model, help="Agentic loop model ID.")
+    parser.add_argument(
+        "--model", default=config.settings.agent_model, help="Agentic loop model ID."
+    )
     args = parser.parse_args()
     missing = config.missing_live_api_config()
     if missing:

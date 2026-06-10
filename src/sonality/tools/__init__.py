@@ -1,6 +1,6 @@
 """Unified tool system — symmetric schema + executor for every agent tool.
 
-Architecture: each tool module (memory, web, synthesize) exports two parallel
+Architecture: each tool module (memory, web) exports two parallel
 registries: DEFINITIONS (OpenAI-compatible function schemas for the LLM) and
 EXECUTORS (name → callable). This module lazily merges them at first use.
 
@@ -19,11 +19,13 @@ import structlog
 if TYPE_CHECKING:
     from qdrant_client import AsyncQdrantClient
 
-    from ..memory import DualEpisodeStore, Embedder, MemoryGraph
+    from shared.embedder import Embedder
+
+    from ..memory import DualEpisodeStore, MemoryGraph
     from ..request_identity import IdentityBundle
     from ..web_client import ResearchClient
 
-log = structlog.get_logger()
+log = structlog.get_logger(__name__)
 
 _T = TypeVar("_T")
 
@@ -32,14 +34,20 @@ class RunAsync(Protocol):
     def __call__(self, coro: Coroutine[object, object, _T], /) -> _T: ...
 
 
-_ToolExecutor = Callable[["dict[str, object]", "ToolContext"], str]
+ProgressCallback = Callable[[str], None]
 
 
-@dataclass(frozen=True)
+def _noop_progress(_detail: str) -> None:
+    pass
+
+
+@dataclass(frozen=True, slots=True)
 class ToolContext:
     """Runtime dependencies for tool execution, created per dispatch call.
 
     The agent populates this from its own state. Tools never import from agent.
+    ``research_transcript`` provides a read-only view of the agent's current
+    memory state as a formatted string.
     """
 
     run_async: RunAsync
@@ -49,33 +57,16 @@ class ToolContext:
     qdrant: AsyncQdrantClient
     embedder: Embedder
     identity: IdentityBundle | None
-    llm_messages: list[dict[str, object]]
     retrieve: Callable[[str], list[str]]
-
-    def build_research_transcript(
-        self, *, tool_tail: int = 6, assistant_tail: int = 3, char_limit: int = 1200
-    ) -> str:
-        """Collect most recent tool results and assistant reasoning into a transcript."""
-        from ..schema import ChatRole
-
-        tool_parts: list[str] = []
-        asst_parts: list[str] = []
-        asst_remaining = assistant_tail
-        for m in reversed(self.llm_messages[-20:]):
-            role = m.get("role")
-            if role == ChatRole.TOOL and len(tool_parts) < tool_tail:
-                tool_parts.append(str(m.get("content", ""))[:char_limit])
-            elif role == ChatRole.ASSISTANT and asst_remaining > 0:
-                content = str(m.get("content", ""))
-                if content:
-                    asst_parts.append(f"[Your reasoning]: {content[:600]}")
-                    asst_remaining -= 1
-        tool_parts.reverse()
-        asst_parts.reverse()
-        return "\n---\n".join(tool_parts + asst_parts)
+    research_transcript: Callable[[], str] = lambda: ""
+    short_term_memory: str = ""
+    progress: ProgressCallback = _noop_progress
 
 
-_DISPATCH: dict[str, _ToolExecutor] = {}
+ToolLabeler = Callable[[dict[str, object]], str]
+
+_DISPATCH: dict[str, Callable[[dict[str, object], ToolContext], str]] = {}
+_LABELS: dict[str, ToolLabeler] = {}
 _DEFINITIONS: list[dict[str, object]] = []
 _LOADED = False
 
@@ -84,11 +75,12 @@ def _load() -> None:
     global _LOADED
     if _LOADED:
         return
-    from . import memory, synthesize, web
+    from . import memory, web
 
-    for mod in (memory, web, synthesize):
+    for mod in (memory, web):
         _DEFINITIONS.extend(mod.DEFINITIONS)
         _DISPATCH.update(mod.EXECUTORS)
+        _LABELS.update(mod.LABELS)
     _LOADED = True
 
 
@@ -96,6 +88,15 @@ def get_definitions() -> list[dict[str, object]]:
     """All tool schemas for the LLM."""
     _load()
     return list(_DEFINITIONS)
+
+
+def tool_label(name: str, args: dict[str, object]) -> str:
+    """Extract a concise display label from tool args (e.g. the query or goal)."""
+    _load()
+    labeler = _LABELS.get(name)
+    if labeler is None:
+        return name
+    return labeler(args)[:120]
 
 
 def dispatch_tool(name: str, args: dict[str, object], ctx: ToolContext) -> str:
